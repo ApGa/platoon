@@ -1,0 +1,11 @@
+# test-mcp-direct: solves a task whose MCP server mcp-server offers get_secret (Harbor's hello-mcp, and the stack
+# fixtures mcp-http and mcp-sse) the way Harbor's agents reach a task's servers: from the task's sandbox, at the URL
+# that {task_mcp_servers} gives, over the server's own transport. It calls no model.
+name = "test-mcp-direct"
+version = "1"
+timeout_s = 120
+
+[launch]
+argv = ["python3", "{state_dir}/mcp_direct.py"]
+env = { TASK_MCP_SERVERS = "{task_mcp_servers}" }
+assets = { "mcp_direct.py" = "mcp_direct.py" }

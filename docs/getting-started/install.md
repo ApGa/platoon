@@ -34,7 +34,7 @@ Pick the extras by what you run ([Extras](#extras) says what each installs):
 
 Platoon's version is below 1.0, so a minor release (0.3.0) may change the Python API, the config format or the
 command line, while a patch release (0.2.1) only fixes bugs. To stay on one minor release, require a range such as
-`platoon[tinker,ors]>=0.3,<0.4`. [CHANGELOG.md](../../CHANGELOG.md) has the release notes.
+`platoon[tinker,ors]>=0.4,<0.5`. [CHANGELOG.md](../../CHANGELOG.md) has the release notes.
 
 Number search, the environment of [Your first run](first-run.md), ships in the package, and the TextCraft
 environments are a package of their own ([The TextCraft extension](#the-textcraft-extension)). The examples, the
@@ -47,7 +47,7 @@ tutorials' files and the recipes are in the repository: to follow the tutorials,
 |---|---|---|
 | `tinker` | The Tinker SDK (`tinker==0.16.1`) and `tinker-cookbook` 0.3. | `platoon train`, `platoon eval` and `platoon rollout`: anything that samples or trains a model. |
 | `ors` | The OpenReward SDK (`openreward>=0.1.125`). | Environments written as OpenReward (ORS) classes: `python://` and `ors+http://` services, including number search, the TextCraft extension and `pt.gym.as_environment`. |
-| `hpc` | `hpc-sandbox` 0.4 ([below](#the-hpc-extra)). | The `singularity` and `enroot` task sandboxes, for Harbor tasks on clusters without Docker. |
+| `hpc` | `hpc-sandbox` 0.5, from 0.5.1 ([below](#the-hpc-extra)). | The `singularity` and `enroot` task sandboxes, for Harbor tasks on clusters without Docker. |
 
 Install `tinker` and `ors` for everything in these guides: the trainer and the model gateway import the Tinker
 SDK, and the example environments are ORS classes. A project that trains only on Harbor datasets needs no `ors`, and
@@ -55,8 +55,9 @@ SDK, and the example environments are ORS classes. A project that trains only on
 
 ### The hpc extra
 
-The `hpc` extra installs [hpc-sandbox](https://pypi.org/project/hpc-sandbox/) 0.4 from PyPI, which runs the
-`singularity` and `enroot` sandboxes as rootless containers (the runtimes are [system tools](#optional-system-tools)):
+The `hpc` extra installs [hpc-sandbox](https://pypi.org/project/hpc-sandbox/) 0.5 from PyPI, 0.5.1 or a later patch
+release, which runs the `singularity` and `enroot` sandboxes as rootless containers (the runtimes are
+[system tools](#optional-system-tools)), and multi-container Harbor tasks as pods:
 
 ```bash
 pip install 'platoon[tinker,ors,hpc]'
@@ -74,17 +75,17 @@ override-dependencies = ["hpc-sandbox @ git+https://github.com/ApGa/hpc-sandbox.
 ```
 
 With pip, name the commit next to the extra (`'hpc-sandbox @ git+https://github.com/ApGa/hpc-sandbox.git@<commit>'`);
-pip takes it only when its version is one the extra accepts (0.4).
+pip takes it only when its version is one the extra accepts (0.5.1 or a later 0.5).
 
 ## Depend on platoon from a project
 
 A project that runs platoon, such as a repository of configs that train on a Harbor dataset, needs no Python package
 of its own: it names platoon as a dependency, with the extras its runs need and the releases it was tested with. In a
-uv project, `uv add 'platoon[tinker,hpc]>=0.3,<0.4'` writes the line:
+uv project, `uv add 'platoon[tinker,hpc]>=0.4,<0.5'` writes the line:
 
 ```toml
 [project]
-dependencies = ["platoon[tinker,hpc]>=0.3,<0.4"]
+dependencies = ["platoon[tinker,hpc]>=0.4,<0.5"]
 ```
 
 When only some of the project's users train, put platoon in a dependency group instead (`uv add --group train ...`),
@@ -92,7 +93,7 @@ so that the others install neither it nor the Tinker SDK and torch that its `tin
 
 ```toml
 [dependency-groups]
-train = ["platoon[tinker,hpc]>=0.3,<0.4"]
+train = ["platoon[tinker,hpc]>=0.4,<0.5"]
 ```
 
 `uv sync --group train` installs the group, and a plain `uv sync` uninstalls it again. Run jobs with the
@@ -144,7 +145,7 @@ platoon:
 pip install 'platoon-textcraft[platoon]'
 ```
 
-Its `platoon` extra requires `platoon[ors]` within one minor release (`>=0.3,<0.4`). In a checkout, install it from
+Its `platoon` extra requires `platoon[ors]` within one minor release (`>=0.4,<0.5`). In a checkout, install it from
 the workspace instead:
 
 ```bash
@@ -202,13 +203,13 @@ harnesses, with the version of platoon that provides them:
 
 ```text
 harness                 kind      distribution   source
-mini-swe-agent@2.4.6    spec      platoon 0.3.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-openhands@1.54.0.post2  spec      platoon 0.3.0  platoon/harness/builtin/specs/openhands.toml
-platoon-bash@1          spec      platoon 0.3.0  platoon/harness/builtin/specs/platoon-bash.toml
-platoon-codeact@1       function  platoon 0.3.0  platoon.harness.builtin.codeact.harness:codeact
-platoon-noop@1          function  platoon 0.3.0  platoon.harness.builtin.oracle:noop
-platoon-oracle@1        function  platoon 0.3.0  platoon.harness.builtin.oracle:oracle
-platoon-react@1         function  platoon 0.3.0  platoon.harness.builtin.react:react
+mini-swe-agent@2.4.6    spec      platoon 0.4.0  platoon/harness/builtin/specs/mini-swe-agent.toml
+openhands@1.54.0.post2  spec      platoon 0.4.0  platoon/harness/builtin/specs/openhands.toml
+platoon-bash@1          spec      platoon 0.4.0  platoon/harness/builtin/specs/platoon-bash.toml
+platoon-codeact@1       function  platoon 0.4.0  platoon.harness.builtin.codeact.harness:codeact
+platoon-noop@1          function  platoon 0.4.0  platoon.harness.builtin.oracle:noop
+platoon-oracle@1        function  platoon 0.4.0  platoon.harness.builtin.oracle:oracle
+platoon-react@1         function  platoon 0.4.0  platoon.harness.builtin.react:react
 ```
 
 ## Install for development

@@ -9,6 +9,7 @@ import signal
 import time
 import uuid
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from harness_fakes import (
@@ -100,6 +101,26 @@ async def test_platoon_bash_in_task_sandbox_acts_on_task_state(tmp_path):
     assert tool_message["role"] == "tool" and tool_message["tool_call_id"] == "call-1"
     assert tool_message["content"].startswith("exit code 0") and str(session.sandbox.workdir) in tool_message["content"]
     assert "wrote it" in Path(result.logs_path).read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("placement", ["task_sandbox", "local"])
+async def test_the_tasks_own_mcp_servers_render_for_a_harness_in_its_sandbox(tmp_path, placement):
+    """``{task_mcp_servers}`` is the session's list, as JSON, for a harness in the task's sandbox, and empty for one
+    that runs locally, which reaches the task's servers through the env's tools instead."""
+
+    session = make_session(tmp_path, sandbox=True)
+    servers = [{"name": "mcp-server", "transport": "sse", "url": "http://mcp-server:8000/sse"}]
+    setattr(session, "task_mcp_servers", servers)  # an optional attribute of a session
+    out = tmp_path / "servers.json"
+    launch = {"argv": ["sh", "-c", f'printf %s "$SERVERS" > {out}'], "env": {"SERVERS": "{task_mcp_servers}"}}
+    spec = parse_spec({"name": "shell", "version": "1", "launch": launch})
+    result = await make_runner(tmp_path).run(
+        spec, session=cast(Any, session), agent=agent(), base_url="http://127.0.0.1:9", placement=placement
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(out.read_text()) == (servers if placement == "task_sandbox" else [])
 
 
 @pytest.mark.asyncio

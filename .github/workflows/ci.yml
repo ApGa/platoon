@@ -94,3 +94,33 @@ jobs:
 
       - name: Check the recipes
         run: uv run --no-sync pytest recipes/ -v
+
+  # Harbor stacks on Docker, end to end (tests/integration/test_harbor_stacks_docker.py), which needs a runner with
+  # Docker and its compose plugin, and the network. The module fails rather than skips where Docker cannot run
+  # stacks (PLATOON_TEST_DOCKER_STACKS=require), and the last step fails the job if any of its tests was skipped.
+  docker-stacks:
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PLATOON_TEST_DOCKER_STACKS: require
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev --extra tinker --extra ors
+
+      - name: Show Docker and its compose plugin
+        run: docker version && docker compose version
+
+      - name: Run Harbor stacks on Docker
+        run: uv run pytest tests/integration/test_harbor_stacks_docker.py -v -rs --junitxml=docker-stacks.xml
+
+      - name: Fail if a test was skipped
+        run: test -s docker-stacks.xml && ! grep -q '<skipped' docker-stacks.xml

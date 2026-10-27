@@ -1,0 +1,201 @@
+{
+ "description": "A run-level straggler timeout with the default quorum (group_size - 1), in groups of three",
+ "request_settings": [
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": null,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "<fakes>:unused_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
+   "startup_budget_seconds": 300.0,
+   "task": {"fork_strategy": "subtask", "goal": null, "max_steps": null, "misc": {}}
+  }
+ ],
+ "scenario": "straggler-default",
+ "starts": [
+  {
+   "events": [
+    {"batch": 0, "checkpoint": null, "event": "start", "loaded": null, "start": 1, "state_lost": null},
+    {"event": "draw", "position": 0, "reason": "order", "sampler": "auto", "seq": 0, "start": 1, "task_id": "train:3", "version": 0},
+    {"event": "draw", "position": 1, "reason": "order", "sampler": "auto", "seq": 1, "start": 1, "task_id": "train:2", "version": 0},
+    {"event": "settle", "passes": 1, "seq": 1, "start": 1, "task_id": "train:2", "valid": 3, "verdict": "trained", "version": 0},
+    {"event": "settle", "passes": 0, "seq": 0, "start": 1, "task_id": "train:3", "valid": 2, "verdict": "uniform", "version": 0},
+    {"event": "fate", "fate": "consumed", "seq": 1, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 0, "start": 1},
+    {"event": "draw", "position": 2, "reason": "order", "sampler": "auto", "seq": 2, "start": 1, "task_id": "train:5", "version": 1},
+    {"event": "draw", "position": 3, "reason": "order", "sampler": "auto", "seq": 3, "start": 1, "task_id": "train:4", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 3, "start": 1, "task_id": "train:4", "valid": 1, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 2, "start": 1, "task_id": "train:5", "valid": 3, "verdict": "uniform", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 2, "start": 1}
+   ],
+   "files": [
+    "checkpoints.jsonl",
+    "tasks/dispatch-s1-final.json",
+    "tasks/dispatch-s1-recovery-000000.json",
+    "tasks/events.jsonl",
+    "tasks/state-s1-final.json",
+    "tasks/state-s1-recovery-000000.json"
+   ],
+   "messages": [
+    "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
+    "INFO Created new training client for test/model with rank 32",
+    "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
+    "INFO Starting training from batch 0 to 2",
+    "WARNING Cancelling 1 straggler rollout(s) for task train:3 after 600s grace (quorum 2/3)",
+    "WARNING Rollout for task train:3 took <t>s (very slow)",
+    "WARNING Waited <t>s for rollout from queue (slow)",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
+    "INFO Saving weights only after completing batch 0 (steps_completed=1, save_every=None, recovery_every=None)",
+    "INFO Step 1/2 | Epoch 0 | Batch time: <t>s | Datums: 5",
+    "WARNING All datums had zero advantage for microbatch 0 (minibatch 0): its objective is zero, so it takes no forward/backward",
+    "WARNING Minibatch 0 of batch 1 takes no optimizer update: none of its microbatches had a nonzero objective",
+    "INFO Batch 1 (step 2) takes no optimizer update: its objective is zero (every advantage is exactly zero: say every group's rollouts scored alike), and a step whose objective is zero never steps the optimizer, whatever filter_zero_advantage_datums says; the policy stays at version 1",
+    "INFO Step 2/2 | Epoch 0 | Batch time: <t>s | Datums: 4",
+    "INFO Saving permanent checkpoint final at step 2...",
+    "INFO Training complete successfully!",
+    "INFO Training complete. Total time: <t>s"
+   ],
+   "outcome": "completed",
+   "requests": {
+    "train": [
+     ["train:3", 0, 0, 0, 0],
+     ["train:3", 1, 0, 0, 0],
+     ["train:3", 2, 0, 0, 0],
+     ["train:2", 0, 0, 0, 0],
+     ["train:2", 1, 0, 0, 0],
+     ["train:2", 2, 0, 0, 0],
+     ["train:5", 0, 1, 0, 1],
+     ["train:5", 1, 1, 0, 1],
+     ["train:5", 2, 1, 0, 1],
+     ["train:4", 0, 1, 0, 1],
+     ["train:4", 1, 1, 0, 1],
+     ["train:4", 2, 1, 0, 1]
+    ]
+   },
+   "saves": [
+    {
+     "batch": 0,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000000.json",
+      "format": 2,
+      "sha256": "7071f75f771c31d76b24c8f60a9576db7f8510f2870806f4b7c0fa4d486b7995",
+      "start": 1
+     },
+     "name": "recovery-000000",
+     "optimizer_steps": 0,
+     "policy_version": 0,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000000",
+     "state_path": "tinker://run-1/weights/recovery-000000",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000000.json",
+      "format": 1,
+      "sha256": "568172804c77c2699cddcd8f9a99c6637dd67358fc97d91868ac587a8b525a86",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 2,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-final.json",
+      "format": 2,
+      "sha256": "47107a52e0ef7335d1aa795d3b911b666c36638dcd016019332bb11626111b68",
+      "start": 1
+     },
+     "name": "final",
+     "optimizer_steps": 1,
+     "policy_version": 1,
+     "sampler_path": "tinker://run-1/sampler_weights/final",
+     "state_path": "tinker://run-1/weights/final",
+     "tasks": {
+      "file": "tasks/state-s1-final.json",
+      "format": 1,
+      "sha256": "cbc206244ca43ac5a678e2d58e1e7f7b534dba1b4b4675d788cfb753bf67a6aa",
+      "start": 1
+     },
+     "wandb_run_id": null
+    }
+   ],
+   "tinker": [
+    ["create_lora_training_client", "test/model", 32],
+    ["save_state", "recovery-000000"],
+    ["save_weights_for_sampler", "recovery-000000"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000000"],
+    ["set_version", 0],
+    ["publish", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    ["publish_binding", "train", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.07407407, 0.07407407], "logprobs": [-0.3125, -0.4375, -0.125], "target_tokens": [615, 647, 718], "tokens": [183, 615, 647]},
+       {"advantages": [0.0, -0.037037037], "logprobs": [-0.75, -0.1875], "target_tokens": [336, 832], "tokens": [926, 336]},
+       {"advantages": [0.0, -0.037037037], "logprobs": [-0.375, -0.6875], "target_tokens": [933, 243], "tokens": [560, 933]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 1, "sampler:run-1/weights-only-1"],
+    ["publish_binding", "train", 1, "sampler:run-1/weights-only-1"],
+    ["save_state", "final"],
+    ["save_weights_for_sampler", "final"]
+   ]
+  }
+ ]
+}

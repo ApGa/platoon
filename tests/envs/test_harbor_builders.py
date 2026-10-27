@@ -12,6 +12,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,11 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         asked.append(reference)
         return _digest(reference)
 
+    def configure(reference: str, **_: object) -> tuple[str, dict]:
+        return _digest(reference), {"config": {"Cmd": ["python3"]}}  # a base image's, which def builds record
+
     monkeypatch.setattr(builders, "registry_digest", resolve)
+    monkeypatch.setattr(builders, "registry_config", configure)
     return asked
 
 
@@ -323,6 +328,14 @@ echo "unexpected: $*" >&2; exit 2
 """
 FAKE_UNSQUASHFS = r"""#!/bin/bash
 set -e
+if [ "$1" = -lln ]; then  # the layer's listing: a workdir that the Dockerfile gives uid 1000, and a link of root's
+  echo "unsquashfs $*" >> "$FAKE_LOG"
+  echo "Parallel unsquashfs: Using 2 processors"
+  echo "drwxr-xr-x 0/0                    40 2026-01-01 00:00 squashfs-root"
+  echo "drwxr-x--- 1000/1000              20 2026-01-01 00:00 squashfs-root/workdir"
+  echo "lrwxrwxrwx 0/0                     7 2026-01-01 00:00 squashfs-root/bin -> usr/bin"
+  exit 0
+fi
 echo "unsquashfs $* (umask $(umask), work $(stat -c %a "$(dirname "$3")"))" >> "$FAKE_LOG"
 mkdir -p "$3/workdir"
 """
@@ -365,6 +378,7 @@ def test_oci_builds_extract_a_native_sif_and_record_the_config(lock, tmp_path: P
     loaded = ImageMap.load(image_map)
     shared = plan_images(lock, loaded).images[0]
     entry = loaded.get(shared.key)
+    assert entry is not None
     assert entry.image == str(tmp_path / "site" / "images" / f"{shared.key.removeprefix('sha256:')}.sif")
     assert Path(entry.image).read_text() == "native\n"
     assert entry.env == {"PATH": "/opt/extra/bin:/usr/bin", "FOO": "bar"} and entry.workdir == "/workdir"
@@ -372,8 +386,12 @@ def test_oci_builds_extract_a_native_sif_and_record_the_config(lock, tmp_path: P
     assert entry.receipt["builder_version"] == "singularity-ce version 4.4.1"
     assert entry.receipt["task"] == "a" and Path(entry.receipt["log"]).is_file()
     assert entry.receipt["builder_revision"] == 1 and not withholds_modes(entry)
+    # The owners the layer gives, listed before the layer is unpacked as this user, beside the image.
+    assert entry.file_owners == entry.image.removesuffix(".sif") + ".owners"
+    assert Path(entry.file_owners).read_text() == "1000 1000 /workdir\n"
     calls = (tmp_path / "calls.log").read_text()
     assert "build --oci" in calls and "sif dump 1" in calls and "unsquashfs -no-xattrs -d" in calls
+    assert calls.index("unsquashfs -lln") < calls.index("unsquashfs -no-xattrs -d")
     # unsquashfs, run as a user, would give the image's files the host's umask: it runs with none, in a build tree
     # that only its owner may enter, since the image's own modes may let anyone write.
     assert "(umask 0000, work 700)" in calls
@@ -382,6 +400,31 @@ def test_oci_builds_extract_a_native_sif_and_record_the_config(lock, tmp_path: P
     assert plan_images(lock, ImageMap.load(image_map)).missing == []
     assert build_images(lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "scratch") == {}
     assert not list((tmp_path / "scratch").glob("build-*"))  # build trees are removed
+
+
+# squashfs-tools 4.3's unsquashfs (RHEL 8's), which has no -lln: it prints its usage and exits 1.
+UNSQUASHFS_4_3 = FAKE_UNSQUASHFS.replace(
+    "set -e\n", 'set -e\nif [ "$1" = -lln ]; then echo "SYNTAX: unsquashfs [options] filesystem"; exit 1; fi\n', 1
+)
+
+
+def test_an_oci_build_with_an_unsquashfs_that_lists_no_owners_records_no_manifest(
+    lock, fake_singularity: Path, tmp_path: Path
+):
+    """An unsquashfs before 4.4 builds the image as before, with no owner manifest, which the sandboxes that honor
+    users on hpc-sandbox then refuse, naming squashfs-tools 4.4; the log says why."""
+
+    _install(tmp_path / "bin", "unsquashfs", UNSQUASHFS_4_3)
+    image_map = tmp_path / "site" / "images.json"
+
+    built = build_images(lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "s", shard=(0, 1))
+
+    assert len(built) == 2
+    entries = [entry for entry in ImageMap.load(image_map).entries.values()]
+    assert all(entry.file_owners is None and entry.builder == "oci" for entry in entries)
+    log = Path(entries[0].receipt["log"]).read_text()
+    assert "-lln needs squashfs-tools 4.4 or later" in log
+    assert "unsquashfs -no-xattrs -d" in fake_singularity.read_text()  # unpacked as before
 
 
 # A separate verifier that fetches a file at build time, as nuclear-fusion-rl's b03, b04 and b31 do: through an ARG,
@@ -518,6 +561,7 @@ def test_def_builds_record_the_images_own_environment(lock, tmp_path: Path, monk
     assert shared.builder == "def" and Path(shared.image).read_text() == "def\n" and shared.workdir is None
     assert "builder_revision" not in shared.receipt and not withholds_modes(shared)
     assert shared.env == {"PATH": "/usr/local/bin:/usr/bin", "LANG": "C.UTF-8"}
+    assert shared.cmd == ("python3",)  # its base image's, which a definition file keeps none of
     assert "build --fakeroot" in (tmp_path / "calls.log").read_text()
 
 
@@ -677,3 +721,116 @@ def test_a_relative_image_map_records_its_images_where_it_finds_them(
         built = build_images(lock, cache=tmp_path / "cache", image_map=image_map, out_dir=out_dir, scratch=Path("s"))
         assert len(built) == 2 and all(Path(entry.image).is_absolute() for entry in built.values())
         assert plan_images(lock, ImageMap.load(image_map)).missing == []
+
+
+# --- a stack's sidecars that build from a context ------------------------------------------------------------------
+
+STACK = """\
+services:
+  main:
+    depends_on:
+      api:
+        condition: service_healthy
+  api:
+    build:
+      context: ./api
+      args:
+        GREETING: hello
+    expose: ["8000"]
+    healthcheck:
+      test: ["CMD", "true"]
+  replica:
+    build:
+      context: ./api
+      args:
+        GREETING: hello
+    expose: ["8001"]
+"""
+API = 'FROM python:3.12-slim\nARG GREETING=hi\nCOPY server.py /srv/server.py\nCMD ["python", "/srv/server.py"]\n'
+# Records each call with the directory it ran in and what that holds; answers image inspect as Docker would.
+FAKE_DOCKER_BUILD = f"""#!{sys.executable}
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(json.dumps({{"args": args, "files": sorted(os.listdir("."))}}) + "\\n")
+if args[:2] == ["image", "inspect"]:
+    print(json.dumps({{"Cmd": ["python", "/srv/server.py"], "WorkingDir": "/srv", "Env": ["PATH=/usr/bin"]}}))
+"""
+
+
+@pytest.fixture
+def stack_lock(tmp_path: Path):
+    """A fetched lock of one task whose two sidecars build one image from ./api, with a build argument."""
+
+    files = {
+        "task.toml": '[environment]\ndocker_image = "python:3.12"\n',
+        "instruction.md": "Do it.\n",
+        "tests/test.sh": "echo 1\n",
+        "environment/docker-compose.yaml": STACK,
+        "environment/api/Dockerfile": API,
+        "environment/api/server.py": "print('serving')\n",
+    }
+    for relative, text in files.items():
+        path = tmp_path / "stacks" / "with-api" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return fetch(
+        fetch_config(
+            str(tmp_path / "stacks"), cache=tmp_path / "cache", lock=tmp_path / "stack.json", refuse={"sidecars": False}
+        )
+    )
+
+
+def test_a_stacks_sidecars_that_build_from_a_context_are_planned_whole(stack_lock):
+    (image,) = plan_images(stack_lock).images  # the task's own image is prebuilt
+    (task,) = stack_lock.tasks
+    assert image.key == task.compose["services"]["api"]["build"]["key"] == task.service_builds()[1]["key"]
+    assert (image.role, image.context, image.dockerfile, image.build_args) == (
+        "service",
+        "environment/api",
+        "Dockerfile",
+        {"GREETING": "hello"},
+    )
+    assert image.tasks == ["with-api"] and image.base == ["python:3.12-slim"]  # two sidecars, one image
+    assert image.to_json()["context"] == "environment/api/Dockerfile" and image.to_json()["kind"] == "per_task"
+    assert plan_images(stack_lock).prebuilt == {"python:3.12": 1}
+
+
+def test_the_docker_builder_builds_a_sidecars_whole_context_with_its_build_arguments(
+    stack_lock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _install(bin_dir, "docker", FAKE_DOCKER_BUILD)
+    monkeypatch.setenv("PLATOON_DOCKER", str(bin_dir / "docker"))
+    monkeypatch.setenv("FAKE_LOG", str(tmp_path / "calls.log"))
+    image_map = tmp_path / "images.json"
+
+    (key,) = build_images(
+        stack_lock, cache=tmp_path / "cache", image_map=image_map, scratch=tmp_path / "s", builder="docker"
+    )
+
+    tag = f"platoon-harbor:{key.removeprefix('sha256:')[:32]}"
+    calls = [json.loads(line) for line in (tmp_path / "calls.log").read_text().splitlines()]
+    build = next(call for call in calls if call["args"][0] == "build")
+    assert build == {
+        "args": ["build", "-t", tag, "--build-arg=GREETING=hello", "-f", "Dockerfile", "."],
+        "files": ["Dockerfile", "server.py"],  # the context it reads, staged with its Dockerfile pinned by digest
+    }
+    entry = ImageMap.load(image_map).get(key)
+    assert entry is not None
+    assert (entry.image, entry.builder, entry.cmd, entry.workdir) == (
+        tag,
+        "docker",
+        ("python", "/srv/server.py"),
+        "/srv",
+    )
+    assert entry.receipt["role"] == "service" and entry.receipt["base"] == ["python:3.12-slim"]
+
+
+@pytest.mark.parametrize("builder", ["oci", "def"])
+def test_only_the_docker_builder_passes_a_sidecars_build_arguments(stack_lock, tmp_path: Path, builder: str):
+    with pytest.raises(BuildError, match=r"build arguments \['GREETING'\], which only the docker builder passes"):
+        build_images(
+            stack_lock, cache=tmp_path / "cache", image_map=tmp_path / "m.json", scratch=tmp_path / "s", builder=builder
+        )

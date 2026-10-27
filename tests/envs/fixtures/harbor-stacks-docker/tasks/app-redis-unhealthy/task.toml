@@ -1,0 +1,17 @@
+version = "1.0"
+
+[task]
+name = "platoon/app-redis-unhealthy"
+
+[agent]
+timeout_sec = 120.0
+
+[verifier]
+timeout_sec = 60.0
+
+[environment]
+docker_image = "python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704"
+workdir = "/app"
+network_mode = "no-network"
+cpus = 1
+memory_mb = 512

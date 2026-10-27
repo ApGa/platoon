@@ -41,7 +41,10 @@ def file_sha256(path: Path) -> str:
 def task_files(task_dir: str | Path) -> list[str]:
     """The POSIX relative paths of the files Harbor's hash covers, sorted.
 
-    Symbolic links count as the files they point to, as in Harbor; a link to a directory is not followed.
+    Symbolic links count as the files they point to, as in Harbor, whose ``rglob`` this is: a link to a directory
+    below ``environment/``, ``tests/``, ``solution/`` or ``steps/`` is not followed, while one of those directories
+    that is itself a link lists the directory it names.  A fetch refuses the links of a download or a checkout that
+    leave their task (:mod:`platoon.envs.harbor.sources`).
     """
 
     root = Path(task_dir)

@@ -34,8 +34,9 @@ import torch
 
 from platoon.sandbox import SandboxSpec, get_provider
 from platoon.train.components import task_ids_to_dataset
-from platoon.train.tinker import rl
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.policy import service as service_module
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.config import load_config
 
 STATE = Path(os.environ["FAKE_TINKER"])
@@ -200,9 +201,9 @@ def main() -> None:
     note(start, "sandboxes_at_start", sandboxes())
     ServiceClient.start = start
     tinker.ServiceClient = ServiceClient  # what the trainer opens its service with
-    rl.TRAINING_CLIENT_FIRST_WAIT_S = rl.TRAINING_CLIENT_LONGEST_WAIT_S = 0.05
+    service_module.TRAINING_CLIENT_FIRST_WAIT_S = service_module.TRAINING_CLIENT_LONGEST_WAIT_S = 0.05
     config, _ = load_config(args=["--config", sys.argv[1]], config_class=PlatoonTinkerRLTrainerConfig)
-    trainer = object.__new__(rl.PlatoonTinkerRLTrainer)
+    trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
     trainer.config = cast(PlatoonTinkerRLTrainerConfig, config)
     trainer.train_dataset = task_ids_to_dataset([f"train:{index}" for index in range(8)])
     trainer.eval_dataset = None

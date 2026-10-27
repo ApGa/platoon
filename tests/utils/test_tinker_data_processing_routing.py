@@ -2,15 +2,13 @@
 
 ``Datum.loss_fn_inputs["routing_handle"]`` is an int64 ``[1]`` tensor holding
 the gateway ``routing_id`` of the LAST sample call merged into the datum; it is
-absent when that interaction carried no id, and the trainer's strip tuple in
-``platoon/train/tinker/rl.py`` never removes it.
+absent when that interaction carried no id, and the loss inputs the training step
+strips, its objective's side channels (``platoon/train/objectives/policy_gradient.py``),
+never include it.
 """
 
 from __future__ import annotations
 
-import ast
-import re
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,11 +17,10 @@ import torch
 
 import platoon.hooks
 import platoon.train.tinker  # noqa: F401  (resolves the package's import cycle first)
-from platoon.train.tinker.batch_transforms import LOSS_NORMALIZATION_TOKENS_KEY
+from platoon.train.objectives.policy_gradient import PolicyGradient
+from platoon.train.step.batch_transforms import LOSS_NORMALIZATION_TOKENS_KEY
 from platoon.utils import tinker_data_processing as tdp
 from platoon.utils.trajectory_error_filtering import detected_message_completion_ids
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
@@ -187,27 +184,9 @@ def test_handle_follows_the_last_merged_call_even_when_it_has_no_id():
     assert acc.last_routing_id is None
 
 
-def _rl_strip_tuple() -> tuple[str, ...]:
-    """Extract the exact strip tuple from rl.py's filtered-datum rebuild."""
-
-    source = (REPO_ROOT / "platoon/train/tinker/rl.py").read_text()
-    match = re.search(r"if k\s*\n?\s*not in \(([^)]*)\)", source)
-    assert match is not None, "strip tuple not found in rl.py"
-    names = []
-    for element in match.group(1).split(","):
-        element = element.strip()
-        if not element:
-            continue
-        try:
-            names.append(ast.literal_eval(element))
-        except ValueError:
-            # Symbolic constant, e.g. LOSS_NORMALIZATION_TOKENS_KEY.
-            names.append({"LOSS_NORMALIZATION_TOKENS_KEY": LOSS_NORMALIZATION_TOKENS_KEY}[element])
-    return tuple(names)
-
-
 def test_rl_rebuild_keeps_the_routing_handle():
-    strip = _rl_strip_tuple()
+    # The loss inputs the training step leaves out of the datums it sends: its objective's side channels.
+    strip = PolicyGradient.side_channels
     assert set(strip) == {"mask", "checkpoint_version", "traj_depth", "traj_start", LOSS_NORMALIZATION_TOKENS_KEY}
     assert tdp.ROUTING_HANDLE_KEY not in strip
 

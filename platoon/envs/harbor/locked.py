@@ -1,10 +1,10 @@
 """The Harbor service's view of a fetched dataset: task ids from a lock, task directories from the Harbor cache, and the
 images sessions run (the dataset's default image map plus each task's deferred Dockerfile steps).
 
-A service configured with ``dataset`` (a source to fetch) or ``lock`` (a lock to read) lists and finds its tasks
-here instead of scanning a directory. The trainer, which lists the tasks, fetches a pinned ``dataset`` whose lock
-does not exist yet; rollout workers only read the lock, and check a task's cache entry against its digest once per
-node before its first session.
+A service configured with ``dataset`` (a source to fetch), ``adapter`` (an adapter that generates the tasks) or
+``lock`` (a lock to read) lists and finds its tasks here instead of scanning a directory. The trainer, which lists
+the tasks, fetches a pinned ``dataset`` whose lock does not exist yet; rollout workers only read the lock, and check a
+task's cache entry against its digest once per node before its first session.
 """
 
 from __future__ import annotations
@@ -17,9 +17,19 @@ from pathlib import Path
 from typing import Any
 
 from platoon.envs.harbor.dockerfile import DockerfileError, plan_dockerfile
-from platoon.envs.harbor.fetch import FetchConfig, ensure_lock, fetch_config
+from platoon.envs.harbor.fetch import FetchConfig, answering_lock_path, ensure_lock, fetch_config
 from platoon.envs.harbor.holdout import HoldoutRow
-from platoon.envs.harbor.images import ImageMap, ImageMapError, SessionImage, default_image_map, session_image
+from platoon.envs.harbor.images import (
+    ImageEntry,
+    ImageMap,
+    ImageMapError,
+    SessionImage,
+    default_image_map,
+    planned_user,
+    pulled_image,
+    pulled_key,
+    session_image,
+)
 from platoon.envs.harbor.lock import DatasetLock, LockedDataset, LockError, default_cache, read_lock
 
 logger = logging.getLogger(__name__)
@@ -36,6 +46,8 @@ class LockedTasks:
         self,
         *,
         dataset: str | None = None,
+        adapter: Mapping[str, Any] | None = None,
+        registry: str | Path | None = None,
         lock: str | Path | None = None,
         tasks: str | Path | Sequence[str | Path] = (),
         select: Mapping[str, Any] | None = None,
@@ -44,11 +56,13 @@ class LockedTasks:
         index: Sequence[str | Mapping[str, Any]] = (),
         splits: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
-        if dataset is None and lock is None:
-            raise ValueError("LockedTasks needs a dataset or a lock")
+        if dataset is None and adapter is None and lock is None:
+            raise ValueError("LockedTasks needs a dataset, an adapter or a lock")
         self.fetch: FetchConfig | None = (
             fetch_config(
                 dataset,
+                adapter=adapter,
+                registry=registry,
                 lock=lock,
                 tasks=tasks,
                 select=select,
@@ -56,11 +70,13 @@ class LockedTasks:
                 refuse=refuse,
                 index=index,
             )
-            if dataset is not None
+            if dataset is not None or adapter is not None
             else None
         )
-        if self.fetch is None and (tasks or select or overlays or refuse or index):
-            raise ValueError("tasks, select, overlays, refuse and index choose what a fetch of `dataset` locks")
+        if self.fetch is None and (tasks or select or overlays or refuse or index or registry):
+            raise ValueError(
+                "tasks, select, overlays, refuse, index and registry choose what a fetch of `dataset` locks"
+            )
         if self.fetch is not None:
             self.lock_path = self.fetch.lock_path()
         else:
@@ -101,8 +117,9 @@ class LockedTasks:
         lock = self.dataset(fetch_allowed=True).lock
         if not lock.records_input_files:
             missing = sum(1 for task in lock.tasks if task.input_files is None)
+            path = answering_lock_path(self.fetch) if self.fetch is not None else self.lock_path
             raise LockError(
-                f"The lock {self.lock_path} records no input files for {missing:,} of its {len(lock.tasks):,} "
+                f"The lock {path} records no input files for {missing:,} of its {len(lock.tasks):,} "
                 "task(s), as locks written before platoon recorded them do, and a hold-out keeps the tasks that share "
                 "an input file on one side: fetch the dataset again to record them (`platoon harbor fetch CONFIG`)"
             )
@@ -118,6 +135,13 @@ class LockedTasks:
         reward-contract hooks read."""
 
         return dict(self.dataset(fetch_allowed=False).row(task_id).index)
+
+    def compose(self, task_id: str) -> dict[str, Any] | None:
+        """The task's stack plan as the lock records it (``LockedTask.compose``, overlays' edits applied), None for a
+        task without a compose file: what its sessions run, never planned again from its files."""
+
+        compose = self.dataset(fetch_allowed=False).row(task_id).compose
+        return dict(compose) if compose else None
 
     def task_misc(self, task_id: str) -> dict[str, Any]:
         """What a task's ``misc["harbor"]`` records about it from the lock: digest, index, image key."""
@@ -176,7 +200,13 @@ class TaskImages:
 
         return self.load()
 
-    def for_task(self, task_dir: Path, *, docker_image: str | None, default_image: str | None) -> SessionImage | None:
+    def for_task(
+        self, task_dir: Path, *, docker_image: str | None, default_image: str | None, pulled: bool = False
+    ) -> SessionImage | None:
+        """The image of a task of the lock, from its build plan; None for a dataset directory's.  With ``pulled`` (a
+        sandbox that honors users), a ``docker_image`` runs its pulled entry, where the map has one
+        (:func:`~platoon.envs.harbor.images.session_image`)."""
+
         row = self._locked.row_for(task_dir) if self._locked is not None else None
         if row is None:
             return None
@@ -186,7 +216,65 @@ class TaskImages:
             image_map=self.image_map,
             docker_image=docker_image,
             default_image=default_image,
+            pulled=pulled,
         )
+
+    def pulled(self, reference: str) -> ImageEntry | None:
+        """The map's pulled entry of a registry ``reference`` that a task names as its ``docker_image``
+        (``docker://repo:tag``), which a sandbox that honors users runs, or None; a sidecar's pin is
+        :meth:`for_pulled`'s."""
+
+        image_map = self.image_map
+        return image_map.get(reference) if image_map is not None else None
+
+    def for_service(
+        self, task_dir: Path, service: str, build: Mapping[str, Any], *, task: str | None = None
+    ) -> SessionImage:
+        """The image of a stack's service that builds from a context of the task (its plan's ``build``): the image
+        map's image for the context's whole build key, with what its Dockerfile sets over its base (``config``), and
+        nothing deferred, since a service's command starts with its sandbox.  An ``ImageMapError`` when the map has
+        none, as for a dataset directory's task, whose plan has no key; ``task`` is the task's name, which errors
+        give (else its directory's)."""
+
+        task_dir = Path(task_dir)
+        name = task or task_dir.name
+        context = f"{build.get('context', 'environment')}/{build.get('dockerfile', 'Dockerfile')}"
+        key = build.get("key")
+        if not key:
+            raise ImageMapError(
+                f"Harbor task {name!r}: the service {service} builds its image from {context}, and a dataset "
+                "directory has no image map: serve the directory as a dataset to fetch (service_kwargs.dataset), "
+                "whose image map can hold the image of its build key"
+            )
+        image_map = self.image_map
+        entry = image_map.get(key) if image_map is not None else None
+        if entry is None:
+            missing = f"which the image map {self._path} lacks" if image_map is not None else "and no image map exists"
+            raise ImageMapError(
+                f"Harbor task {name!r}: the service {service} builds its image from {context} (build key {key}), "
+                f"{missing}: platoon prepare builds it (or platoon harbor images build)"
+            )
+        config = build.get("config") or {}
+        entrypoint = config.get("entrypoint", entry.entrypoint)
+        cmd = config.get("cmd", entry.cmd)
+        return SessionImage(
+            image=entry.image,
+            env=dict(entry.env),
+            workdir=entry.workdir,
+            user=planned_user(config, entry, entry.env),
+            key=key,
+            entrypoint=tuple(entrypoint) if entrypoint is not None else None,
+            cmd=tuple(cmd) if cmd is not None else None,
+            healthcheck=config.get("healthcheck", entry.healthcheck),
+        )
+
+    def for_pulled(self, reference: str) -> SessionImage | None:
+        """What a stack's sidecar runs of the registry image ``reference`` (as its compose file names it): the image
+        map's pin of it, by digest with its configuration; None where the map has none (``platoon prepare`` pins
+        them), as for a dataset directory, which has no map."""
+
+        entry = self.image_map.get(pulled_key(reference)) if self.image_map is not None else None
+        return pulled_image(entry) if entry is not None else None
 
     def for_verifier(self, task_dir: Path, *, docker_image: str | None = None) -> SessionImage | None:
         """The image of a separate verifier built from ``tests/Dockerfile`` (the lock row's ``verifier_image``,

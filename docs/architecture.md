@@ -83,9 +83,12 @@ flowchart LR
 
 1. The trainer's dispatcher draws the next task of the order and starts its group when the group can start: within
    the horizon of `train.max_staleness` (at most `max_staleness + 1` batches of groups started and not yet trained),
-   with rollout permits for the whole group (`train.max_concurrent_rollouts`), and with room in its label's
+   with rollout permits (`train.max_concurrent_rollouts`), and with room in its label's
    `train.rollout_group_limits`; a draw whose label is at its limit waits in the label's backlog, outside the horizon,
-   for the slot the label's running groups hold for it.
+   for the slot the label's running groups hold for it. Each rollout returns its permit as it ends
+   (`train.permit_release: rollout`, the default), and a group whose workflow runs its rollouts on the lease starts on
+   its first permit, its rollouts starting as the rest free; any other group starts on its whole size of permits, as
+   every group does under `train.permit_release: group`, which returns them when the group ends.
 2. For each task, `GroupRolloutWorkflow` runs `group_size` rollouts, with the settings of the task's environment
    entry (its own `workflow_config` laid over `train.workflow_config`). With
    `train.workflow_config.rollout_isolation: process`, each rollout runs in its own worker process, which
@@ -133,8 +136,21 @@ workers a dead trainer left running before new ones start.
 A worker is forked from a fork server (`worker_start_method: forkserver`, the default; `platoon.utils.forkserver`):
 one process per supervisor that imports the worker's stack once (tinker, torch, transformers and the environments'
 packages), which an exec'd worker would spend 17-24 s on, and about a minute when 64 start at once on one node, and
-builds the run's tokenizer and renderer once, of which each worker it forks takes its own copy.
-Right after the fork, the child becomes the process `python -m platoon.train.tinker.workers.entrypoint` would be: a
+builds the run's tokenizer and renderer once, of which each worker it forks takes its own copy. It also imports what
+the run's environments and harnesses import when a rollout opens them, and builds what each rollout would build again
+(`platoon.train.startup`, from the config: an ORS environment's module and SDK, each function harness's module, the
+programs, the registry lookups, an in-process environment's task lists, and `workflow_config.worker_preload`), each
+module and build only when it leaves the server as safe to fork as it was: no thread started, no file, socket or event
+loop left open, no process started and no numpy generator seeded from the OS (an environment variable one sets is set
+in each worker too). One that is not is left out and logged, and once it has tried them all the server executes itself
+again without them, since an import cannot be undone; the processes they started are ended and none of their
+descriptors passes on. A
+value an import makes once per process (an id, a temporary directory) is shared by the workers, which is why only
+modules that keep none belong in the preload, and why nothing is derived under `worker_python_env_isolation`, whose
+rollouts import their environments inside a Python overlay of their own. `platoon train` starts the server as soon as
+its training client is open, so that it imports while the trainer saves at launch, and stages the harness toolchains
+on the node meanwhile.
+Right after the fork, the child becomes the process `python -m platoon.train.workers.entrypoint` would be: a
 session of its own, `/dev/null` as stdin, its log file, the trainer's working directory and exactly the environment
 an exec'd worker gets, new seeds for numpy's and torch's generators and for every `random.Random` the server's
 imports seeded from the OS (sympy's, datasets' fingerprint generator), the worker invariants and the startup alarm;
@@ -167,7 +183,7 @@ singularity provider's `gpu: nv`), not from its environment.
 | `platoon/gateway/` | `ModelGateway` and `AgentSession` (`core.py`), the HTTP server (`server.py`), the MCP tool plane (`mcp.py`), trajectories from agent records (`trace.py`), wire dialects (`dialects/`) |
 | `platoon/harness/` | the agent contract (`agent.py`), `@harness` (`function.py`), the inline runtime (`inline.py`), subagents (`agents.py`), budgets (`budget.py`), verifiers (`verify.py`), `harness_rollout` (`rollout.py`), TOML specs (`spec.py`, `runner.py`), the registry (`registry/`) and the built-in harnesses (`builtin/`) |
 | `platoon/programs.py`, `platoon/rewards.py`, `platoon/gym.py` | episode programs, the reward processor and finalizer for recursive agents, and gym adapters |
-| `platoon/train/tinker/` | the trainer, its config, the rollout workflows, the rollout workers and the renderers |
+| `platoon/train/` | the trainer (`trainer/`), a training step (`step/`), the dispatcher and the rollout permits (`dispatch/`), the rollout workflow (`workflow/`), a group's credit (`credit/`), the rollout workers (`workers/`), checkpoints and resume (`checkpoints/`), evaluation during training (`evaluation/`), the config (`config_defs.py`) and task selection; the policy client and the renderers (`tinker/`) |
 | `platoon/eval/` | `platoon eval` |
 | `platoon/cli.py`, `platoon/utils/config.py` | the CLI and the config loader |
 | `platoon/hooks.py` | named hooks for extensions |
@@ -333,9 +349,15 @@ sits deeper; a fetched dataset's ids come from its lock (`platoon harbor fetch`)
 error, even when one of them is refused. Each session gets its own sandbox. A missing or malformed reward file
 is an `error`, a verifier timeout is `invalid`, and a `reward.json` may declare itself `invalid`. A Harbor session
 also offers generic `bash`, `view`, `write` and `edit` tools on its sandbox, for harnesses that do not act
-natively. Tasks that need several containers (`environment/docker-compose.yaml` with sidecar services) are refused
-rather than run without their services; [RFC 0010](rfcs/0010-harbor-registry-and-multi-container-tasks.md) proposes
-support for them.
+natively. A task's compose file (`environment/docker-compose.yaml`) is read into a stack plan
+(`platoon/envs/harbor/compose.py`): one that names only `main` gives the task's sandbox its environment, binds,
+resources and command, an init the kill before grading spares; a task that needs several containers (sidecar
+services) runs as a stack on a provider with the `stacks` capability (`platoon/sandbox/stacks.py`,
+`platoon/envs/harbor/sidecars.py`), which starts its services in dependency order, and grading probes its sidecars,
+whose being down makes the outcome `invalid`; the `docker` provider runs each stack as a `docker compose` project
+(`platoon/sandbox/compose.py`), the HPC providers as an hpc-sandbox pod, one network namespace for all its services
+(`platoon/sandbox/hpc_stacks.py`), the `process` provider for tests. Elsewhere such a task is refused rather than run
+without its services ([RFC 0010](rfcs/0010-harbor-registry-and-multi-container-tasks.md)).
 
 **Grading** (`HarborSession.grade`, `platoon/envs/harbor/session.py`) takes the sandbox the tests run in away from
 the agents. It runs alone on the session's gate, after the calls in flight, and kills every process the agents left
@@ -743,7 +765,7 @@ trainer, the rollout workers and the gateway all render through the renderer tha
 
 ## Config and CLI
 
-The schema is the trainer and evaluation config dataclasses (`platoon/train/tinker/config_defs.py`,
+The schema is the trainer and evaluation config dataclasses (`platoon/train/config_defs.py`,
 `platoon/eval/config_defs.py`). Loading is strict: unknown keys fail with their dotted path and a did-you-mean
 suggestion, values are type-checked, and every problem is reported at once.
 

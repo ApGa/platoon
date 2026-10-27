@@ -55,19 +55,43 @@ the forced build that replaces it (:func:`toolchain_problem`, ``platoon.train.au
 **Staging.** Before a rollout uses a named toolchain, :func:`stage` copies it to node-local disk, once per node and
 toolchain version: into a temporary directory under an exclusive ``flock``, checked against the tree hash, then
 renamed into place, so no rollout ever sees a partial copy and concurrent rollouts copy it once.  Each staging that
-takes the lock first removes the temporary directories that killed stagings of the same version left behind.  Staged
-copies live under ``$PLATOON_TOOLCHAIN_CACHE``, else under ``platoon-toolchains-<uid>`` in node-local scratch
-(:func:`platoon.utils.scratch.node_scratch`: ``$PLATOON_NODE_SCRATCH``, ``$PBS_LOCALDIR``, ``$SLURM_TMPDIR``,
-``$TMPDIR``, else ``/tmp``).  :func:`prepare` does both and returns the paths a launch renders: the build path in a
-task sandbox, the staged copy on the rollout host.
+takes the lock first removes the temporary directories that killed stagings of the same version left behind.  A copy
+is readable by every user, its directories and programs runnable by them (``a+rX``), so that a sandbox's other users
+run it too, such as an agent that runs as the user its Harbor task names; the tree hash records only the owner's
+executable bit, which this leaves as it is.  Staged copies live under ``$PLATOON_TOOLCHAIN_CACHE``, else under
+``platoon-toolchains-<uid>`` in node-local scratch (:func:`platoon.utils.scratch.node_scratch`:
+``$PLATOON_NODE_SCRATCH``, ``$PBS_LOCALDIR``, ``$SLURM_TMPDIR``, ``$TMPDIR``, else ``/tmp``).  :func:`prepare` does
+both and returns the paths a launch renders: the build path in a task sandbox, the staged copy on the rollout host.
+
+**A copy that outlives its job.**  Where the cache is node-local disk that outlives a job (``$PLATOON_TOOLCHAIN_CACHE``
+on such a disk, or ``/tmp`` on a node without job scratch), the next job on the node finds the copy and keeps it when
+its version and contents still match: its name carries the first 16 hex digits of the manifest's tree hash, a stamp
+beside it (``.<copy>.staged``) records the whole tree hash it was checked against and the staging sessions that
+checked it, and the first staging of each new session (:func:`staging_session`: the boot and the scheduler job) hashes
+the copy again and compares it with the manifest's tree hash, under the lock.  A copy that matches is stamped with the
+new session too (jobs that share the node and the copy each find it current).  One that does not (a node's cleanup
+removed some of its files) is copied again beside it and the fresh copy renamed into its place; the old one is set
+aside whole (``.<copy>.<hex>.stale``), never removed, since rollouts of another job may still run from it, and a
+warning names it.  Every other staging in the session finds the copy and its stamp current and returns at once, after
+two small reads of node-local disk; a process that found it current once does not read the stamp again.  A cache this
+process cannot write to (read-only, another user's, a full disk) can record no check: a copy there that was staged in
+another session is used as it is, as before platoon checked kept copies, with one warning per process.
+
+**Ahead of the rollouts.**  :func:`prestage` stages a run's toolchains before its first rollout starts: ``platoon
+train`` calls it while it opens the training service and saves at launch, and waits for it (ten minutes at most)
+before it starts any rollout, so that no rollout waits for the copy; ``platoon eval`` likewise while it lists its
+tasks (:mod:`platoon.train.startup`).  A rollout's own staging then finds the copy current.  A node that runs rollouts
+without such a start (a remote rollout host) stages its copy at its first rollout, as before.
 """
 
 from __future__ import annotations
 
 import contextlib
 import fcntl
+import functools
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -77,10 +101,10 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from platoon.sandbox.base import Mount
 from platoon.site import cache_root as platoon_cache_root
@@ -88,6 +112,8 @@ from platoon.utils.scratch import node_scratch
 
 if TYPE_CHECKING:
     from platoon.harness.spec import HarnessSpec, ToolchainRecipe
+
+logger = logging.getLogger(__name__)
 
 TOOLCHAIN_CACHE_ENV = "PLATOON_TOOLCHAIN_CACHE"
 MANIFEST = "manifest.json"
@@ -258,47 +284,251 @@ def cache_root(cache: str | os.PathLike[str] | None = None) -> Path:
     return node_scratch() / f"platoon-toolchains-{os.getuid()}"
 
 
-def stage(toolchain: Toolchain, *, cache: str | os.PathLike[str] | None = None) -> Path:
-    """The node-local copy of ``toolchain``, made once per node and version (see the module docstring).
+#: The scheduler variables that name the job a process runs in; the first that is set is part of the staging session.
+JOB_ID_VARIABLES = ("PBS_JOBID", "SLURM_JOB_ID", "LSB_JOBID", "JOB_ID")
+#: How many staging sessions a copy's stamp remembers (jobs that share a node and its copy each find it current).
+STAMP_SESSIONS = 32
+_BOOT_ID = "/proc/sys/kernel/random/boot_id"
 
-    Blocks while another process stages the same version; call it off the event loop.
+#: What :func:`stage` did: the copy was ``current`` (staged, or checked, in this session), ``verified`` (a copy of an
+#: earlier session, hashed again and kept), ``replaced`` (one that no longer matched its manifest, copied again),
+#: ``copied`` (there was none) or ``unchecked`` (a copy of an earlier session, used as it is, since this process can
+#: record no check in its cache).
+StageAction = Literal["current", "verified", "replaced", "copied", "unchecked"]
+
+#: The copies this process found current, staged, checked or used unchecked, by (copy, tree hash, staging session):
+#: its later stagings in the session return them at once, without reading their stamps.
+_SERVED: set[tuple[str, str, str]] = set()
+#: The copies this process warned that it uses unchecked: it warns once for each.
+_WARNED: set[str] = set()
+
+
+def staging_session() -> str:
+    """The staging session a kept copy is checked once in: this boot (``/proc/sys/kernel/random/boot_id``) and the
+    scheduler job (the first of :data:`JOB_ID_VARIABLES` that is set), as far as either is known."""
+
+    job = next((os.environ[name] for name in JOB_ID_VARIABLES if os.environ.get(name)), "")
+    return f"boot={_boot_id()} job={job}"
+
+
+@functools.cache
+def _boot_id() -> str:
+    try:
+        with open(_BOOT_ID, encoding="ascii") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def stage(toolchain: Toolchain, *, cache: str | os.PathLike[str] | None = None) -> Path:
+    """The node-local copy of ``toolchain``, made once per node and version, and checked again once per staging
+    session when it was made in another (see the module docstring).
+
+    Idempotent and safe to call from any number of processes and jobs at once: they take turns on the copy's lock,
+    and only one copies or checks it.  Once the copy is current it returns at once, without the lock.  Blocks while
+    another process stages or checks the same version; call it off the event loop.
     """
+
+    return _stage(toolchain, cache)[0]
+
+
+def _stage(toolchain: Toolchain, cache: str | os.PathLike[str] | None) -> tuple[Path, StageAction]:
+    """:func:`stage`, and what it did."""
 
     root = cache_root(cache)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     version = (toolchain.tree_hash or _fingerprint(toolchain.path)).removeprefix(HASH_PREFIX)[:16]
     target = root / f"{toolchain.name}-{version}"
-    if target.is_dir():
-        return target
-    with (root / f".{target.name}.lock").open("a") as lock:
+    session = staging_session()
+    if _current(target, toolchain, session):
+        return target, "current"
+    try:
+        lock = (root / f".{target.name}.lock").open("a")
+    except OSError as exc:
+        if not target.is_dir():
+            raise
+        # A cache this process cannot write to (read-only, or another user's): its copy serves as it is.
+        return _unchecked(target, toolchain, session, f"its lock file cannot be opened ({exc})")
+    with lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         _remove_partial_copies(root, target.name)
-        if target.is_dir():  # another process staged it while this one waited
-            return target
+        if _current(target, toolchain, session):  # another process staged or checked it while this one waited
+            return target, "current"
+        action: StageAction = "copied"
+        if target.is_dir():
+            # A copy from another session, or from a platoon that wrote no stamp: hash it again before it is used,
+            # unless no stamp can record the check, which every staging would then make again, one after another.
+            assert toolchain.tree_hash is not None  # a copy versioned by its files is current whenever it is there
+            if (problem := _stamp_problem(target)) is not None:
+                return _unchecked(target, toolchain, session, f"no stamp can be written beside it ({problem})")
+            digest, files, size = tree_digest(target)
+            if digest == toolchain.tree_hash:
+                _open_to_every_user(target)  # a copy that a platoon before 0.5 staged may keep them out
+                _write_stamp(target, digest, files, size, session)
+                _SERVED.add((str(target), toolchain.tree_hash, session))
+                return target, "verified"
+            # It no longer matches (a cleanup removed or changed some of its files): copy it again, beside it.
+            action = "replaced"
         partial = root / f".{target.name}.{uuid.uuid4().hex[:8]}.partial"
+        stale = None
         try:
             shutil.copytree(toolchain.path, partial, symlinks=True)
-            if toolchain.tree_hash is not None and (copied := tree_hash(partial)) != toolchain.tree_hash:
+            _open_to_every_user(partial)
+            digest, files, size = tree_digest(partial)
+            if toolchain.tree_hash is not None and digest != toolchain.tree_hash:
                 raise ToolchainError(
                     f"toolchain {toolchain.name!r} at {toolchain.path} does not match its manifest: tree hash "
-                    f"{copied}, manifest {toolchain.tree_hash}; rebuild it, or restore what changed"
+                    f"{digest}, manifest {toolchain.tree_hash}; rebuild it, or restore what changed"
                 )
+            if action == "replaced":
+                # The copy it replaces is set aside whole, never removed: rollouts of other jobs on the node may run
+                # from it (a sandbox's bind mount follows it), and keep every file of it.
+                stale = root / f".{target.name}.{uuid.uuid4().hex[:8]}.stale"
+                os.rename(target, stale)
             os.rename(partial, target)
         except BaseException:
             shutil.rmtree(partial, ignore_errors=True)
             raise
-    return target
+        if stale is not None:
+            logger.warning(
+                "the staged toolchain %s no longer matched its manifest and was copied again; the old copy is set "
+                "aside at %s, since rollouts of other jobs may still run from it: remove it once none does",
+                target.name,
+                stale,
+            )
+        if toolchain.tree_hash is not None:
+            _write_stamp(target, digest, files, size, session)
+            _SERVED.add((str(target), toolchain.tree_hash, session))
+    return target, action
+
+
+def _open_to_every_user(root: Path) -> None:
+    """Let every user read the tree at ``root``, and enter its directories and run what its owner may run (``chmod -R
+    a+rX``); links are left as they are."""
+
+    for directory, _, filenames in os.walk(root):  # never into a linked directory
+        for path in [Path(directory), *(Path(directory) / name for name in filenames)]:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                continue
+            mode = info.st_mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+            if stat.S_ISDIR(info.st_mode) or info.st_mode & stat.S_IXUSR:
+                mode |= stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+            if mode != info.st_mode:
+                path.chmod(stat.S_IMODE(mode))
+
+
+def _stamp_path(target: Path) -> Path:
+    return target.with_name(f".{target.name}.staged")
+
+
+def _current(target: Path, toolchain: Toolchain, session: str) -> bool:
+    """Whether the copy ``target`` serves this staging session as it is: it is there, and this process found it so
+    before in the session, or its stamp says that it was copied or checked in this session against the manifest's
+    tree hash.  A copy versioned by its files (no tree hash) has nothing to be checked against, and serves whenever
+    it is there."""
+
+    if not target.is_dir():
+        return False
+    if toolchain.tree_hash is None:
+        return True
+    served = (str(target), toolchain.tree_hash, session)
+    if served in _SERVED:
+        return True
+    stamp = _read_stamp(target)
+    if stamp.get("tree_hash") == toolchain.tree_hash and session in stamp.get("sessions", ()):
+        _SERVED.add(served)
+        return True
+    return False
+
+
+def _unchecked(target: Path, toolchain: Toolchain, session: str, why: str) -> tuple[Path, StageAction]:
+    """Serve ``target``, a copy from another session, as it is, as platoon did before it checked kept copies, since
+    this process cannot record a check of it (``why``); warn once in the process."""
+
+    assert toolchain.tree_hash is not None
+    _SERVED.add((str(target), toolchain.tree_hash, session))
+    if str(target) not in _WARNED:
+        _WARNED.add(str(target))
+        logger.warning(
+            "the staged toolchain %s is used without being checked against its manifest: %s. Make its cache (%s) "
+            "writable to have each job check it once",
+            target.name,
+            why,
+            target.parent,
+        )
+    return target, "unchecked"
+
+
+def _read_stamp(target: Path) -> dict[str, Any]:
+    """The copy's stamp, or an empty record when it has none, or one that cannot be read."""
+
+    try:
+        stamp = json.loads(_stamp_path(target).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(stamp, dict) or not isinstance(stamp.get("sessions"), list):
+        return {}
+    return stamp
+
+
+def _stamp_problem(target: Path) -> OSError | None:
+    """Why no stamp can be written beside the copy ``target`` (a read-only or full disk, a directory this process may
+    not write to), found by writing a small file where :func:`_write_stamp` writes its own; None when it can be."""
+
+    stamp = _stamp_path(target)
+    probe = stamp.with_name(f"{stamp.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        probe.write_text('{"checking": true}\n', encoding="utf-8")
+    except OSError as exc:
+        return exc
+    finally:
+        with contextlib.suppress(OSError):
+            probe.unlink()
+    return None
+
+
+def _write_stamp(target: Path, digest: str, files: int, size: int, session: str) -> None:
+    """Record, beside the copy, the tree hash it was checked against and the staging sessions that checked it (the
+    latest :data:`STAMP_SESSIONS`, so that jobs that share the node and the copy each find it current), written whole
+    and renamed into place.  A stamp that cannot be written is only logged: the copy serves, and the session's other
+    processes use it unchecked (:func:`_unchecked`)."""
+
+    stamp = _stamp_path(target)
+    previous = _read_stamp(target)
+    kept = previous.get("sessions", []) if previous.get("tree_hash") == digest else []
+    sessions = [entry for entry in kept if entry != session]
+    record = {
+        "tree_hash": digest,
+        "files": files,
+        "bytes": size,
+        "sessions": [*sessions, session][-STAMP_SESSIONS:],
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    partial = stamp.with_name(f"{stamp.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        partial.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        os.rename(partial, stamp)
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        logger.warning("cannot record the check of the staged toolchain %s in %s: %s", target.name, stamp, exc)
 
 
 def _remove_partial_copies(root: Path, name: str) -> None:
-    """Remove the partial copies of the staged copy ``name`` (``.<name>.<hex>.partial``) that stagings killed while
-    they copied left in ``root``.  Only a holder of that copy's lock makes them, so for the caller, which holds it,
-    each one is stale.  The exact pattern leaves the partial copies of other toolchains and versions alone."""
+    """Remove what stagings of the copy ``name`` that were killed left in ``root``: partial copies
+    (``.<name>.<hex>.partial``) and stamps half written (``.<name>.staged.<hex>.tmp``).  Only a holder of that copy's
+    lock makes them, so for the caller, which holds it, each one is stale.  The exact patterns leave those of other
+    toolchains and versions alone, and the copies set aside when they were replaced (``.<name>.<hex>.stale``), from
+    which rollouts of other jobs may still run."""
 
-    pattern = re.compile(rf"\.{re.escape(name)}\.[0-9a-f]+\.partial")
+    pattern = re.compile(rf"\.{re.escape(name)}\.(?:[0-9a-f]+\.partial|staged\.[0-9a-f]+\.tmp)")
     for entry in root.iterdir():
         if pattern.fullmatch(entry.name):
-            shutil.rmtree(entry, ignore_errors=True)
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                with contextlib.suppress(OSError):  # a cache this process cannot write to keeps it
+                    entry.unlink(missing_ok=True)
 
 
 def _fingerprint(path: Path) -> str:
@@ -317,14 +547,55 @@ def prepare(
     """Resolve the named toolchain and stage it (:func:`resolve`, :func:`stage`); blocks, so call it off the event
     loop.  Raises :class:`ToolchainError`."""
 
+    return _prepare(name, root=root, cache=cache)[0]
+
+
+def _prepare(
+    name: str, *, root: str | os.PathLike[str] | None, cache: str | os.PathLike[str] | None
+) -> tuple[PreparedToolchain, StageAction]:
     toolchain = resolve(name, root=root)
     try:
-        staged = stage(toolchain, cache=cache)
+        staged, action = _stage(toolchain, cache)
     except ToolchainError:
         raise
     except OSError as exc:
         raise ToolchainError(f"cannot stage toolchain {name!r} from {toolchain.path}: {exc}") from exc
-    return PreparedToolchain(toolchain=toolchain, staged=staged)
+    return PreparedToolchain(toolchain=toolchain, staged=staged), action
+
+
+def prestage(
+    names: Iterable[str],
+    *,
+    root: str | os.PathLike[str] | None = None,
+    cache: str | os.PathLike[str] | None = None,
+    log: Log | None = None,
+) -> dict[str, PreparedToolchain | ToolchainError]:
+    """Stage each named toolchain on this node now, ahead of the rollouts that run from it (see the module docstring),
+    and say what each took: copied, a kept copy checked, or current already.  Each name is staged once; one that
+    cannot be (not built, unreadable, not matching its manifest) is returned as its :class:`ToolchainError` and
+    logged, and its rollouts then stage it themselves, as before, and fail as they would have.  Blocks; call it off
+    the event loop."""
+
+    log = log or logger.info
+    staged: dict[str, PreparedToolchain | ToolchainError] = {}
+    for name in dict.fromkeys(names):
+        began = time.monotonic()
+        try:
+            prepared, action = _prepare(name, root=root, cache=cache)
+        except ToolchainError as exc:
+            staged[name] = exc
+            log(f"could not stage the toolchain {name} ahead of the rollouts; each rollout stages it itself: {exc}")
+            continue
+        staged[name] = prepared
+        done = {
+            "current": "was staged already",
+            "verified": "was staged by an earlier job, and its files still match its manifest",
+            "replaced": "was staged by an earlier job, but its files no longer matched its manifest: copied again",
+            "copied": "copied",
+            "unchecked": "was staged by an earlier job, and is used unchecked: its cache cannot record a check",
+        }[action]
+        log(f"toolchain {name} at {prepared.staged}: {done} ({time.monotonic() - began:.1f}s)")
+    return staged
 
 
 @dataclass(frozen=True)
@@ -771,10 +1042,12 @@ __all__ = [
     "ensure_toolchain",
     "is_named",
     "prepare",
+    "prestage",
     "read_manifest",
     "recipe_sha256",
     "resolve",
     "stage",
+    "staging_session",
     "toolchain_dir",
     "toolchain_problem",
     "toolchain_root",

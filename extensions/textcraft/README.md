@@ -16,12 +16,13 @@ environments, the CodeAct prompts of platoon's TextCraft agents, and an export o
 pip install 'platoon-textcraft[platoon]'
 ```
 
-The `platoon` extra installs platoon 0.3 with its `ors` extra (`platoon[ors]>=0.3,<0.4`), for what imports platoon:
-the prompt builders, the named environments and the task generators. With platoon 0.2, install `platoon-textcraft`
-0.1.0, the release for it (`pip install 'platoon-textcraft[platoon]>=0.1,<0.2'`). To train or evaluate with platoon,
-add its `tinker` extra: `pip install 'platoon[tinker,ors]' 'platoon-textcraft[platoon]'`. The environments themselves
-need only openreward and pydantic: `platoon_textcraft.env` imports neither platoon nor IPython, so any ORS client can
-serve them after `pip install platoon-textcraft`.
+The `platoon` extra installs platoon 0.4 with its `ors` extra (`platoon[ors]>=0.4,<0.5`), for what imports platoon: the
+prompt builders, the named environments and the task generators. With platoon 0.3, install `platoon-textcraft` 0.2.0,
+the release for it (`pip install 'platoon-textcraft[platoon]>=0.2,<0.3'`), and with platoon 0.2, 0.1.0 (`>=0.1,<0.2`).
+To train or evaluate with platoon, add its `tinker` extra:
+`pip install 'platoon[tinker,ors]' 'platoon-textcraft[platoon]'`. The environments themselves need only openreward and
+pydantic: `platoon_textcraft.env` imports neither platoon nor IPython, so any ORS client can serve them after
+`pip install platoon-textcraft`.
 
 The configs below and the tests are in platoon's repository, not in the package. From a checkout of platoon, in its
 uv workspace:

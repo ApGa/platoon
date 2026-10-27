@@ -14,7 +14,8 @@ import httpx
 import pytest
 import tinker
 
-from platoon.train.tinker import rl
+from platoon.train.policy import service as service_module
+from platoon.train.trainer import rl as rl_module
 
 
 def _request() -> httpx.Request:
@@ -40,7 +41,7 @@ class Opener:
     def __init__(self, *errors: BaseException) -> None:
         self.errors = list(errors)
         self.asks = 0
-        self.trainer = object.__new__(rl.PlatoonTinkerRLTrainer)
+        self.trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
         self.trainer._create_training_client = self._create
 
     async def _create(self, service_client, resume_info):
@@ -55,8 +56,8 @@ class Opener:
 
 @pytest.fixture(autouse=True)
 def quick(monkeypatch):
-    monkeypatch.setattr(rl, "TRAINING_CLIENT_FIRST_WAIT_S", 0.01)
-    monkeypatch.setattr(rl, "TRAINING_CLIENT_LONGEST_WAIT_S", 0.02)
+    monkeypatch.setattr(service_module, "TRAINING_CLIENT_FIRST_WAIT_S", 0.01)
+    monkeypatch.setattr(service_module, "TRAINING_CLIENT_LONGEST_WAIT_S", 0.02)
 
 
 def test_refusals_are_asked_again_and_logged_until_the_service_accepts(caplog):
@@ -105,7 +106,7 @@ def test_an_error_that_is_not_the_services_answer_is_raised_at_once(error):
 
 
 def test_a_start_gives_up_after_the_time_it_asks_for(monkeypatch):
-    monkeypatch.setattr(rl, "TRAINING_CLIENT_OPEN_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(service_module, "TRAINING_CLIENT_OPEN_TIMEOUT_S", 0.2)
     opener = Opener(*[tinker.APIConnectionError(request=_request()) for _ in range(1000)])
 
     began = time.monotonic()
@@ -119,7 +120,7 @@ def test_a_start_gives_up_after_the_time_it_asks_for(monkeypatch):
 
 def test_a_stop_while_waiting_ends_the_asking_without_a_client(monkeypatch, caplog):
     caplog.set_level(logging.INFO)
-    monkeypatch.setattr(rl, "TRAINING_CLIENT_FIRST_WAIT_S", 30.0)  # a wait that the stop cuts short
+    monkeypatch.setattr(service_module, "TRAINING_CLIENT_FIRST_WAIT_S", 30.0)  # a wait that the stop cuts short
     opener = Opener(*[tinker.APIConnectionError(request=_request()) for _ in range(10)])
 
     async def open_and_stop():
@@ -135,7 +136,7 @@ def test_a_stop_while_waiting_ends_the_asking_without_a_client(monkeypatch, capl
 
 
 def test_a_deadline_fires_on_time_and_not_at_the_next_heartbeat():
-    trainer = object.__new__(rl.PlatoonTinkerRLTrainer)
+    trainer = object.__new__(rl_module.PlatoonTinkerRLTrainer)
 
     async def wait() -> None:
         await trainer._await_with_heartbeat(asyncio.Event().wait(), name="stalled call", total_timeout=0.3)

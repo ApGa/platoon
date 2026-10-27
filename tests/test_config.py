@@ -18,7 +18,7 @@ import yaml
 
 import platoon as pt
 from platoon.deprecations import DeprecatedKey, Deprecation, PlatoonDeprecationWarning
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import (
     IMAGE_PULLS_ENV,
     LOCK_NAME,
@@ -586,10 +586,26 @@ def test_load_config_keeps_its_command_line_forms(tmp_path):
 
 # --- deprecations ------------------------------------------------------------------------------------------------
 
-# train.task_order, task_sampler's name until platoon 0.4.0 removes it.
-LEGACY_SAMPLER = "train.task_order"
-SAMPLER = "train.task_sampler"
-LEGACY_MESSAGE = f"{LEGACY_SAMPLER}: deprecated; use {SAMPLER} instead (platoon 0.4.0 removes it)"
+# No key is deprecated now, so these tests deprecate the rollout config's max_steps (the retiring fixture).
+LEGACY = "train.workflow_config.rollout_config.max_steps"
+REPLACEMENT = "a harness option"
+LEGACY_MESSAGE = f"{LEGACY}: deprecated; use {REPLACEMENT} instead (platoon 9.0.0 removes it)"
+RETIRING = {"max_steps": DeprecatedKey(removed_in="9.0.0", instead=REPLACEMENT)}
+
+
+@pytest.fixture
+def retiring(monkeypatch):
+    """The rollout config's ``max_steps``, deprecated for the test."""
+
+    from platoon.config_defs import RolloutConfig
+
+    monkeypatch.setattr(RolloutConfig, "DEPRECATED_KEYS", RETIRING, raising=False)
+
+
+def _max_steps(value: int | None = 30) -> dict[str, Any]:
+    """The ``train`` keys that set the rollout config's ``max_steps`` to ``value``."""
+
+    return {"workflow_config": {"rollout_config": {"max_steps": value}}}
 
 
 def _legacy_training_config(tmp_path: Path, **train: Any) -> Path:
@@ -603,8 +619,8 @@ def _legacy_training_config(tmp_path: Path, **train: Any) -> Path:
     )
 
 
-def test_a_deprecated_key_loads_with_a_warning_that_names_its_path_and_replacement(tmp_path):
-    run = _legacy_training_config(tmp_path, task_order="weighted")
+def test_a_deprecated_key_loads_with_a_warning_that_names_its_path_and_replacement(tmp_path, retiring):
+    run = _legacy_training_config(tmp_path, **_max_steps())
 
     with pytest.warns(PlatoonDeprecationWarning) as warned:
         resolved = resolve_config(run, [], PlatoonTinkerRLTrainerConfig)
@@ -612,21 +628,21 @@ def test_a_deprecated_key_loads_with_a_warning_that_names_its_path_and_replaceme
     deprecations = [warning for warning in warned if warning.category is PlatoonDeprecationWarning]
     assert [str(warning.message) for warning in deprecations] == [LEGACY_MESSAGE]
     assert deprecations[0].filename == __file__  # named where the caller outside platoon loaded the config
-    assert resolved.deprecations == (Deprecation(LEGACY_SAMPLER, SAMPLER, "0.4.0"),)
-    assert resolved.config.train.task_sampler == "weighted"  # still read
+    assert resolved.deprecations == (Deprecation(LEGACY, REPLACEMENT, "9.0.0"),)
+    assert resolved.config.train.workflow_config.rollout_config.max_steps == 30  # still read
 
 
-def test_a_deprecated_key_counts_wherever_the_config_gives_it(tmp_path):
-    base = _legacy_training_config(tmp_path / "base", task_order=None)
+def test_a_deprecated_key_counts_wherever_the_config_gives_it(tmp_path, retiring):
+    base = _legacy_training_config(tmp_path / "base", **_max_steps(None))
     run = _write(tmp_path / "run.yaml", {"extends": str(base)})
     plain = _legacy_training_config(tmp_path / "plain")
 
     resolved = resolve_config(run, [], PlatoonTinkerRLTrainerConfig, warn=False)
-    overridden = resolve_config(plain, ["train.task_order=auto"], PlatoonTinkerRLTrainerConfig, warn=False)
+    overridden = resolve_config(plain, [f"{LEGACY}=30"], PlatoonTinkerRLTrainerConfig, warn=False)
 
     # A null in a base counts too: the release that removes the key refuses it whatever its value.
-    assert [deprecation.path for deprecation in resolved.deprecations] == [LEGACY_SAMPLER]
-    assert [deprecation.path for deprecation in overridden.deprecations] == [LEGACY_SAMPLER]
+    assert [deprecation.path for deprecation in resolved.deprecations] == [LEGACY]
+    assert [deprecation.path for deprecation in overridden.deprecations] == [LEGACY]
 
 
 def test_an_evaluation_config_reports_a_deprecated_key_under_its_own_section(tmp_path, monkeypatch):
@@ -653,7 +669,7 @@ def test_an_evaluation_config_reports_a_deprecated_key_under_its_own_section(tmp
     assert [deprecation.message for deprecation in resolved.deprecations] == [message]
 
 
-def test_a_config_without_deprecated_keys_loads_without_a_warning(tmp_path):
+def test_a_config_without_deprecated_keys_loads_without_a_warning(tmp_path, retiring):
     run = _legacy_training_config(tmp_path, task_sampler="weighted")
 
     with warnings.catch_warnings():
@@ -663,8 +679,8 @@ def test_a_config_without_deprecated_keys_loads_without_a_warning(tmp_path):
     assert resolved.deprecations == ()
 
 
-def test_an_error_filter_makes_a_deprecated_key_raise(tmp_path):
-    run = _legacy_training_config(tmp_path, task_order="weighted")
+def test_an_error_filter_makes_a_deprecated_key_raise(tmp_path, retiring):
+    run = _legacy_training_config(tmp_path, **_max_steps())
 
     with warnings.catch_warnings():
         warnings.simplefilter("error", pt.PlatoonDeprecationWarning)
@@ -678,17 +694,20 @@ def test_the_deprecation_warning_is_a_future_warning_that_python_shows_by_defaul
     """Python hides a DeprecationWarning outside __main__; a FutureWarning shows in any program that loads a config
     with a deprecated key."""
 
-    run = _legacy_training_config(tmp_path, task_order="weighted")
+    run = _legacy_training_config(tmp_path, **_max_steps())
     load = (
-        "from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig\n"
+        "from platoon.config_defs import RolloutConfig\n"
+        "from platoon.deprecations import DeprecatedKey\n"
+        "from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig\n"
         "from platoon.utils.config import resolve_config\n"
+        f"RolloutConfig.DEPRECATED_KEYS = {RETIRING!r}\n"
         f"resolve_config({str(run)!r}, [], PlatoonTinkerRLTrainerConfig)\n"
     )
 
     completed = subprocess.run([sys.executable, "-c", load], capture_output=True, text=True, timeout=300)
 
     assert completed.returncode == 0, completed.stderr
-    assert f"<string>:3: PlatoonDeprecationWarning: {LEGACY_MESSAGE}" in completed.stderr
+    assert f"<string>:6: PlatoonDeprecationWarning: {LEGACY_MESSAGE}" in completed.stderr
     assert issubclass(pt.PlatoonDeprecationWarning, FutureWarning)
 
 
@@ -847,14 +866,14 @@ def test_a_renamed_key_and_its_deprecated_name_are_one_key_when_a_section_is_lai
     assert lay_over(Moded(mode="train"), {}).mode == "train"
 
 
-def test_the_lock_records_the_deprecated_keys_a_config_sets(tmp_path):
-    run = _legacy_training_config(tmp_path, task_order="weighted")
+def test_the_lock_records_the_deprecated_keys_a_config_sets(tmp_path, retiring):
+    run = _legacy_training_config(tmp_path, **_max_steps())
     resolved = resolve_config(run, [], PlatoonTinkerRLTrainerConfig, warn=False)
 
     record = write_run_record(tmp_path / "out", resolved, argv=["platoon", "train", str(run)])
 
     lock = json.loads(record.lock_path.read_text())
-    assert lock["deprecations"] == [{"path": LEGACY_SAMPLER, "replacement": SAMPLER, "removed_in": "0.4.0"}]
+    assert lock["deprecations"] == [{"path": LEGACY, "replacement": REPLACEMENT, "removed_in": "9.0.0"}]
     assert "deprecations" not in run_lock([])  # a lock written without a loaded config cannot know them
 
 

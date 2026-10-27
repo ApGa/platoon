@@ -1,6 +1,12 @@
-"""The forms that platoon 0.2.0 deprecated and 0.3.0 removed (RFC 0016, section 10): a config, an override or a
-command that still uses one fails as a configuration error (exit 78), with a message that names what replaces it and
-says that platoon 0.3.0 removed it.
+"""The forms that a release deprecated and the next minor release removed (RFC 0016, section 10): a config, an
+override or a command that still uses one fails as a configuration error (exit 78), with a message that names what
+replaces it and says which release removed it.
+
+Platoon 0.4.0 removed the form that 0.3.0 deprecated:
+
+- ``train.task_order``, now ``train.task_sampler``, which takes its values.
+
+Platoon 0.3.0 removed the forms that 0.2.0 deprecated:
 
 - ``rollout_config.propogate_root_success``, the misspelling of ``propagate_root_success``;
 - ``train.rollout_group_key``, now ``train.label_by``;
@@ -30,9 +36,10 @@ import pytest
 import yaml
 
 from platoon import cli
-from platoon.train.tinker.config_defs import EvalConfig, PlatoonTinkerRLTrainerConfig, TrainConfig
+from platoon.train.config_defs import EvalConfig, PlatoonTinkerRLTrainerConfig, TrainConfig
 from platoon.utils.config import ConfigError, resolve_config
 
+TASK_ORDER = "train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler"
 PROPAGATION = "platoon 0.3.0 removed it; use propagate_root_success"
 LABELS = "platoon 0.3.0 removed it; use train.label_by, whose labels straggler_policies key on"
 TRAIN_ROLLOUTS = (
@@ -86,6 +93,11 @@ def _exit_code(argv: list[str]) -> int:
 # --- config keys and values ------------------------------------------------------------------------------------------
 
 REMOVED_KEYS = [
+    pytest.param({"train": {"task_order": "weighted"}}, TASK_ORDER, id="train.task_order"),
+    # Platoon 0.3.0 ignored task_order: auto, 0.2.0's default, beside task_sampler; 0.4.0 refuses it there too.
+    pytest.param(
+        {"train": {"task_order": "auto", "task_sampler": "weighted"}}, TASK_ORDER, id="train.task_order-beside-sampler"
+    ),
     pytest.param(
         {"train": {"workflow_config": {"rollout_config": {"propogate_root_success": True}}}},
         f"train.workflow_config.rollout_config.propogate_root_success: unknown key; {PROPAGATION}",
@@ -162,7 +174,7 @@ def test_a_config_that_sets_a_removed_key_or_value_does_not_load_and_says_what_r
 
 
 def test_platoon_train_refuses_a_removed_key_before_it_makes_anything(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: pytest.fail("it trained"))
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("it trained"))
     config = _training(tmp_path, train={"rollout_group_key": "suite"})
 
     assert _exit_code(["train", str(config)]) == cli.EXIT_CONFIG
@@ -176,6 +188,7 @@ def test_platoon_train_refuses_a_removed_key_before_it_makes_anything(tmp_path, 
 @pytest.mark.parametrize(
     ("override", "problem"),
     [
+        ("train.task_order=weighted", TASK_ORDER),
         ("train.rollout_group_key=suite", "train.rollout_group_key: unknown key; platoon 0.3.0 removed it"),
         ("train.workflow_config.straggler_policy_key=suite", f"straggler_policy_key: unknown key; {LABELS}"),
         ("eval.num_concurrent_rollout_workflow_workers=2", f"unknown key; {EVAL_ROLLOUTS}"),
@@ -218,6 +231,8 @@ def test_an_evaluation_config_refuses_the_removed_key_of_its_rollouts(tmp_path):
 def test_the_config_classes_take_no_removed_key_from_python_either():
     """And ``strategy: none`` built in Python is refused too (``tests/train/tinker/test_event_strategy.py``)."""
 
+    with pytest.raises(TypeError, match="task_order"):
+        TrainConfig(model_name="m", renderer_name="r", task_order="weighted")  # type: ignore[call-arg]
     with pytest.raises(TypeError, match="rollout_group_key"):
         TrainConfig(model_name="m", renderer_name="r", rollout_group_key="suite")  # type: ignore[call-arg]
     with pytest.raises(TypeError, match="num_concurrent_rollout_workflow_workers"):
@@ -246,7 +261,7 @@ def test_a_harbor_entry_that_sets_a_removed_option_is_refused_by_each_command_th
     tmp_path, monkeypatch, capsys, option, value
 ):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: pytest.fail("it trained"))
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("it trained"))
     config = _harbor(tmp_path, **{option: value})
     problem = f"environments.0.service_kwargs.{option}: unknown key; {HARBOR[option]}"
 

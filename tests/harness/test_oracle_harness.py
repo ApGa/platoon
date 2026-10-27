@@ -4,35 +4,23 @@ task the oracle (``solution/solve.sh``) scores 1 and the no-op 0, without a sing
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 from harness_fakes import FakeService
+from no_model import no_model_gateway
+from site_cache import use_site_cache
 from test_harness_rollout import rollout_config, runner
 
-from platoon.gateway import ModelGateway
-from platoon.harness.rollout import EmbeddedGateway, run_harness_rollout
+from platoon.envs.harbor.fetch import fetch, fetch_config
+from platoon.harness.rollout import run_harness_rollout
 from platoon.task import Task
 from platoon.train.components import EnvironmentRoute
 
 HELLO = Path(__file__).resolve().parents[1] / "envs" / "fixtures" / "harbor" / "hello-file"
-
-
-class NoModel:
-    """A renderer for a gateway that must never render: these harnesses make no model calls."""
-
-    def build_generation_prompt(self, messages, role="assistant", prefill=None):
-        raise AssertionError("no model call expected")
-
-    def parse_response(self, tokens):
-        raise AssertionError("no model call expected")
-
-    def get_stop_sequences(self):
-        return []
-
-
-def gateway() -> EmbeddedGateway:
-    return EmbeddedGateway(ModelGateway(sampler=None, renderer=NoModel(), tokenizer=None, model_name="none"))
+STACKS = Path(__file__).resolve().parents[1] / "envs" / "fixtures" / "harbor-stacks" / "tasks"
 
 
 def dataset(tmp_path: Path, *, solve: str | None = None, agent_timeout: float | None = None) -> Path:
@@ -46,12 +34,15 @@ def dataset(tmp_path: Path, *, solve: str | None = None, agent_timeout: float | 
     return task_dir.parent
 
 
-async def play(tmp_path: Path, harness: str, data: Path) -> dict:
+async def play(tmp_path: Path, harness: str, data: Path | None, *, task_id: str = "hello-file", **source: Any) -> dict:
+    """One rollout of ``harness`` on the task ``task_id`` of the dataset directory ``data``, or of the fetched dataset
+    that ``source`` names (``dataset``, ``refuse``, ...), on the process provider."""
+
     route = EnvironmentRoute(
         name="harbor",
         service="harbor",
         service_kwargs={
-            "dataset_dir": str(data),
+            **(source or {"dataset_dir": str(data)}),
             "provider": "process",
             "provider_options": {"root": str(tmp_path / "sandboxes")},
         },
@@ -59,7 +50,7 @@ async def play(tmp_path: Path, harness: str, data: Path) -> dict:
         resolve_task=True,
     )
     collection = await run_harness_rollout(
-        route.attach(Task(id="hello-file")), rollout_config(tmp_path), gateway=gateway(), runner=runner(tmp_path)
+        route.attach(Task(id=task_id)), rollout_config(tmp_path), gateway=no_model_gateway(), runner=runner(tmp_path)
     )
     (root,) = collection["trajectories"].values()
     return root
@@ -74,6 +65,46 @@ async def test_the_oracle_scores_a_sound_task_and_the_noop_does_not(tmp_path):
     assert oracle["misc"]["oracle"]["exit_code"] == 0 and oracle["steps"] == []
     assert oracle["misc"]["harness"]["spec"] == "platoon-oracle@1"
     assert (noop["misc"]["outcome"]["status"], noop["reward"]) == ("scored", 0.0) and noop["steps"] == []
+
+
+def stack_repository(root: Path) -> str:
+    """A git repository at ``root`` holding the stack fixture ``app-kv`` below ``tasks/`` (main stores a value through
+    a key-value sidecar, which records the write; the tests read both back): the ``git+`` dataset of that directory at
+    its commit."""
+
+    shutil.copytree(STACKS / "app-kv", root / "tasks" / "app-kv")
+
+    def git(*args: str) -> str:
+        command = ["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@example.com", *args]
+        return subprocess.run(command, check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("add", "-A")
+    git("commit", "-q", "-m", "tasks")
+    return f"git+{root.as_uri()}@{git('rev-parse', 'HEAD')}#tasks"
+
+
+@pytest.mark.asyncio
+async def test_a_stack_fetched_from_git_scores_with_the_oracle_and_not_with_the_noop(tmp_path, monkeypatch):
+    """A multi-container task fetched from a git repository, which a fetch locks as a stack by default, runs
+    through the rollout path on the process provider with its sidecar: the oracle scores 1 and the no-op 0, both
+    graded (a sidecar that a probe found down would make them invalid)."""
+
+    monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
+    use_site_cache(monkeypatch, tmp_path / "site")
+    source: dict[str, Any] = {"dataset": stack_repository(tmp_path / "upstream")}
+    lock = fetch(fetch_config(**source))  # as the trainer fetches it when it lists the tasks
+    task = lock.get("app-kv")
+    assert (lock.source["kind"], task.flags["stack"], task.refused) == ("git", "sidecars", None)
+
+    oracle = await play(tmp_path / "oracle", "platoon-oracle", None, task_id="app-kv", **source)
+    noop = await play(tmp_path / "noop", "platoon-noop", None, task_id="app-kv", **source)
+
+    assert (oracle["misc"]["outcome"]["status"], oracle["reward"]) == ("scored", 1.0), oracle["misc"]["outcome"]
+    assert oracle["misc"]["oracle"]["exit_code"] == 0 and oracle["steps"] == []
+    assert (noop["misc"]["outcome"]["status"], noop["reward"]) == ("scored", 0.0), noop["misc"]["outcome"]
+    for run in ("oracle", "noop"):
+        assert list((tmp_path / run / "sandboxes").iterdir()) == []  # the stack's services and volumes are gone
 
 
 @pytest.mark.asyncio
@@ -102,7 +133,7 @@ async def test_the_oracle_needs_a_session_with_a_reference_solution(tmp_path):
     )
 
     collection = await run_harness_rollout(
-        route.attach(Task(id="train-0")), rollout_config(tmp_path), gateway=gateway(), runner=runner(tmp_path)
+        route.attach(Task(id="train-0")), rollout_config(tmp_path), gateway=no_model_gateway(), runner=runner(tmp_path)
     )
 
     (root,) = collection["trajectories"].values()

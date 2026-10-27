@@ -159,7 +159,7 @@ def _exit_code(argv: list[str]) -> int:
 
 def test_train_snapshots_the_resolved_config_into_the_run_dir_and_trains_from_it(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     config = _train_config(tmp_path)
 
     cli.main(["train", str(config), "train.batch_size=64", "stats.trial_name=7"])
@@ -175,7 +175,7 @@ def test_train_snapshots_the_resolved_config_into_the_run_dir_and_trains_from_it
 
 def test_a_config_error_exits_78_with_a_suggestion_before_training(tmp_path, monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
 
     assert _exit_code(["train", str(_train_config(tmp_path)), "train.bach_size=64"]) == cli.EXIT_CONFIG
 
@@ -185,7 +185,7 @@ def test_a_config_error_exits_78_with_a_suggestion_before_training(tmp_path, mon
 
 def test_a_trainer_config_that_does_not_resolve_exits_78_before_training(tmp_path, monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     entry = {**_environment("tree"), "trainer_config": "no_such_plugin.config:TrainerConfig"}
     config = _train_config(tmp_path, environments=[entry])
     problem = (
@@ -231,7 +231,7 @@ EVAL_OUTPUT_DIR = "eval.workflow_config.rollout_config.output_dir"
 
 
 def test_train_warns_that_it_replaces_a_configured_rollout_output_dir(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     config = _train_config(tmp_path)
 
     cli.main(["train", str(config), f"{TRAIN_OUTPUT_DIR}=/elsewhere", f"{EVAL_OUTPUT_DIR}=/elsewhere"])
@@ -243,7 +243,7 @@ def test_train_warns_that_it_replaces_a_configured_rollout_output_dir(tmp_path, 
 
 
 def test_train_with_its_own_workflow_class_leaves_the_rollout_output_dir_to_it(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     environment = {**_environment("tree"), "workflow": f"{__name__}:MyWorkflow"}
     config = _train_config(tmp_path, environments=[environment])
 
@@ -418,15 +418,17 @@ def test_config_show_prints_the_merged_config_after_overrides(tmp_path, capsys):
     assert "extends" not in shown
 
 
-def test_config_show_with_defaults_prints_every_field(tmp_path, capsys):
+def test_config_show_with_defaults_prints_every_field(tmp_path, capsys, retiring):
     cli.main(["config", "show", str(_train_config(tmp_path)), "--defaults"])
 
     shown = yaml.safe_load(capsys.readouterr().out)
     assert shown["train"]["workflow_config"]["group_size"] == 8
     assert shown["checkpoint"]["every"] == 0
     assert shown["checkpoint"]["strategy"] is None and shown["eval"]["strategy"] is None  # every counts steps
-    # But a deprecated key left unset: a config copied from the output would set a key that is going away.
-    assert shown["train"]["task_sampler"] == "auto" and "task_order" not in shown["train"]
+    assert shown["train"]["task_sampler"] == "auto"
+    # But a deprecated key left at its default: a config copied from the output would set a key that is going away.
+    rollout = shown["train"]["workflow_config"]["rollout_config"]
+    assert "step_timeout" not in rollout and rollout["max_steps"] is None
 
 
 def test_config_validate_reports_each_file_and_exits_78_when_any_fails(tmp_path, capsys):
@@ -495,15 +497,27 @@ def test_config_validate_checks_a_file_of_environments_against_the_entry_schema(
 
 # --- deprecated keys ---------------------------------------------------------------------------------------------
 
-LEGACY = "train.task_order"
-LEGACY_LINE = f"{LEGACY}: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)"
+# No key is deprecated now, so these tests deprecate the rollout config's step_timeout (the retiring fixture).
+LEGACY = "train.workflow_config.rollout_config.step_timeout"
+LEGACY_LINE = f"{LEGACY}: deprecated; use a harness option instead (platoon 9.0.0 removes it)"
+
+
+@pytest.fixture
+def retiring(monkeypatch):
+    """The rollout config's ``step_timeout``, deprecated for the test."""
+
+    from platoon.config_defs import RolloutConfig
+
+    keys = {"step_timeout": DeprecatedKey(removed_in="9.0.0", instead="a harness option")}
+    monkeypatch.setattr(RolloutConfig, "DEPRECATED_KEYS", keys, raising=False)
 
 
 def _with_legacy_key(path: Path) -> Path:
-    """The training config at ``path`` with ``train.task_order: weighted``, ``task_sampler``'s deprecated name."""
+    """The training config at ``path`` with ``train.workflow_config.rollout_config.step_timeout: 60``, which the
+    ``retiring`` fixture deprecates."""
 
     data = yaml.safe_load(path.read_text())
-    data["train"]["task_order"] = "weighted"
+    data["train"]["workflow_config"] = {"rollout_config": {"step_timeout": 60}}
     path.write_text(yaml.safe_dump(data))
     return path
 
@@ -512,7 +526,7 @@ def _platoon_deprecations(caught: list[warnings.WarningMessage]) -> list[str]:
     return [str(warning.message) for warning in caught if issubclass(warning.category, PlatoonDeprecationWarning)]
 
 
-def test_config_validate_lists_a_deprecated_key_once_and_fails_on_it_with_strict(tmp_path, capsys):
+def test_config_validate_lists_a_deprecated_key_once_and_fails_on_it_with_strict(tmp_path, capsys, retiring):
     config = _with_legacy_key(_train_config(tmp_path))
 
     cli.main(["config", "validate", str(config)])
@@ -528,8 +542,8 @@ def test_config_validate_lists_a_deprecated_key_once_and_fails_on_it_with_strict
     assert capsys.readouterr().out.startswith("ok   ")
 
 
-def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, monkeypatch, capsys):
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, monkeypatch, capsys, retiring):
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import load_config
 
     loaded = []
@@ -537,7 +551,7 @@ def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, 
     def run_tinker_training(args):  # training loads its snapshot of the config again
         loaded.append(load_config(args, PlatoonTinkerRLTrainerConfig)[0])
 
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", run_tinker_training)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", run_tinker_training)
     config = _with_legacy_key(_train_config(tmp_path))
 
     with warnings.catch_warnings(record=True) as caught:
@@ -547,50 +561,15 @@ def test_train_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, 
     err = capsys.readouterr().err
     assert err.count(f"platoon: {LEGACY_LINE}\n") == 1
     assert _platoon_deprecations(caught) == []  # the reload of the snapshot does not warn again
-    assert loaded[0].train.task_sampler == "weighted"  # the key still works
+    assert loaded[0].train.workflow_config.rollout_config.step_timeout == 60  # the key still works
     lock = json.loads((tmp_path / "logs/exp/trial/lock.json").read_text())
-    assert lock["deprecations"] == [{"path": LEGACY, "replacement": "train.task_sampler", "removed_in": "0.4.0"}]
-
-
-def test_task_order_is_listed_flagged_by_strict_and_recorded_as_task_samplers_former_name(
-    tmp_path, monkeypatch, capsys
-):
-    """``train.task_order``, ``train.task_sampler``'s name before platoon 0.3.0, still loads: ``config validate`` lists
-    it under the config and ``--strict`` fails on it, and ``platoon train`` names it once and records it in
-    ``lock.json``, with the sampler it names in force."""
-
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.utils.config import load_config
-
-    config = _train_config(tmp_path)
-    data = yaml.safe_load(config.read_text())
-    data["train"]["task_order"] = "weighted"
-    config.write_text(yaml.safe_dump(data))
-    line = "train.task_order: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)"
-
-    cli.main(["config", "validate", str(config)])
-    assert capsys.readouterr().out == f"ok   {config} (PlatoonTinkerRLTrainerConfig)\n  {line}\n"
-    assert _exit_code(["config", "validate", "--strict", str(config)]) == cli.EXIT_CONFIG
-    assert capsys.readouterr().out == f"FAIL {config}\n  {line}\n"
-
-    loaded = []
-    monkeypatch.setattr(
-        "platoon.train.tinker.train.run_tinker_training",
-        lambda args: loaded.append(load_config(args, PlatoonTinkerRLTrainerConfig)[0]),
-    )
-    cli.main(["train", str(config)])
-    assert capsys.readouterr().err.count(f"platoon: {line}\n") == 1
-    assert (loaded[0].train.task_sampler, loaded[0].train.task_order) == ("weighted", None)
-    lock = json.loads((tmp_path / "logs/exp/trial/lock.json").read_text())
-    assert lock["deprecations"] == [
-        {"path": "train.task_order", "replacement": "train.task_sampler", "removed_in": "0.4.0"}
-    ]
+    assert lock["deprecations"] == [{"path": LEGACY, "replacement": "a harness option", "removed_in": "9.0.0"}]
 
 
 # What platoon 0.2.0's `config show --defaults` printed for a training config on this file's loaders: every key at its
-# 0.2.0 default, `train.task_order: auto` among them.
+# 0.2.0 default, `train.task_order: auto` among them, which platoon 0.4.0 removed.
 DEFAULTS_0_2_0 = Path(__file__).parent / "fixtures" / "config_show_defaults_0.2.0.yaml"
-TASK_ORDER_LINE = "train.task_order: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)"
+TASK_ORDER_REMOVED = "train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler"
 
 
 def _defaults_0_2_0(directory: Path) -> Path:
@@ -603,69 +582,26 @@ def _defaults_0_2_0(directory: Path) -> Path:
     return dump
 
 
-def test_a_0_2_0_defaults_dump_beside_task_sampler_loads_and_says_that_task_order_is_ignored(
-    tmp_path, monkeypatch, capsys
-):
-    """A config copied from 0.2.0's ``config show --defaults`` spells ``train.task_order: auto``, its default then.
-    Beside it ``train.task_sampler`` wins, and the deprecation says that ``task_order`` was ignored: ``config
-    validate`` lists it and ``--strict`` fails on it, and ``platoon train`` names it once, trains with
-    ``task_sampler``'s sampler and records the deprecation in ``lock.json``, for a config that extends the dump and
-    for an override of the dump alike."""
+def test_a_0_2_0_defaults_dump_is_refused_for_its_task_order_alone(tmp_path, monkeypatch, capsys):
+    """A config copied from 0.2.0's ``config show --defaults`` spells ``train.task_order: auto``, its default then,
+    which platoon 0.4.0 removed: ``config validate`` and ``platoon train`` refuse it (exit 78) and say what replaces
+    it, beside ``train.task_sampler`` too, where 0.3.0 ignored it, before the run directory is made.  It is the dump's
+    one problem: without it, the dump loads, with nothing deprecated."""
 
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.utils.config import load_config
-
-    dump = _defaults_0_2_0(tmp_path / "dump")
-    child = tmp_path / "dump" / "child.yaml"
-    child.write_text(yaml.safe_dump({"extends": dump.name, "train": {"task_sampler": "weighted"}}))
-    line = f"{TASK_ORDER_LINE}; its value 'auto' is ignored, since train.task_sampler is 'weighted'"
-
-    cli.main(["config", "validate", str(child)])
-    assert capsys.readouterr().out == f"ok   {child} (PlatoonTinkerRLTrainerConfig)\n  {line}\n"
-    assert _exit_code(["config", "validate", "--strict", str(child)]) == cli.EXIT_CONFIG
-    assert capsys.readouterr().out == f"FAIL {child}\n  {line}\n"
-
-    loaded = []
-    monkeypatch.setattr(
-        "platoon.train.tinker.train.run_tinker_training",
-        lambda args: loaded.append(load_config(args, PlatoonTinkerRLTrainerConfig)[0]),
-    )
-    override = [str(_defaults_0_2_0(tmp_path / "override")), "train.task_sampler=weighted"]
-    for argv in ([str(child)], override):
-        directory = Path(argv[0]).parent
-        monkeypatch.chdir(directory)  # the dump's log_path, logs, is relative to the working directory
-        cli.main(["train", *argv])
-        assert capsys.readouterr().err.count(f"platoon: {line}\n") == 1
-        lock = json.loads((directory / "logs/exp/trial/lock.json").read_text())
-        assert lock["deprecations"] == [
-            {"path": "train.task_order", "replacement": "train.task_sampler", "removed_in": "0.4.0"}
-        ]
-    assert [(config.train.task_sampler, config.train.task_order) for config in loaded] == [("weighted", None)] * 2
-
-
-def test_a_0_2_0_defaults_dump_loads_with_task_sampler_alone_unless_task_order_weighted_contradicts_it(
-    tmp_path, monkeypatch, capsys
-):
-    """The 0.2.0 dump alone loads with ``task_order``'s ``auto``, and beside the same ``task_sampler`` too, each with
-    the plain deprecation.  ``task_order: weighted`` beside another ``task_sampler`` is a conflict that neither
-    ``config validate`` nor ``platoon train`` loads (exit 78)."""
-
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("it trained"))
+    monkeypatch.chdir(tmp_path)  # the dump's log_path, logs, is relative to the working directory
     dump = _defaults_0_2_0(tmp_path)
 
-    for overrides in ([], ["train.task_sampler=auto"], ["train.task_order=weighted", "train.task_sampler=weighted"]):
-        cli.main(["config", "validate", str(dump), *overrides])
-        assert capsys.readouterr().out == f"ok   {dump} (PlatoonTinkerRLTrainerConfig)\n  {TASK_ORDER_LINE}\n"
-    conflict = ["train.task_order=weighted", "train.task_sampler=auto"]
-    problem = (
-        "train.task_sampler is 'auto' and train.task_order, its deprecated name, is 'weighted'; set task_sampler alone"
-    )
-    assert _exit_code(["config", "validate", str(dump), *conflict]) == cli.EXIT_CONFIG
-    out = capsys.readouterr().out
-    assert out.startswith(f"FAIL {dump}\n") and problem in out
-    assert _exit_code(["train", str(dump), *conflict]) == cli.EXIT_CONFIG
-    assert problem in capsys.readouterr().err
+    for overrides in ([], ["train.task_sampler=weighted"]):
+        assert _exit_code(["config", "validate", str(dump), *overrides]) == cli.EXIT_CONFIG
+        assert capsys.readouterr().out == f"FAIL {dump}\n  {TASK_ORDER_REMOVED}\n"
+        assert _exit_code(["train", str(dump), *overrides]) == cli.EXIT_CONFIG
+        assert f"  {TASK_ORDER_REMOVED}\n" in capsys.readouterr().err
     assert not (tmp_path / "logs").exists()  # refused before the run directory is made
+
+    dump.write_text(dump.read_text().replace("  task_order: auto\n", ""))
+    cli.main(["config", "validate", "--strict", str(dump)])
+    assert capsys.readouterr().out == f"ok   {dump} (PlatoonTinkerRLTrainerConfig)\n"
 
 
 def test_eval_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, monkeypatch, capsys):
@@ -690,7 +626,7 @@ def test_eval_names_a_deprecated_key_once_and_records_it_in_the_lock(tmp_path, m
 
 
 def test_a_config_without_deprecated_keys_records_none(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
 
     cli.main(["train", str(_train_config(tmp_path))])
 
@@ -698,9 +634,9 @@ def test_a_config_without_deprecated_keys_records_none(tmp_path, monkeypatch, ca
     assert "deprecated" not in capsys.readouterr().err
 
 
-def test_an_error_warning_filter_makes_a_deprecated_key_a_config_error(tmp_path, monkeypatch, capsys):
+def test_an_error_warning_filter_makes_a_deprecated_key_a_config_error(tmp_path, monkeypatch, capsys, retiring):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     config = _with_legacy_key(_train_config(tmp_path))
 
     with warnings.catch_warnings():
@@ -711,8 +647,8 @@ def test_an_error_warning_filter_makes_a_deprecated_key_a_config_error(tmp_path,
     assert calls == [] and not (tmp_path / "logs/exp/trial/lock.json").exists()
 
 
-def test_a_command_s_deprecation_filters_end_with_it(tmp_path, monkeypatch):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+def test_a_command_s_deprecation_filters_end_with_it(tmp_path, monkeypatch, retiring):
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     before = list(warnings.filters)
 
     cli.main(["train", str(_with_legacy_key(_train_config(tmp_path)))])

@@ -307,7 +307,7 @@ def _train_config(tmp_path: Path, environment: dict) -> Path:
 
 def test_lock_json_records_every_component_with_its_distribution(acme, tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # train checks its key before anything else: past it
     sdk_imports = []
     monkeypatch.setattr("platoon.envs.ors.sdk.import_sdk", lambda: sdk_imports.append(True))
@@ -349,7 +349,7 @@ def test_lock_json_records_every_component_with_its_distribution(acme, tmp_path,
     assert lock["extensions"] == {
         "acme-platoon": {
             "version": "1.4.0",
-            "requires": ["platoon>=0.3,<0.4"],
+            "requires": ["platoon>=0.4,<0.5"],
             "direct_url": {"url": "file:///src/acme-platoon", "dir_info": {"editable": True}},
         }
     }
@@ -360,7 +360,7 @@ def test_lock_json_records_every_component_with_its_distribution(acme, tmp_path,
 
 def test_a_run_that_names_an_unknown_component_exits_78_before_it_starts(acme, tmp_path, monkeypatch, capsys):
     calls = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", calls.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", calls.append)
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # train checks its key before anything else: past it
     config = _train_config(tmp_path, {"env": "acme-mazes@1", "harness": "acme-agent", "program": "acme-best-of-m"})
 

@@ -4,8 +4,11 @@ Paths passed to a sandbox (``cwd``, ``upload`` destinations, ``download`` source
 are paths inside the sandbox; local paths are host paths. A string command runs
 through ``bash -c``; a list runs as an argv.
 
-Provider capabilities are a subset of {"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback"}
-(:data:`CAPABILITIES`): what platoon may ask of a provider's sandboxes.
+What platoon may ask of a provider's sandboxes are its capabilities (:data:`CAPABILITIES`), a
+subset of {"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback", "stacks", "privileged"}.
+``stacks`` says that the provider also starts stacks, a task's services each in a sandbox of its own (``start_stack``,
+:mod:`platoon.sandbox.stacks`), and ``privileged`` that it gives a stack's service every privilege, or any capability,
+that its spec asks for (``ServiceSpec.privileged``, ``cap_add``), as Docker does.
 ``host_loopback`` says that a sandbox on the host network (``network: host``) shares this host's network namespace,
 so its processes reach a service on the host's loopback, such as the model gateway, as they are.  A provider whose
 sandboxes run elsewhere (on another node, in a cloud) must not declare it: a harness placed in one of its sandboxes
@@ -23,7 +26,18 @@ given ones, also those a process that died without stopping them left behind (:m
 
 ``kill_processes`` ends what commands left running without stopping the sandbox, so that nothing they started runs
 alongside a verifier.  Every built-in provider has it; a sandbox of a provider written before it existed may lack it,
-and callers check.
+and callers check.  ``keep_processes(entries)``, optional too, spares processes from it, each with its descendants:
+those a session started for the task before any agent ran ("<pid>:<start time>", as ``/proc`` in the sandbox lists
+them), such as a main-only compose file's command, the task's init.  The Harbor service refuses such a task on a
+sandbox without it.
+
+**Users.**  A sandbox's commands run as its own user: root of its user namespace where it gives root (Docker's
+root, Singularity's ``--fakeroot``), else yours.  ``exec_as(user, cmd, ...)``, optional, runs a command as another
+user of the image, named in one of Docker's ``--user`` forms, with ``exec``'s other arguments: the docker provider's
+sandboxes have it (``docker exec --user``); elsewhere the Harbor service switches users with a tool of the image
+(:mod:`platoon.envs.harbor.views`).  A spec's ``file_owners`` names the image's owner manifest, which a provider
+whose sandboxes lose the image's file owners (hpc-sandbox extracts every image as one user) applies where it maps
+the users the manifest names; one whose images keep their owners (docker) needs none.
 
 **A working directory that cannot be entered.**  A command whose working directory (``cwd``, else the spec's
 ``workdir``) is gone, is not a directory or cannot be entered never starts, and fails like a command: the docker and
@@ -46,7 +60,9 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 #: Every capability a provider may declare (docs/extending/sandbox-providers.md says what each means).
-CAPABILITIES = frozenset({"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback"})
+CAPABILITIES = frozenset(
+    {"snapshot", "network_none", "gpu", "isolation", "routes", "host_loopback", "stacks", "privileged"}
+)
 
 
 @dataclass
@@ -68,6 +84,9 @@ class SandboxSpec:
     labels: dict[str, str] = field(default_factory=dict)  # rollout_id etc., for janitors
     # name -> "unix:///abs/dir/name.sock" (a host Unix socket) or "http(s)://host:port"; see Sandbox.routes
     upstreams: dict[str, str] = field(default_factory=dict)
+    # The image's owner manifest: a host file of one "UID GID PATH" line for each path the image gives an owner other
+    # than root's user and group (hpc-sandbox 0.5's format); None: none.  See "Users" above.
+    file_owners: str | None = None
 
 
 @dataclass

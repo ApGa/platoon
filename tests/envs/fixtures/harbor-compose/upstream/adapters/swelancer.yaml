@@ -1,0 +1,14 @@
+services:
+  main:
+    build:
+      dockerfile: Dockerfile
+    command:
+    - /app/tests/run.sh
+    environment: 
+    - PUSHER_APP_KEY=sample-key
+    - PUSHER_APP_SECRET=sample-secret
+    - ISSUE_ID=sample-issue
+    working_dir: /app
+    volumes:
+      - ${HOST_VERIFIER_LOGS_PATH}:${ENV_VERIFIER_LOGS_PATH}
+      - ${HOST_AGENT_LOGS_PATH}:${ENV_AGENT_LOGS_PATH}

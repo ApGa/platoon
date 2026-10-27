@@ -92,7 +92,8 @@ The settings you will change most:
 | `train.optimizer.learning_rate` | 3e-5 | Adam learning rate (`beta1`, `beta2`, `eps`, `weight_decay`, `grad_clip_norm` sit beside it) |
 | `train.loss_fn`, `train.loss_fn_config` | `cispo`, clip thresholds 0.0 and 5.0 | The loss the service computes in `forward_backward`; a `loss_fn_config` replaces the default whole, so it names every key its loss takes |
 | `train.max_staleness` | none | How many steps rollouts may run ahead of training, and how many policy versions old their data may be before it is dropped; none sets no limit. An environment may raise its own groups' bound ([Settings per environment](#settings-per-environment)) |
-| `train.max_concurrent_rollouts` | `batch_size × group_size` | Rollouts in flight at once, started a whole group at a time (`eval.max_concurrent_rollouts`, 256 by default, for an evaluation) |
+| `train.max_concurrent_rollouts` | `batch_size × group_size` | Rollouts in flight at once, the permits the groups share: each rollout holds one until it ends, or under `permit_release: group` a group holds its size of them until it ends (`eval.max_concurrent_rollouts`, 256 by default, for an evaluation) |
+| `train.permit_release` | `rollout` | When permits come back: `rollout`, each as its rollout ends, so the next group starts on them; `group`, the default before 0.4.0, a group's all at once when its workflow returns ([Rollout permits](#rollout-permits)) |
 | `train.workflow_config.rollout_config.max_steps`, `.timeout` | none | Step budget per agent, and time limit of each rollout's root agent in seconds; without one, a harness stops at its own limits (its spec's `timeout_s`, a Harbor task's `[agent] timeout_sec`), which also set a Harbor rollout's deadline ([Harness timeouts](sandboxes-and-harbor.md#harness-timeouts-and-crashes)) |
 | `train.workflow_config.rollout_isolation` | `inprocess` | `process` runs each rollout in its own killable worker process, which sees no GPU (its sandboxes get theirs from their provider) |
 | `train.workflow_config.worker_start_method` | `forkserver` | How a worker process starts: forked from a process that imported the worker's stack once (seconds), or `exec`, a new interpreter that imports it (17-24 s, about a minute with 64 at once) |
@@ -316,18 +317,51 @@ with the entry's `seed` and the last batch filled from the next pass.
 | `auto` (default) | The weighted fair order above | Shuffled passes by the dataloader (seed 42), each epoch the whole batches they fill |
 | `weighted` | The weighted fair order above | The weighted order, as a mixture of one |
 | `uniform` | Shuffled passes over every task of every entry together (seed 42), with no entry slots: an entry's share of the draws is its share of the tasks, and a batch holds whatever the shuffle gives it | The batches `auto` draws, in epochs that hold every task |
+| `pass_rate` (experimental) | Each group's task chosen among every task of the run by its pass rate, when the group can start ([below](#choose-tasks-by-their-pass-rates-experimental)), with no entry slots | The same |
+| A registered name, or `module:Class` | A task sampler of your own ([Write a task sampler](../extending/task-samplers.md)) | The same |
 
 `uniform` draws every training task of the run equally often, as `weight: tasks` does, but without the weighted
 order's balance: the entries' shares hold over the run, not batch by batch. It reads no entry's weight or seed: an
 entry that sets a numeric `weight` does not load with it (exit 78), `weight: tasks`, the default, is accepted, and an
 entry's `seed` changes nothing. An epoch is as many tasks as the run has, filled to whole batches from the next pass.
 
-It was called `train.task_order` before platoon 0.3.0. That name still loads, with the same values, until platoon 0.4.0
-removes it: the commands name it once on stderr with a deprecation warning, `lock.json` records it, and
-`platoon config validate --strict` fails on it. A config may set both names when they agree, or when `task_order` is
-`auto`, its default before 0.3.0, as a dump of platoon 0.2.0's `config show --defaults` spells it: `task_sampler` then
-decides, and when the two differ, the warning says that `task_order` was ignored. A config that sets
-`task_order: weighted` beside another `task_sampler` does not load (exit 78).
+**Each entry's own sampler.** Under `weighted` (and `auto` for a mixture), the run's sampler hands each slot to an
+entry, and the entry's sampler fills it: its `task_sampler` (`uniform` by default: the entry's tasks in shuffled
+passes, seeded by its `seed`), with its `task_sampler_options`. So each entry keeps its share of the slots whatever its
+sampler does with them. A single environment with a `task_sampler` of its own is drawn as a mixture of one.
+
+```yaml
+train:
+  task_sampler: weighted
+environments:
+  - name: hard
+    service: harbor
+    service_kwargs: {dataset: hf://my-org/hard-tasks@3f1c0e9b6d2a4c8e9f0a1b2c3d4e5f6a7b8c9d0e}
+    harness: openhands
+    task_sampler: pass_rate        # experimental: the tasks whose next group is likely to train
+    task_sampler_options: {explore: 0.2}
+  - name: easy                     # uniform
+    service: python://my_project.math:MathEnvironment
+    harness: platoon-react
+```
+
+| `train.task_sampler` | An entry's `task_sampler` | An entry's numeric `weight` |
+|---|---|---|
+| `auto`, `weighted` | `uniform` (default), `pass_rate`, a registered name, `module:Class` | its share of the slots |
+| `uniform`, `pass_rate` | refused: they hand no slots to the entries | refused: they draw among every task of the run |
+| a custom run sampler | allowed when it hands slots (`entry_slots`), else refused | its own `check` decides |
+
+An entry cannot name a run's sampler (`auto`, `weighted`), and options for a sampler that takes none (`uniform`,
+`weighted`, `auto`) are refused; each refusal names its key, in the same report as the file's other problems
+(`platoon config validate`, exit 78). A named environment (`env:`) cannot set `task_sampler` or
+`task_sampler_options`: how a run draws its tasks is the run's choice. `lock.json` records every sampler a run uses,
+with its options, defaults included, and the checkpoints' sampling fingerprint holds the samplers platoon 0.3.0 did
+not have, so a resume that changes one says so ([Checkpoints and resume](#checkpoints-and-resume)).
+
+It was called `train.task_order` before platoon 0.3.0, and platoon 0.4.0 removed that name: a config that still sets
+it does not load (exit 78), with `train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`, and
+neither does a config copied from platoon 0.2.0's `config show --defaults`, which spells `task_order: auto`. Set
+`task_sampler` instead: it takes the old name's values, `auto` and `weighted`, which draw as they did.
 
 **Check the mix before a run.** Once `platoon train` lists the tasks, it logs how it draws them: each entry's tasks,
 weight and share of the slots, and how often each of its tasks is drawn over the planned steps (`num_epochs`,
@@ -350,6 +384,213 @@ ok   train.yaml (PlatoonTinkerRLTrainerConfig)
   environments[math]: 22 tasks, weight 1, 50.0% of the slots: each task drawn about 116.4 times over the run's 160 steps
   warning: environments[math]'s 22 training tasks are each drawn about 21.6 times as often as environments[code]'s 475 (about 116.4 and 5.4 times each over the run's 160 steps, at weights 1 and 1); weight: tasks on every entry draws every task of the mixture equally often
 ```
+
+An entry whose sampler is not the default says so in its line: `environments[hard]: 475 tasks, weight tasks, 95.6% of
+the slots, each filled by pass_rate (experimental) when its group can start: ...`; a run-level `pass_rate` in the first
+line: `training tasks: 497, drawn by pass_rate (experimental) over every entry's tasks, in epochs of 512 ...`.
+
+### Choose tasks by their pass rates (experimental)
+
+`task_sampler: pass_rate` on an entry chooses, for each of its slots, the task whose next group is most likely to mix
+passes and failures, since only such a group trains. It reads each task's posterior pass rate from the run's per-task
+statistics ([Per-task statistics](#per-task-statistics): decayed by policy version with a half-life of 32, over a
+prior of weight 2 at the entry's pass rate), draws a pass rate for each task from it and takes the task whose group of
+`G` would most likely mix outcomes (Thompson sampling). A fifth of its draws go to the task it drew least recently, a
+task it has never seen waits for its first result before it is drawn again, and no task is drawn more than three times
+in a window of as many draws as the entry has tasks. It decides when the entry can start a group, among the tasks
+whose label has room, so a decision never waits a group's duration for its permits.
+
+| `task_sampler_options` | Default | What it does |
+|---|---|---|
+| `explore` | 0.2 | the share of draws that go to the eligible task drawn least recently |
+| `max_draws_per_epoch` | 3 | the most draws of a task in a window of as many draws as the pool has tasks (null: no cap); lifted for a draw where every task is at it |
+| `max_outstanding_per_task` | null | a task with this many draws not yet trained is not drawn |
+| `candidates` | 4096 | at most this many tasks are scored by a draw, a seeded sample beyond |
+| `seed` | 0 | added to the entry's `seed` |
+
+The metrics to watch, under `train/sampler/environment/<entry>/` (`train/sampler/` for a run-level `pass_rate`):
+
+- `informative_share`: of the groups a step consumed that it drew, the share that trained. Compare it with the share
+  of informative groups (`train/batch/environment/<entry>/informative_groups` over the entry's groups) of a run with
+  the entry on `uniform`: that is what it gains. `predicted_informative`, the chance of training it predicted for the
+  same groups, runs well above it even when all is well: its prior, of weight 2 at the entry's pass rate, is far
+  flatter than the pass rates of real tasks, most of which every group passes or every group fails, so it overrates
+  the tasks it has little evidence of (1.4 to 2.6 times the share realized in simulations at fixed pass rates). Read
+  how the gap moves, not the gap;
+- `top10_share` (the share of the window's draws that went to the most-drawn tenth of the tasks: 0.1 is uniform's, about
+  0.3 the cap's), `eligible_share` (near 0: label limits or the rules leave it no choice), `cap_lifted`, `prior_share`
+  and `evidence_age` (evidence older than the half-life: consider `uniform` for the entry);
+- `draws/explore`, `draws/exploit`, `draws/fallback` (a sampler that failed, which should stay 0), `decision_ms` and
+  `decision_ms_max`; and the statistics' `tasks/environment/<entry>/coverage`.
+
+Its limits:
+
+- **It is experimental.** It becomes the recommendation only after a GPU comparison with `uniform` shows more
+  informative groups at an unchanged held-out pass@1. Held-out evaluation decides: under `pass_rate`, a within-run
+  `pass_at_1` averages the tasks it chose to see.
+- **Slow entries keep `uniform`.** An entry whose groups take many steps gives each task too little evidence to learn
+  from; keep it on `uniform` beside the adaptive ones.
+- **A group size of 1** never mixes outcomes, so `pass_rate` refuses such an entry.
+- **A decision costs time in proportion to the entry's tasks**: about 1 ms at 475 tasks, 7 ms at 4,096 and
+  15 ms at 19,560, on the event loop that starts the run's groups and with nothing else running meanwhile. A step
+  that starts makes its decisions back to back, up to a batch of them (up to `max_staleness + 1` batches when a run
+  starts), so at 19,560 tasks a batch of 32 holds the loop about 0.4 s at each step's start. `candidates` bounds
+  the tasks a decision scores (lower it to shorten a decision on a large pool), but not the pass over every task that
+  finds the eligible ones (`decision_ms` and `decision_ms_max` show the cost).
+- **Run-level `pass_rate`** (`train.task_sampler: pass_rate`) chooses among every task of the run, entries competing by
+  score, so it takes no numeric weights and no entry samplers; at the same pass rate a task of larger groups scores
+  higher, so an entry of larger groups draws more. It holds the permits of the largest group of the entries that can
+  start while it decides. A capped label gets no held slot of the horizon under it, so at `max_staleness >= 1` its
+  next group may wait for the next step: give a capped environment its own entry sampler under `weighted` instead.
+- **Repeated task ids** in an entry's listing: it draws by task id, so only the first row of a repeated id runs, and
+  `platoon train` warns.
+
+### Train only on groups that carry signal (experimental)
+
+A group whose rollouts all scored alike has zero advantages: it trains nothing, yet in a batch it takes a place that a
+group with signal could have. `train.group_admission: informative` decides, when each training group settles, whether it
+counts toward the batch: a group whose workflow's verdict says it trains nothing is rejected, its place is freed (at
+once, for a group whose rollouts scored alike), and another group starts in its place while the trainer trains (refill).
+A step then trains the first `batch_size` admitted groups it dequeues, and stops waiting once it has counted
+`refill.max_groups_per_step` times `batch_size` groups, training what it admitted:
+
+```yaml
+train:
+  batch_size: 32
+  group_admission: informative               # all, the default, admits every group, as before
+  group_admission_options: {band: [0.2, 0.8]}   # optional: also reject groups whose pass rate is outside it
+  refill: {max_groups_per_step: 3.0}         # the default: a step counts at most 96 groups
+  num_minibatches: 1                         # required beside a rule
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `train.group_admission` | `all` | `all` admits every group; `informative` rejects the groups that train nothing; a name an entry's `package` registers with `@group_admission`, or `module:Class` ([Write a group admission rule](../extending/group-admission.md)) |
+| `train.group_admission_options` | `{}` | the rule's options; `informative` takes `band: [lo, hi]`, two numbers `0 <= lo < hi <= 1` |
+| `train.refill.max_groups_per_step` | 3.0 | a finite number of at least 1: a step counts at most `ceil(value × batch_size)` groups. There is no null: a pool the policy has solved would never close a step; set a large number instead |
+| `environments[].group_admission`, `group_admission_options` | null: the run's | an entry's own rule, with its own options (none set: `{}`); options without a rule do not load |
+
+**What `informative` rejects**, by its reason: a group whose verdict is `uniform` (`uniform_pass` when every valid
+rollout passed, `uniform_fail` when none did, `uniform_mixed` otherwise), a group that carries no datums (its verdict:
+`reward_key_mismatch`, `no_results`, `below_min`, `no_completed_root`, `no_datums`, or `failed`), and, with a band, a
+group whose pass rate is below or above it (`below_band`, `above_band`: a group can train and still pass every rollout
+by success, say rewards of 1.0 and 0.98 under a threshold of 0.9). It admits the rest, a group whose output carries no
+verdict included (reason `unknown`, with a warning once): a workflow subclass that returns plain lists of datums then
+trains as under `all`. Loading refuses `informative` beside a workflow class that gives no verdicts at all (no
+`GroupRolloutWorkflow`, and no `gives_verdicts = True`).
+
+**What a step trains.** It trains the first `batch_size` admitted groups it dequeues that are not stale; a stale group,
+and a group whose workflow failed, count toward its cap, not toward the batch, so the step takes another in their place.
+Each group it dequeues counts toward the cap, and so does the marker of each group rejected while that step was current;
+the markers of groups rejected while an earlier step trained pass over without counting, so that the work done while the
+trainer trained never closes the next step early. A short step trains what it admitted, and a step that admitted nothing
+takes no optimizer update (`train/batch/skipped_optimizer` 1) and the run goes on: the run still ends after its planned
+steps. A rejected group that carries datums frees its slot of the horizon at once; a failed group, or one that carried
+no datum (an outage can end such groups at once), keeps it until the step that dequeues its marker, as under `all`, so
+that such groups never start faster than steps take them. At `max_staleness: 0`, and on the run's last step, no group
+starts that the step could not count, so none of those is left running when it closes; but a step can close short of its
+batch, so up to `batch_size` groups started before the last step can still be running or waiting when the run ends, and
+the final checkpoint keeps them. Once any entry's rule is not `all`, every entry's groups are counted so: a stale or
+failed group of an entry at `all` no longer counts toward the batch either. Evaluation never meets a rule.
+
+**What it costs.** Each group is rolled out whether it is admitted or not, so the rollouts per informative group are
+one over the informative share, with or without a rule: all mode rolls out as many and trains the rest's zeros. What
+changes is the rollouts a step takes. With groups informative a share `p` of the time, `B = 32` and the default cap:
+
+| `p` | `all`: informative groups a step | `informative`, cap 3.0: admitted a step (5-95%) | Short steps | Groups counted a step | Without a cap |
+|---|---|---|---|---|---|
+| 0.13 | 4.2 | 12.5 (7-18) | 100% | 96 | 246 |
+| 0.15 | 4.8 | 14.4 (9-20) | 100% | 96 | 213 |
+| 0.18 | 5.8 | 17.3 (11-24) | 100% | 96 | 178 |
+| 0.21 | 6.7 | 20.2 (14-27) | 99.7% | 96 | 152 |
+| 0.33 | 10.7 | 30.2 (25-32) | 46% | 90 | 96 |
+| 0.50 | 16.0 | 32.0 | 0% | 64 | 64 |
+
+A step reaches `batch_size` 95% of the time from a cap near `1.3 / p`; resampling "until the batch is full" is a large
+cap set by hand, and a step that keeps waiting logs a warning each time its count passes another 10 batches. What to
+expect, from an event-driven model of the loop:
+
+- **Where rollouts bound the run** (the groups at once, not the trainer, set the pace), a step takes about three times
+  as long at `p` near 0.13, and the run trains as many informative groups an hour as under `all`, spread over a third
+  as many steps.
+- **Where the trainer bounds it**, refill fills the rollout capacity the trainer leaves idle: more informative groups an
+  hour (25 to 153 at `p = 0.13`, `max_staleness: 1`, in the model, at six times the rollouts an hour), which a run that
+  pays for its rollouts pays. The cap bounds what a step counts, not what starts while the trainer trains: during the
+  update of a step that admitted `a` groups, the horizon lets about `((max_staleness + 1) × batch_size - a) / p` groups
+  start (and the rollout permits as many as they hold), many times the cap where `p` is small. A capped label's backlog
+  and an adaptive entry's queue of slots fill sooner there.
+- **At `max_staleness: 0`** refill gains where few groups are informative and loses where many are (35 to 25
+  informative groups an hour at `p = 0.33` in the model): the end of each step runs only the few groups it still needs.
+- **Settings counted in steps stretch**: `max_training_steps`, `num_epochs` (the same number of steps, each drawing more
+  positions), `eval.every`, `checkpoint.every` and `checkpoint.recovery_every` each cover more rollouts and hours: a
+  step waits for up to the cap's multiple of the groups, and where the trainer bounds the run more groups still start
+  while it trains. A crash loses as much more work.
+- **Staleness.** A rejected group is never stale: it never trains. Where the trainer is the bottleneck, a short step
+  lets up to `batch_size` minus its admitted groups start that only a step further ahead could consume, and the stale
+  filter drops those that wait too long: at `max_staleness: 1`, up to `batch_size` minus the admitted groups of each
+  short step (0.1 to 0.2 a step in the model at `batch_size: 32`, more at small batches; `train/admission/stale` counts
+  them); elsewhere fewer groups go stale than under `all`, since a rejected group no longer holds a slot while it waits.
+
+**The step's gradient.** In all mode a uniform group's tokens stay in each microbatch's normalization, so a step's
+gradient is roughly the informative share times the mean over informative tokens. Under `informative` the denominator
+counts admitted groups only: the raw gradient grows by about one over the informative share, and it is the mean over
+the step's admitted groups. Adam's update does not change with a constant scale, so keep the learning rate; but the
+update follows a mean over more groups, gradient clipping (`grad_clip_norm`) engages on the larger raw norm, and a run
+that turns a rule on at a resume takes larger first updates while Adam's second moment catches up: turn it on at step
+0. A short step's gradient is the mean over the groups it admitted; with `num_microbatches` above 1, its partial last
+microbatch is weighed by its share of groups (as if the missing groups were uniform), so a step that admitted `a` of
+`B` groups, `a >= B / M`, has the gradient of `a × M / B` full microbatches. `num_minibatches` must be 1 beside a rule:
+a short step's last minibatch would take a full optimizer step on a few groups. Under a loss whose objective is not
+zero at zero advantages (`loss_fn_config` keys besides cispo's, ppo's or importance_sampling's clip thresholds: a KL
+or an entropy term), a uniform group's datums train those terms, and rejecting it removes its share of them: loading
+warns. To compare a run with a rule against one without, compare them at matched rollouts or hours, never at matched
+steps, and watch `train/optim/grad_norm`, the KL and importance-weight metrics, `train/admission/short`,
+`train/admission/stale` and `train/admission/draws_per_admitted`, beside the held-out pass@1.
+
+**Per-entry rules.** An entry may set its own rule, such as `informative` for an environment whose groups are mostly
+uniform beside `all` for one whose groups are too rare and costly to discard. Under `weighted` an entry's share is a
+share of the draws, and a rejection does not refund it, so the trained mix shifts toward the entries that reject less:
+an entry at 87% of the draws under `informative` with 15% of its groups informative, beside one at 13% under `all`,
+admits 0.87 × 0.15 = 0.13 of the draws against 0.13, about half the trained groups each. Use the same rule on every
+entry, or scale an entry's weight by its admission rate (which drifts as the policy learns), and watch
+`train/admission/<column>/<label>/admitted`. `train.refill` is the run's, since a step mixes entries; a named
+environment (`env:`) cannot set a rule.
+
+**With an adaptive sampler.** `pass_rate` sees every settled group, admitted or rejected, and a rejection that frees a
+slot leads to a decision that reads it at once; they pair, the sampler predicting before the rollout and the rule
+catching what it missed. Refill makes the decisions when rejections come, which the order the groups complete in
+decides, so a `max_staleness: 0` run with an adaptive sampler and a rule does not replay decision for decision.
+
+**What each step logs**, only in a run with a rule, under `train/admission/` and per label under
+`train/admission/<column>/<label>/` (each label at zero when it had no group):
+
+| Metric | What it counts |
+|---|---|
+| `groups_admitted` (per label: `admitted`) | the groups the step trained: admitted and not stale |
+| `admitted/<reason>` | of those, the ones admitted with another reason than `admitted`, such as `unknown` |
+| `rejected`, `rejected/<reason>` | the rejected groups' markers the step dequeued, counted or passed over, by reason |
+| `stale`, `failed` | admitted groups the stale filter dropped; failed groups |
+| `informative_rate` | of the groups with an output the step dequeued (admitted, stale, rejected), the share whose verdict is `trained` |
+| `counted` | what the step counted toward its cap |
+| `short` | 1 when it admitted fewer than `batch_size` |
+| `draws_per_admitted` | the draws since the last step over the groups it admitted (not logged for one that admitted none) |
+| `errors` | decisions that failed open (a rule that raised or answered outside the contract): 0 in a healthy run |
+
+`train/sampler/.../predicted_informative` and `informative_share` count, in a run with a rule, the groups a step trained
+and the rejected groups' markers it dequeued, so that `informative_share` stays the share that would have trained.
+
+**What a resume does.** A rejection is final when its group settles: checkpoints keep only admitted groups, and a resume
+from a checkpoint saved after the rejection never draws its position again. A resume that turns a rule on or off,
+changes one or its options, or changes the cap warns, names each change in `lock.json` (`sampling_changed`), and goes
+on; the groups a checkpoint kept were decided when they settled and train as they are. A crash between a rejection and
+the next full save loses the rejection with it, and so does a stop (Ctrl+C, a SIGTERM) before the start's first step
+completes, which saves no checkpoint: the resume draws the position again ([Checkpoints and
+resume](#checkpoints-and-resume)).
+
+`platoon config show` prints each entry's rule in its block of effective settings, and the sampling plan a line such as
+`group admission (experimental): informative for hard, all for easy; a step trains the first 32 admitted groups of at
+most 96 (refill.max_groups_per_step 3.0)`. It becomes the recommendation only after a GPU comparison shows a higher
+held-out pass@1 at matched rollouts.
 
 ## Settings per environment
 
@@ -399,6 +640,7 @@ environments:
 | `workflow_config` | Its training groups' settings, laid over `train.workflow_config`: `group_size`, `leave_one_out_baseline`, `min_successful_group_size`, `straggler_timeout_seconds`, `straggler_quorum`, `filter_errors`, `filter_message_actions`, `subagent_datum_keep_probability`, `subagent_datum_sampling_seed`, and in `rollout_config` `max_steps`, `timeout`, `step_timeout`, `inference_params`, `sampling_precedence`, `extra`, `propagate_root_success`, `skip_subagent_reward_computation` and `enable_subagent_verifiers` ([`EntryWorkflowSettings`](../reference/config.md#entryworkflowsettings)) | the run's |
 | `eval_overrides.workflow_config` | The same keys, for its evaluation rollouts | none |
 | `max_staleness` | How many policy versions old its training groups may be and still train, at least `train.max_staleness` | the run's |
+| `group_admission`, `group_admission_options` | Which of its settled groups count toward the batch (experimental): its own rule, with its own options ([Train only on groups that carry signal](#train-only-on-groups-that-carry-signal-experimental)) | the run's |
 
 **How they merge.** A key an entry sets replaces the run's, `null` included (`max_steps: null` takes the task's own
 step budget, else the harness's), a section (`rollout_config`, its `inference_params`) merges key by key, and a
@@ -445,20 +687,24 @@ it. Recovery pruning keeps the checkpoints within the largest bound of the run a
 too (`rollout_group_limits`): its groups count toward the horizon below for as long as they run, and enough of them
 slow every step to their pace; `platoon train` warns of an entry that raises its bound without one.
 
-**The horizon.** A group starts only when it can: within the horizon, with rollout permits for its whole group, and
-with room in its label's limit. With `train.max_staleness: k`, the horizon holds `(k + 1) × train.batch_size` groups:
-those started and not yet taken by a step, and those the current step has taken; a step that starts, its policy
-published, frees one batch more. So rollouts run at most `k` steps ahead of training, as before, and with `k = 0` each
-step trains exactly the groups of its batch, so it waits for each of them, a slow entry's too, unless a label's limit
-holds one of them back (below). Without a bound the rollout permits alone limit the groups that run, and in any case
-the run starts no group past those its last step trains.
+**The horizon.** A group starts only when it can: within the horizon, with rollout permits (a group of
+`GroupRolloutWorkflow` with the first of its group's, any other with its whole group's, as every group under
+`train.permit_release: group`), and with room in its label's limit. With `train.max_staleness: k`, the horizon holds
+`(k + 1) × train.batch_size` groups: those started and not yet taken by a step, and those the current step has taken; a
+step that starts, its policy published, frees one batch more. So rollouts run at most `k` steps ahead of training, as
+before, and with `k = 0` each step trains exactly the groups of its batch, so it waits for each of them, a slow entry's
+too, unless a label's limit holds one of them back (below). Without a bound the rollout permits alone limit the groups
+that run, and in any case the run starts no group past those its last step trains (under a group admission rule, a step
+can close short of its batch: up to `batch_size` groups may then outlive the run).
 
-**Concurrency.** `train.max_concurrent_rollouts` counts rollouts: a group takes its entry's group size of them at once,
-first come first served, so groups of different sizes share it and it is never exceeded. It must hold a group of the
-largest entry, in training and in evaluation (`eval.max_concurrent_rollouts`). With `rollout_group_limits`, it should
-also hold the capped labels' groups at their limits and a group of the largest other entry: otherwise a larger group
-waits for a capped one to end, and every group behind it waits too, which `platoon config validate` and `platoon
-train` warn of.
+**Concurrency.** `train.max_concurrent_rollouts` counts rollouts: a group reserves its entry's group size of them, first
+come first served, and starts once they are granted, so groups of different sizes share it and it is never exceeded (a
+group of `GroupRolloutWorkflow` starts on the first and its members as the rest free, unless
+`train.permit_release: group` starts every group on all of them: [Rollout permits](#rollout-permits)). It must hold a
+group of the largest entry, in training and in evaluation (`eval.max_concurrent_rollouts`). With `rollout_group_limits`,
+it should also hold the capped labels' groups at their limits and a group of the largest other entry: otherwise a larger
+group waits for a capped one to end, and every group behind it waits too, which `platoon config validate` and
+`platoon train` warn of.
 
 **A capped label never stalls the others.** A task the order draws whose label is at its `rollout_group_limits` waits
 in that label's backlog, first in, first out, and does not count toward the horizon: the run draws on, and starts the
@@ -481,7 +727,7 @@ applies to every config that sets `rollout_group_limits`, with or without settin
 
 **Custom workflows.** A `GroupRolloutWorkflow` subclass applies an entry's settings without changes: inside a group,
 `self.config` holds the group's entry's settings, and
-`platoon.train.tinker.workflows.group_rollout_workflow.current_entry()` names the entry. Code that reads
+`platoon.train.workflow.current_entry()` names the entry. Code that reads
 `self.config` from a thread of `loop.run_in_executor` gets the run's. A workflow class that is no `GroupRolloutWorkflow`
 must apply them itself and declare `applies_entry_settings = True`: otherwise a config whose entries set any does not
 load into `platoon train` (exit 78), rather than ignore them.
@@ -857,7 +1103,8 @@ resumed run](#evaluation-in-a-resumed-run)). To start over, use a new `stats.tri
 **What a resume takes up.** With rollouts running ahead of training, a checkpoint falls between groups the run has
 drawn and the steps that train them. Each full checkpoint saves where the run's draws stand, in
 `tasks/dispatch-s<start>-<checkpoint>.json` (its row names it as `dispatch`), and a resume takes them up, so that
-every position of the order is consumed exactly once: trained, dropped as stale, failed or skipped.
+every position of the order is consumed exactly once: trained, dropped as stale, failed, skipped, or rejected by a
+group admission rule.
 
 - **Groups that settled and that no step had trained** are kept with the checkpoint, in
   `tasks/kept-s<start>-<checkpoint>.json.gz` (their datums and what the step that trains them logs), and the first
@@ -866,17 +1113,35 @@ every position of the order is consumed exactly once: trained, dropped as stale,
   permanent, `<step>_interrupted` and `final`. A group whose workflow failed is kept as failed, and the resume
   consumes it as failed, as the run would have without the restart. A workflow that returns something other than a
   `GroupRolloutWorkflow` output or a plain list of datums is not kept: its task is rolled out again.
+- **A group a rule rejected** ([Train only on groups that carry
+  signal](#train-only-on-groups-that-carry-signal-experimental)) has its fate when it settles: no checkpoint keeps it,
+  and a resume from a later checkpoint never draws it again (a crash, or a stop before a start's first step completes,
+  loses the rejections made since the last full save, whose positions the resume draws again). A resume that turns a
+  rule on trains the groups the checkpoint kept as they are, since they were decided when they settled.
 - **Draws whose groups were still running, or waited for their label's limit,** are drawn again first, at their
-  places in the order, as new draws of the resume.
-- **The order goes on** where the checkpoint left it.
+  places in the order, as new draws of the resume, each from the row it drew. When the run's training tasks changed
+  so that that row now holds another task, the draw takes the first row of its own task.
+- **The order goes on** where the checkpoint left it: the run's task sampler, and each environment's when the run's
+  hands it the environment's share of the slots (`weighted`, and `auto` for a mixture), at the count of decisions it
+  saved, with the state it saved (an adaptive sampler's, such as `pass_rate`'s record of what it drew when). A
+  checkpoint of platoon 0.3.0, whose file (format 1) saved no counts, is resumed exactly too: each count is recomputed
+  from the order's position.
+- **Slots waiting for an adaptive entry's sampler** (tokens: under `weighted`, a slot owed to an entry whose sampler
+  decides when its group can start) are saved with the file, the one waiting for its rollout permits first, and go
+  back to their entry's queue. When the entry's sampler is static now, it binds them, in order; when the entry no
+  longer gets slots, or left the run, they are dropped, each with a `slot_skipped` event in `tasks/events.jsonl`, and
+  the resume's warning counts them.
 
 That file does not depend on the per-task statistics: a resume is exact also from a checkpoint saved after the
-statistics stopped, or when its snapshot could not be written, and the statistics then go on from an older snapshot.
-A resume whose kept groups cannot be read (their file deleted, changed, or never written because the disk refused it,
-each with a warning) rolls those tasks out again instead, and trains each once all the same; the statistics count
-both of such a task's groups, since both ran, as one draw. A checkpoint without the file (one saved before platoon
-0.3.0, or one whose write failed, with a warning) is resumed as before: from the checkpoint's batch, rolling out again
-what had not trained.
+statistics stopped, or when its snapshot could not be written, and the statistics then go on from an older snapshot. Its
+format is 2 since platoon 0.4.0; platoon 0.3.0 cannot read it, and resumes such a checkpoint from its batch, as one
+without the file. A resume whose kept groups cannot be read (their file deleted, changed, or never written because the
+disk refused it, each with a warning) rolls those tasks out again instead, and trains each once all the same; the
+statistics count both of such a task's groups, since both ran, as one draw. A checkpoint without the file (one saved
+before platoon 0.3.0, or one whose write failed, with a warning) is resumed as before: from the checkpoint's batch,
+rolling out again what had not trained. One saved under a group admission rule, whose steps draw more positions than
+their batch, records in its row where the order stood, and the resume draws on from there, the draws that had not
+trained lost.
 
 The kept groups cost disk and time at each full save: about ten bytes a token of their datums, written again at
 every full save while they wait for a step, in a thread beside training. With `max_staleness: 3`, batches of 32
@@ -885,9 +1150,16 @@ recovery checkpoint's files with it (`checkpoint.keep_recovery`); without it, th
 
 **Changed sampling inputs.** The checkpoint also saves a fingerprint of what the order follows from: `task_sampler`,
 `batch_size`, `label_by`, the environment entries in the order the config lists them, and each entry's weight, its
-seed (when the sampler reads it) and its training tasks. A resume whose inputs differ warns, naming each change,
-records it in `lock.json` (`sampling_changed`), and goes on: the order goes on at the same place, now the order the
-new inputs give, and the draws of tasks that left the run are lost, as the per-task statistics count them.
+seed (when a sampler reads it) and its training tasks; and the samplers platoon 0.3.0 did not have, with their options
+as parsed, defaults included: the run's `task_sampler_options` for a sampler other than `auto`, `weighted` and
+`uniform`, and an entry's `task_sampler` and `task_sampler_options` when its sampler is not `uniform`; and, in a run
+with a group admission rule, each entry's rule and options and `refill.max_groups_per_step`. So a config that writes a
+default out reads as no change, and a 0.3.0 checkpoint's fingerprint is the same under 0.4.0. A resume whose
+inputs differ warns, naming each change, records it in `lock.json` (`sampling_changed`), and goes on: the order goes
+on at the same place, now the order the new inputs give, and the draws of tasks that left the run are lost, as the
+per-task statistics count them. A sampler saved under the same name and class loads its state, changed options
+included; another one starts afresh (a static one at the count the position implies, an adaptive one reading the
+statistics the run has), and so does one whose saved state does not load, with a warning.
 
 **What a resume must not change.** A run directory holds one run. Its first start writes `identity.json` there:
 the model, the renderer, and for each environment entry with a hold-out (a Harbor entry's `service_kwargs.holdout`,
@@ -983,6 +1255,157 @@ host, which holds its sandboxes: run it there.
 `python -m platoon.train.tinker.restart_wrapper`, which restarted the command on the watchdog's exit code only, is
 gone since platoon 0.3.0: it exits 78, naming `watchdog.max_restarts`, which replaces it.
 
+## Rollout permits
+
+A training run's groups share its budget of rollout permits, `train.max_concurrent_rollouts`. Each rollout's permit
+comes back as the rollout ends (`train.permit_release: rollout`, the default since platoon 0.4.0), and the next group
+starts on the permits that come back. Before 0.4.0 a group held its permits until its workflow returned, so a rollout
+that had finished kept its permit until its group's slowest rollout ended: on long agentic tasks that left a quarter to
+a third of the budget idle while the trainer waited for data. `train.permit_release: group` keeps that behavior
+([below](#the-previous-behavior)).
+
+```yaml
+train:
+  max_concurrent_rollouts: 256  # the rollouts that run at once
+  max_staleness: 4              # one more than before, if the run warns of stale groups (below)
+```
+
+- **Rolling starts.** `GroupRolloutWorkflow` runs each member on its group's lease, so a group starts on its first free
+  permit and its members start as the rest free, over about `(group_size - 1) × (a rollout's time) /
+  max_concurrent_rollouts` (10 to 12 s in long agentic runs). Each member's straggler deadline then carries its own
+  start delay, so a late start never shortens its grace. A workflow of your own does the same by running its rollouts
+  on the lease ([Run rollouts on the lease](../extending/rollout-leases.md)); any other workflow's groups start once
+  their whole size of permits is free, as before.
+- **When a permit comes back.** Under process isolation, once the rollout's worker process tree is reaped and the
+  sandboxes and env sessions it left are deleted. In process (the default), once the rollout's coroutine, its
+  subagents and their grading have ended, and the sandbox and session teardowns that platoon finishes in the
+  background too, such as one a straggler cut interrupts or one a rollout leaves running as it ends: the permit waits
+  for them at most 60 s, and the run warns of a teardown that runs longer. Under `group`, nothing waits for them, as
+  before, and such a teardown can outlive its group's release.
+- **What stays.** Groups are drawn, decided by task samplers, admitted, credited, filtered for staleness, kept by
+  checkpoints and resumed as before, and evaluation is unchanged. A partly finished group counts as a whole group
+  toward the horizon, and label limits count groups, so `max_staleness` keeps its meaning. A run at `max_staleness: 0`
+  with the default budget trains the same datums in the same order under either setting.
+- **What it costs.** Where the permits bound a run, more groups are open at once and steps get shorter, so trained
+  data is older, and more long groups cross the staleness bound: stale drops can rise, and those are the hard, mixed
+  groups. When more than 2% of the groups the last 10 steps consumed went stale, the run warns, once per start of
+  training and under either setting (from its tenth step on, so a shorter run never does), naming what held the
+  dispatcher back and advising `max_staleness + 1`. If the horizon had room (`train/dispatch/blocked_share/horizon`
+  near 0), raising `train.max_staleness` by one changes only the stale filter: a group may then be one more policy
+  version old and still train, and recovery pruning keeps one more checkpoint. A per-datum stale filter, which would
+  keep the part of a long rollout within the bound instead, is planned for a later release (RFC 0020). A restart also
+  redoes more rollouts (every open group's), and more finished rollouts wait in the trainer for their siblings.
+- **Where it helps.** Where the permits decide when groups start (`blocked_share/permits` near 1). Where the horizon
+  does (`blocked_share/horizon` near 1), freed permits have nothing to start: there only a larger `max_staleness` or a
+  faster trainer helps, and the run trains as it did before 0.4.0.
+
+**`max_concurrent_rollouts`** counts the rollouts that run at once, no longer the whole groups it holds, and
+`rollout_client/concurrency_achieved_fraction` reads as the permits' busy share, close to 1 where the permits bind;
+`groups_in_flight` can exceed the budget over the group size. Raise the budget while the inference engines have room
+and `blocked_share/permits` stays near 1. The run warns, once per start, when `rollout_client/rollouts_in_flight_max`
+exceeds the budget: a workflow returned a permit while its rollout still ran. Only `GroupRolloutWorkflow`'s members
+count as rollouts in flight, so a workflow of your own is not checked, and an evaluation's `GroupRolloutWorkflow`
+left on the default `stats_scope`, `train`, counts too (a train script's; `platoon train` gives evaluation its own).
+
+**Straggler settings** (`straggler_timeout_seconds`, `straggler_quorum`, `straggler_policies`) stay as they are, off by
+default. They are a deadline against runaway rollouts, not a throughput lever: once a finished rollout no longer holds
+its permit while its group waits, a cut buys only the straggler's own remaining time and slightly fresher data, and it
+censors slow rollouts, which fail more often, so the sample that trains leans optimistic. `train/batch/censoring/*`
+shows what a cut selects.
+
+**The startup gate** (`worker_launch_concurrent_groups`, process isolation only) still admits groups, not rollouts: a
+group holds its slot until its last member is up, which under rolling starts includes the time its permits take to
+free. With the fork server (the default) a worker is up in a fraction of a second, and at most one group is partly
+granted at a time, so the gate's second slot serves the next group. With `worker_start_method: exec` (17-24 s a
+worker) the gate can hold groups back while they hold their permits, which `rollout_client/startup_gate_waiting_mean`
+shows: then raise `worker_launch_concurrent_groups`.
+
+| Metric | What it says |
+|---|---|
+| `rollout_client/permits_held_mean` | The permits granted to groups, time-weighted. Held minus `rollouts_in_flight_mean` (`GroupRolloutWorkflow`'s members) is permit time no rollout used: under `group`, mostly finished rollouts waiting for their siblings; under `rollout`, close to 0 |
+| `train/dispatch/blocked_share/<reason>` | The share of the step in which the dispatcher could not start a group, by reason: `permits` (raise `max_concurrent_rollouts`, or, under `group`, return permits as rollouts end), `horizon` (only `max_staleness` or a faster trainer helps), `labels` (every label it could start was at its `rollout_group_limits`), `plan` (the run's remaining steps need no more groups), `sampler` (an adaptive task sampler found no eligible task) |
+| `rollout_client/startup_gate_waiting_mean` | The groups waiting for a worker-startup slot, time-weighted (process isolation) |
+| `train/batch/censoring/censored_share`, `.../mixed_groups`, `.../slowest_pass_rate`, `.../others_pass_rate`, and each label's under `train/batch/<column>/<label>/censoring/` | Over every group the step dequeued that a straggler policy applies to (none without one): the share of rollouts the policy cancelled, and over the groups whose valid rollouts both passed and failed, the pass rate of each group's slowest valid rollout against that of the others. A slowest rate well below the others' means a cut drops failures more than successes |
+
+### The previous behavior
+
+To restore what platoon did before 0.4.0, set `train.permit_release: group`:
+
+```yaml
+train:
+  permit_release: group  # a group's permits come back together, when its workflow returns
+```
+
+Every group then takes its whole size of permits before it starts and returns them when its workflow returns, so its
+finished rollouts keep their permits until its slowest one ends. The lease's blocks hold nothing, and the run starts
+and ends groups as earlier releases did, event for event. The default changed in 0.4.0 ahead of a GPU comparison of
+the two settings (RFC 0020); `group` stays as the way back, and as the other arm of such a comparison.
+
+## Rollout start-ups (experimental)
+
+Before its first model call a rollout sets up its worker, its environment session or sandbox and its harness, and part
+of that work is shared by every rollout starting on the node. At a run's start or a resume every permit is free, so the
+whole budget starts at once, and an evaluation during training adds its own rollouts. `train.max_starting_rollouts`
+lets at most that many rollouts be starting at once, training's and evaluation's together, first come, first served:
+
+```yaml
+train:
+  max_concurrent_rollouts: 256  # the rollouts that run at once
+  max_starting_rollouts: 32     # of which at most this many set up at once (default: null, no limit)
+  workflow_config: {group_size: 8}
+```
+
+- **A start-up.** A `GroupRolloutWorkflow` rollout takes a start slot once it holds its permit, before its request is
+  built and its worker launched, and gives it back at the first of: its first model call is issued (its root's or any
+  subagent's, as the model gateway hands the call to sampling, not at its first token), it ends, or
+  `workflow_config.worker_startup_budget_seconds` + 300 s pass without a call (600 s by default). Under process
+  isolation the worker marks its first call in a node-local file next to its readiness file, which the trainer polls
+  as it polls readiness, so the slot can come back up to 0.2 s late.
+- **Where it helps.** Where start-ups share a capacity that slows down as more of them use it at once, or run past
+  per-start timeouts when too many start together: the singularity provider's `copy` layout and the enroot provider,
+  which extract a root filesystem for each sandbox ([The singularity provider's root
+  filesystem](sandboxes-and-harbor.md#the-singularity-providers-root-filesystem)); task sets with an image per task;
+  several runs on one node. The wait comes before the worker starts, so no start-up or rollout timeout counts it.
+- **Where it does not.** It shortens no one-time work: the fork server's import of the worker stack, the copy of a
+  harness toolchain to each node, which the node's first rollouts wait for, or the modules each worker imports after
+  its fork ([Troubleshooting](troubleshooting.md#the-first-rollouts-of-a-run-take-minutes-to-reach-the-model)). Any
+  value makes a run's whole first wave reach the model later, though its first rollouts can reach it sooner: in long
+  agentic runs whose first rollouts took about 100 s to their first call, most of it such one-time work, a limit of 32
+  would have made the whole first wave reach the model 44-56 s later, and 64 about 10-23 s later (estimates). With
+  `worker_start_method: exec`, `worker_launch_concurrent_groups` already bounds the workers' import storms.
+- **One rule.** A start-up must not wait for another rollout of the run. A rollout holding a slot waits for nothing, so
+  one that waited for its group-mates would hold its slot until the timer while they wait for slots.
+- **Sizing.** At least the largest group size: below it a group's members start in waves, and the run warns, though each
+  member keeps its full straggler grace, its deadline shifted by its wait as by a permit's. To keep the shared resource
+  busy, about twice (the start-ups it completes a second) × (the seconds one start-up takes alone); far below that, the
+  resource idles between start-ups. With the limit at that product itself, a model of measured runs of short crafting
+  tasks lost 14-18% of their throughput (estimates).
+- **With the rest.** A rollout waiting for a slot holds its permit but does not run yet, so while the limit binds the
+  gap between `rollout_client/permits_held_mean` and `rollouts_in_flight_mean` widens, by `start_limit/waiting_mean`:
+  the lever is then `max_starting_rollouts`, or turning it off, not a larger `max_concurrent_rollouts`, which only adds
+  waiters. Under process isolation a group keeps its `worker_launch_concurrent_groups` slot until its members are up, so
+  most of a binding limit's queue waits at that gate (`rollout_client/startup_gate_waiting_mean`). An evaluation during
+  training takes slots of the same limit, in turn. In process, training's rollouts that come behind a whole evaluation
+  wait for its start-ups, about eight start-up times behind 256 evaluation rollouts at a limit of 32. A fresh start with
+  `eval.at_start` is such a case: its evaluation reaches the limit before training's first rollouts, so the first step
+  comes that much later. Standalone `platoon eval` is not limited (`num_concurrent_workers` bounds its rollouts), and
+  the limit is one trainer's: several runs on a node do not share it.
+
+Only `GroupRolloutWorkflow`'s members take start slots ([Run rollouts on the
+lease](../extending/rollout-leases.md#grouprolloutworkflow-and-its-subclasses)).
+
+| Metric | What it says |
+|---|---|
+| `rollout_client/start_limit/starting_mean`, `.../waiting_mean` | The training rollouts holding a start slot, and those waiting for one, time-weighted; an evaluation's under `eval/rollout_client/start_limit/`, logged with it |
+| `rollout_client/start_limit/wait_seconds_p50`, `_p90`, `_max` | How long the rollouts that took a slot in the step waited for it (0 for one taken at once) |
+| `rollout_client/start_limit/releases/first_call`, `.../end`, `.../timer`, `.../cancelled` | The slots given back in the step, by cause: mostly `first_call` when the harness calls the model through platoon's gateway; `cancelled` for rollouts cancelled while they held one, as by a straggler cut or a stop |
+
+The time from a slot to the first call, except the request's build, is
+`rollout_client/dequeue_to_first_model_call_seconds_p50` (and `_p90`), as before. The run warns once per start when a
+slot comes back on its timer, and when most come back only at their rollout's end: the harness makes no model call
+through platoon's gateway (`platoon-oracle`, `platoon-noop`, a rollout function of your own), or its rollouts fail
+before one, and the limit then bounds whole rollouts.
+
 ## Metrics to watch
 
 Each step prints its metrics and logs them to W&B. Start with these:
@@ -1007,7 +1430,14 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/batch/informative_groups`, `.../all_pass_groups`, `.../all_fail_groups`, `.../uniform_mixed_groups`, and each label's under `train/batch/<column>/<label>/` | A large share informative | The step's groups that trained, and those whose advantages were all zero: every rollout passed, none did, or both ([Per-task statistics](#per-task-statistics)). Mostly all-pass or all-fail: the tasks are too easy or too hard for the policy, and their groups train nothing |
 | `train/tasks/<column>/<label>/pass_at_1`, `.../pass_at_G` | Rise over steps | Each label's mean expected pass@1 and pass@G over its tasks with a settled group, G its entry's group size: the pass@k curve of training, for every run. Flat while the reward rises: a shaping reward processor rewards something other than passing |
 | `train/tasks/<column>/<label>/no_evidence` | 0 | The label's tasks whose last three groups had no valid rollout: a broken grader or setup; `platoon tasks export` lists them (`no_evidence_streak`) |
+| `train/sampler/draws`, `train/sampler/draws/<reason>`, and each entry's sampler's under `train/sampler/environment/<entry>/` | `draws/fallback` 0 | The draws since the last step, by why their sampler chose them: `order` for a static order, `explore` and `exploit` for `pass_rate`, `reissue` for a draw a resume drew again. `fallback` counts decisions a sampler failed (it raised, or answered outside the contract) that the dispatcher filled itself: fix the sampler ([Write a task sampler](../extending/task-samplers.md)) |
+| `train/admission/groups_admitted`, `.../short`, `.../rejected/<reason>`, `.../draws_per_admitted`, `.../errors` | `errors` 0 | In a run with a group admission rule: what each step admitted and rejected and why, whether it was short, and the draws per admitted group ([Train only on groups that carry signal](#train-only-on-groups-that-carry-signal-experimental)). Short steps at every step: raise `train.refill.max_groups_per_step`, or choose tasks with `pass_rate` |
+| `train/sampler/decision_ms`, `.../decision_ms_max` | A few ms | The mean and longest time a sampler's decisions took since the last step; long ones hold up the event loop. An adaptive entry's `.../tokens` counts its slots waiting for a group to start, and `train/sampler/skipped_slots` those a full queue skipped. `pass_rate`'s own metrics: [Choose tasks by their pass rates](#choose-tasks-by-their-pass-rates-experimental) |
 | `rollout_client/trainer_queue_wait_seconds_total` | Small next to `timing/batch_total` | The trainer waits on rollouts: raise rollout concurrency or speed up the environment |
+| `train/dispatch/blocked_share/permits`, `.../horizon` | One of them near 1 says what decides when groups start | `permits`: the rollout budget binds; a larger `max_concurrent_rollouts` while the engines have room (under `train.permit_release: group`, first the default, `rollout`), unless `rollout_client/start_limit/waiting_mean` is above 0: then rollouts hold permits while they wait to start up, and the lever is `max_starting_rollouts`. `horizon`: only `max_staleness` or a faster trainer helps ([Rollout permits](#rollout-permits)) |
+| `rollout_client/permits_held_mean` against `rollout_client/rollouts_in_flight_mean` | Close under `permit_release: rollout`, the default; under `group` the gap is the straggler idle that `rollout` returns | Permits held while no rollout ran: finished rollouts waiting for their group's slowest (`permit_release: group`), groups waiting at the startup gate, or rollouts waiting for a start slot |
+| `rollout_client/start_limit/waiting_mean`, `.../wait_seconds_p90`, and under process isolation `rollout_client/startup_gate_waiting_mean` | Near 0, or briefly at a run's start | With `train.max_starting_rollouts`: rollouts wait to start up, holding their permits. Raise `max_starting_rollouts`, or turn it off, not `max_concurrent_rollouts` ([Rollout start-ups](#rollout-start-ups-experimental)) |
+| `rollout_client/start_limit/releases/<cause>` | Mostly `first_call` | Many `end` or `timer`: the rollouts make no model call through platoon's gateway, or fail before one, so the limit bounds whole rollouts: turn it off for this workload, or fix the failures |
 | `rollout_client/cpu_saturation` | Below 1 | The client machine is out of CPU: use fewer concurrent rollouts or a bigger node |
 | `rollout_client/agent_step_tool_fraction` | Depends on the environment | Most of each step is spent in tools and the environment, not the model |
 
@@ -1041,6 +1471,15 @@ workflow class of your own that returns a plain list of datums gives no verdict 
 rollouts, so its groups count but give no evidence: its tasks read as not seen, and the step logs no pass@k for them.
 The trainer numbers each training row it draws, `_platoon_seq` and `_platoon_position` in the row a workflow gets, to
 join the group's record to its draw.
+
+**When a group enters them.** A group's record is made when it settles, and the statistics take it in, with every
+other record made since, in the order the groups were drawn: before each step's metrics, each full checkpoint and each
+decision of an adaptive task sampler. So their values do not depend on the order in which a step's groups completed,
+down to the last bits of their decayed sums, and an adaptive sampler and a checkpoint read every group that has
+settled. A group's fate (consumed, stale, failed) does not wait for it, and a group a rule rejected has its fate
+(`rejected`) when it settles. A resume is the exception: the groups that had settled when its checkpoint was saved were
+taken in then, and those drawn again after it, so a task whose group drawn again came before one that had settled takes
+them in another order than an uninterrupted run, its streaks and newest groups included.
 
 **What passes.** A rollout passes when it is valid (its root completed with a scored outcome, so it entered the
 baseline) and the reward its environment scored, before any reward processor, reaches its entry's
@@ -1077,29 +1516,37 @@ weight 2 centered on its entry's pass rate, so a task not yet seen reads as its 
 outweigh the prior: one group of 4 to 8 valid rollouts already counts for more. pass@G is the chance that at least
 one of G rollouts passes, under that estimate.
 
-**Saved with each checkpoint.** Each full checkpoint writes the statistics to
-`tasks/state-s<start>-<checkpoint>.json` in the run directory, where `<start>` numbers the run's starts, and its row
-of `checkpoints.jsonl` names the file with its SHA-256 (`tasks`). A start that resumes loads the file its checkpoint
-names before the checkpoint it saves at launch, which saves them again under its own number. Groups drawn before the
-checkpoint that no completed step had trained on stay outstanding: the resume trains the groups the checkpoint kept and
-draws the others again ([What a resume takes up](#checkpoints-and-resume)), each still one draw of its task. A file
-that cannot be written (a full disk, say) leaves its checkpoint without one, with a warning, and the next full
-checkpoint writes the statistics again. A start whose checkpoint names no file (one saved before platoon 0.3.0, or
-whose write failed, or after the statistics stopped), or whose file is missing or changed, goes on from the newest
-older checkpoint's file that reads back, without the groups since, else from empty, with a warning; `lock.json` lists
-each such start, the checkpoint, why, and the checkpoint whose statistics it loaded (`tasks_state_lost`). The draws
-that older file holds as outstanding and the checkpoint no longer does count as lost; the draws themselves resume
-exactly all the same. A start whose checkpoint saved no state of the draws (one saved before platoon 0.3.0, or one
-whose write of it failed) counts all the outstanding draws as lost and draws from the checkpoint's batch. Training
-goes on either way. `checkpoint.keep_recovery` deletes a pruned checkpoint's files with it.
+**Saved with each checkpoint.** Each full checkpoint writes the statistics to `tasks/state-s<start>-<checkpoint>.json`
+in the run directory, where `<start>` numbers the run's starts, and its row of `checkpoints.jsonl` names the file with
+its SHA-256 (`tasks`). A start that resumes loads the file its checkpoint names before the checkpoint it saves at
+launch, which saves them again under its own number. Groups drawn before the checkpoint that no completed step had
+trained on stay outstanding: the resume trains the groups the checkpoint kept and draws the others again ([What a resume
+takes up](#checkpoints-and-resume)), each still one draw of its task. A file that cannot be written (a full disk, say)
+leaves its checkpoint without one, with a warning, and the next full checkpoint writes the statistics again. A start
+whose checkpoint names no file (one saved before platoon 0.3.0, or whose write failed, or after the statistics stopped),
+or whose file is missing or changed, goes on from the newest older checkpoint's file that reads back, without the groups
+since, else from empty, with a warning; `lock.json` lists each such start, the checkpoint, why, and the checkpoint whose
+statistics it loaded (`tasks_state_lost`). The draws that older file holds as outstanding and the checkpoint no longer
+does count as lost; the draws themselves resume exactly all the same. A start whose checkpoint saved no state of the
+draws (one saved before platoon 0.3.0, or one whose write of it failed) counts all the outstanding draws as lost and
+draws from the checkpoint's batch, or, from a checkpoint saved under a group admission rule, from where its row says the
+order stood. Training goes on either way. `checkpoint.keep_recovery` deletes a pruned checkpoint's files with it.
 
-`tasks/events.jsonl` logs each draw, settle and fate (`consumed`, `stale`, `failed`, `skipped`, `lost`) and each
-start, one JSON line each, by start and draw number; a draw a resume draws again names the draw it replaces
-(`"reason": "reissue"`, `"reissues": [start, seq]`). A start logs its own events once its launch checkpoint is saved,
-so that a start whose launch save fails, whose number the next start takes, logs none; one that dies in the moment
-between that save and its first events logs none either, and the draws it drew again appear only as those a later
-start's draws replace. What a start did after its last checkpoint stays in the log when it dies. A resume never reads
-it: losing it loses history only.
+`tasks/events.jsonl` logs each draw, settle and fate (`consumed`, `stale`, `failed`, `skipped`, `lost`, and `rejected`
+for a group a rule rejected, its event naming the rule and the reason as `rule` and `admission`) and each start,
+one JSON line each, by start and draw number. A draw names the task sampler that drew it and why (`sampler`, such as
+`uniform@<entry>` for an environment's `uniform` under `weighted` or `pass_rate@<entry>`, and `reason`, `order` for a
+draw of the order, `explore` or `exploit` for `pass_rate`'s, `fallback` for one the dispatcher filled after a sampler
+failed), with the sampler's `score` when it gave one, as the group's record in the statistics does; a draw a resume
+draws again names the draw it replaces (`"reason": "reissue"`, `"reissues": [start, seq]`). A slot owed to an adaptive
+entry's sampler whose position was used up without a draw is a `slot_skipped` event (`why`: `backlog`, its entry's
+queue was full; `no_slots` or `entry_left`, a resume found that its entry no longer gets slots, or left the run). A
+start logs its own events once its launch checkpoint is saved, so that a start whose launch save fails, whose number
+the next start takes, logs none; one that dies in the moment between that save and its first events logs none either,
+and the draws it drew again appear only as those a later start's draws replace. What a start did after its last
+checkpoint stays in the log when it dies, or stops before its first step completes (it saves no checkpoint then): a
+group a rule rejected then has a fate in the log, and another when a resume draws its position again. A resume never
+reads the log: losing it loses history only.
 
 **Read them.** `platoon tasks show RUN_DIR` prints the statistics of the run's newest full checkpoint, while it trains
 too (an older checkpoint's, when the newest one's file cannot be read, and stderr says why): one row per task with a
@@ -1111,10 +1558,10 @@ what became of the rest:
 ```console
 $ platoon tasks show runs/mix/trial-1
 runs/mix/trial-1: checkpoint recovery-000004, policy version 4: 3 of 4 tasks have a settled group
-task           groups  pass/att  E[p]  E[pass@G]  E[inf]  newest v  out  consumed/stale/failed/skipped/lost
-quick::hard         2       1/7  0.23       0.59    0.57         3    0  2/0/0/0/0
-quick::easy         2       7/8  0.80       0.99    0.53         2    0  2/0/0/0/0
-slow::partial       2       1/2  0.50       0.70    0.40         3    1  0/1/0/0/0
+task           groups  pass/att  E[p]  E[pass@G]  E[inf]  newest v  out  consumed/stale/failed/skipped/lost/rejected
+quick::hard         2       1/7  0.23       0.59    0.57         3    0  2/0/0/0/0/0
+quick::easy         2       7/8  0.80       0.99    0.53         2    0  2/0/0/0/0/0
+slow::partial       2       1/2  0.50       0.70    0.40         3    1  0/1/0/0/0/0
 ```
 
 `--sort pass_rate` puts the hardest first, `--label` keeps one label's tasks and `--top N` the first N. `platoon tasks

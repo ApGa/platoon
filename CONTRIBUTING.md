@@ -84,13 +84,13 @@ for the tests.
 
    ```text
    harness                 kind      distribution   source
-   mini-swe-agent@2.4.6    spec      platoon 0.3.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-   openhands@1.54.0.post2  spec      platoon 0.3.0  platoon/harness/builtin/specs/openhands.toml
-   platoon-bash@1          spec      platoon 0.3.0  platoon/harness/builtin/specs/platoon-bash.toml
-   platoon-codeact@1       function  platoon 0.3.0  platoon.harness.builtin.codeact.harness:codeact
-   platoon-noop@1          function  platoon 0.3.0  platoon.harness.builtin.oracle:noop
-   platoon-oracle@1        function  platoon 0.3.0  platoon.harness.builtin.oracle:oracle
-   platoon-react@1         function  platoon 0.3.0  platoon.harness.builtin.react:react
+   mini-swe-agent@2.4.6    spec      platoon 0.4.0  platoon/harness/builtin/specs/mini-swe-agent.toml
+   openhands@1.54.0.post2  spec      platoon 0.4.0  platoon/harness/builtin/specs/openhands.toml
+   platoon-bash@1          spec      platoon 0.4.0  platoon/harness/builtin/specs/platoon-bash.toml
+   platoon-codeact@1       function  platoon 0.4.0  platoon.harness.builtin.codeact.harness:codeact
+   platoon-noop@1          function  platoon 0.4.0  platoon.harness.builtin.oracle:noop
+   platoon-oracle@1        function  platoon 0.4.0  platoon.harness.builtin.oracle:oracle
+   platoon-react@1         function  platoon 0.4.0  platoon.harness.builtin.react:react
    ```
 
 **Next:** [run the tests](#run-the-tests).
@@ -143,6 +143,20 @@ On a 32-core machine the suite takes about 8 minutes in one process and a little
 time goes to tests that start worker processes, which import the tinker/torch stack, and wait for them.
 `pytest tests/` without `-n` still runs every test, the `serial` ones too, one after another.
 
+One more CI job, `docker-stacks`, runs Harbor stacks on Docker, end to end
+(`tests/integration/test_harbor_stacks_docker.py`), on a runner with Docker and its compose plugin, after the `uv sync`
+of core's tests, with `PLATOON_TEST_DOCKER_STACKS` set to `require`, under which the module fails, rather than skips,
+where Docker cannot run stacks:
+
+```bash
+docker version && docker compose version
+uv run pytest tests/integration/test_harbor_stacks_docker.py -v -rs --junitxml=docker-stacks.xml
+test -s docker-stacks.xml && ! grep -q '<skipped' docker-stacks.xml
+```
+
+The last command fails the job if any of its tests was skipped. Elsewhere the module skips, saying why; set
+`PLATOON_TEST_DOCKER_STACKS=1` to run it where Docker is (it pulls and builds images, and needs the network).
+
 While you work, run only what you touch:
 
 ```bash
@@ -166,6 +180,7 @@ Most of the suite is self-contained. A few groups of tests need files you may no
 | `tests/renderers`, `tests/train/tinker/test_gateway_tools_routing.py` | The tokenizers and chat templates of the Qwen3.6 and Qwen3.8 snapshots named in `tests/renderers/renderer_cases.py` | The Hugging Face cache, or `PLATOON_TEST_HF_HUB` (another hub cache directory that holds them) and `QWEN36_PRESERVE_THINKING_SNAPSHOT` |
 | Parts of `tests/sandbox/test_sandbox_hpc.py`, and the test of `tests/envs/test_harbor_providers.py` that checks the root filesystem layouts a run refuses against the provider | hpc-sandbox | `uv sync --dev --extra tinker --extra ors --extra hpc` |
 | One test each in `tests/gateway/test_gateway_mcp.py` and `tests/envs/test_ors_concurrency.py` | The OpenHands SDK and fastmcp clients | Run them in an environment that has both, or set `PLATOON_CLIENT_VENV` to that environment's directory |
+| `tests/integration/test_harbor_stacks_docker.py` | Docker with its compose plugin, and the network: it pulls and builds images and runs stacks of containers | Set `PLATOON_TEST_DOCKER_STACKS=1`; CI's `docker-stacks` job sets it to `require`, which fails the module where Docker cannot run stacks |
 | `tests/envs/test_harbor_root_verifier_singularity.py` | Singularity or Apptainer, hpc-sandbox, and a node where `--fakeroot` works (your user has subordinate ids): it starts real sandboxes | Set `PLATOON_TEST_SINGULARITY_IMAGE` to an image with `sh`, `find`, `chown` and `setpriv` or `su` (a local `.sif`, or a `docker://` reference the node can pull), and run it on such a node, never a login node; `HPC_SANDBOX_SCRATCH` puts the sandboxes on node-local disk |
 
 The tests look for snapshots in the standard Hugging Face cache: `HF_HUB_CACHE`, else `HF_HOME/hub`, else
@@ -195,6 +210,7 @@ tokenizer. Prefer it in new tests. The suite also has fakes of its own:
 | `tests/inline/conftest.py`, `tests/harness/builtin/builtin_fixtures.py` | The `make_gateway(policy)` fixture: a real `ModelGateway` with the toy tokenizer and a policy you write as a function of the prompt |
 | `tests/harness/builtin/inline_runs.py` | `run_tree`: runs a function harness and its subagents on a gateway, then grades the session; `open_service_task` opens a task of an environment service |
 | `tests/harness/builtin/codeact_golden.py`, `tests/harness/builtin/golden_scenarios.py` | Golden fixtures: record a scripted rollout in full and compare later runs with it; the scenarios' scaffolding and the differences they allow, with why |
+| `tests/train/parity/` | The training loop's golden trace: a few training steps per scenario on a fake Tinker service and fake rollouts, compared in full with golden files. A training setting gets a scenario there (its README says how). Its fakes are its own: a change to them changes every golden |
 | `tests/envs/scripted_trees.py` | Scripted agent trees on a live ORS session: calls, gathers and spawns, without model calls |
 | `tests/harness/harness_fakes.py` | A scripted OpenAI Chat server, a process-backed sandbox and an environment service that grades files in it, for TOML spec harnesses |
 
@@ -714,7 +730,7 @@ extensions/<name>/
 - **Dependencies.** PyPI packages only. The environment imports neither platoon nor IPython, so any ORS client can
   serve it, and its requirements are what it alone needs. What imports platoon (prompt builders, named environments,
   task generators) goes behind a `platoon` extra that requires `platoon[ors]` within one minor release
-  (`platoon[ors]>=0.3,<0.4`), which platoon checks before it loads the extension's components.
+  (`platoon[ors]>=0.4,<0.5`), which platoon checks before it loads the extension's components.
   `[tool.uv.sources]` takes `platoon` from the workspace (`{ workspace = true }`) for development only.
 - **Components.** Each is an entry point in the group of its kind (`platoon.environments`, ...), named as configs
   name it ([Extending platoon](docs/extending/index.md)); `platoon extensions check platoon-<name> --load` checks
@@ -769,10 +785,12 @@ The process (how to number an RFC, how it is reviewed, its lifecycle from `Draft
 
 Two tests make every change to the public API a deliberate one:
 
-- `tests/test_public_api.py` compares the names the public modules export (`platoon`, with `pt.gym`, and
-  `platoon.testing`), with their signatures, to the snapshot in `tests/public_api.txt`. When you change the public
-  API on purpose, run `python scripts/public_api.py` to rewrite the snapshot, commit it with the change, and say in
-  the pull request what changed and why. Removing or renaming a public name needs an RFC first.
+- `tests/test_public_api.py` compares the names the public modules export (`platoon`, with `pt.gym`,
+  `platoon.testing` and `platoon.experimental`), with their signatures, to the snapshot in `tests/public_api.txt`.
+  When you change the public API on purpose, run `python scripts/public_api.py` to rewrite the snapshot, commit it
+  with the change, and say in the pull request what changed and why. Removing or renaming a public name needs an RFC
+  first, but for the names of `platoon.experimental` (and `platoon.testing.check_task_sampler`, which checks them):
+  they are experimental, so a minor release may change them (RFC 0017, section 2), and its CHANGELOG says how.
 - `tests/test_import_boundaries.py` reads the imports in the source. Core never imports the first-party extensions
   in `extensions/` or an installed extension, neither by an import nor by an import string such as
   `python://pkg.mod:Class`, and the extensions' code and the examples import only the public names. The private
@@ -795,7 +813,7 @@ The version is set in one place, `version` in `pyproject.toml`. `platoon.__versi
 `lock.json` and the extension checks read it the same way: from `pyproject.toml` when platoon runs from a checkout, and
 from the installed metadata otherwise. While the version is below 1.0, a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs, so a package built on platoon
-requires a range within one minor release, such as `platoon>=0.3,<0.4`. [CHANGELOG.md](CHANGELOG.md) lists what each
+requires a range within one minor release, such as `platoon>=0.4,<0.5`. [CHANGELOG.md](CHANGELOG.md) lists what each
 release changes.
 
 ### Deprecations
@@ -803,10 +821,11 @@ release changes.
 A form people use, such as a config key, can be deprecated before it goes: it keeps working for one minor release,
 with a `pt.PlatoonDeprecationWarning` that names what replaces it and the release that removes it, and the next minor
 release removes it ([RFC 0016, section 10](docs/rfcs/0016-component-configuration.md#10-deprecations)). A config
-class names its deprecated keys in a class attribute, with `DeprecatedKey` from `platoon/deprecations.py`:
+class names its deprecated keys in a class attribute, with `DeprecatedKey` from `platoon/deprecations.py`, as platoon
+0.3.0 named `train.task_order`, the former name of `train.task_sampler`:
 
 ```python
-# platoon/train/tinker/config_defs.py, in TrainConfig
+# platoon/train/config_defs.py, in TrainConfig (platoon 0.3.0)
 DEPRECATED_KEYS: ClassVar[dict[str, DeprecatedKey]] = {
     "task_order": DeprecatedKey(removed_in="0.4.0", renamed_to="task_sampler", former_default="auto"),
 }
@@ -816,19 +835,21 @@ The key keeps its field, which still works. The loader reports every config that
 name it once on stderr, `lock.json` records it, `platoon config validate --strict` fails on it, and the generated
 config reference marks it. A Python name warns where it is used, with
 `warnings.warn(message, PlatoonDeprecationWarning, stacklevel=2)`. Say in the release's notes what each deprecation
-replaces, and before a minor release remove the forms it is due to remove: `grep -rn 'removed_in="0.4.0"' platoon`
-lists them for 0.4.0.
+replaces, and before a minor release remove the forms it is due to remove: `grep -rn 'removed_in="0.5.0"' platoon`
+lists them for 0.5.0. The module paths that platoon 0.5.0 moved go in 0.6.0: their shims are the modules under
+`platoon/train/tinker` that call `_moved` (`grep -rln '_moved(' platoon/train/tinker`), and
+`platoon/train/tinker/_moved.py`, whose `REMOVED_IN` names that release.
 
 Removing a form is a breaking change, in a commit marked as one (`!` and a `BREAKING CHANGE:` footer, [RFC 0017,
 section 2](docs/rfcs/0017-public-surface-and-conformance.md#2-the-version-policy)). Drop the key's field and the code
 that read it, and name the key in the class's `UNKNOWN_KEY_HINTS` with `removed_hint` from `platoon/deprecations.py`,
 so that a config that still sets it does not load (exit 78) and says what replaces it and which release removed it
-(`train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by`):
+(`train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`):
 
 ```python
-# platoon/train/tinker/config_defs.py, in TrainConfig
+# platoon/train/config_defs.py, in TrainConfig
 UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
-    "rollout_group_key": removed_hint("0.3.0", "train.label_by"),
+    "task_order": removed_hint("0.4.0", "train.task_sampler"),
 }
 ```
 
@@ -854,10 +875,10 @@ the changelog.
    day PyPI accepts no new projects.
 3. Release only requirements that are on PyPI: PyPI refuses a release whose requirements name a URL, and an extra
    whose requirement no index has cannot be installed. hpc-sandbox, which the `hpc` extra installs, is published there
-   from [its repository](https://github.com/ApGa/hpc-sandbox), and the extra takes one minor release of it, from the
-   release the providers are tested against (`hpc-sandbox>=0.4.0,<0.5`). To move to another, set the range, run
-   `uv lock` in the repository root (one lock covers core and the extensions), and run
-   `tests/sandbox/test_sandbox_hpc.py` and `tests/envs/test_harbor_providers.py` after
+   from [its repository](https://github.com/ApGa/hpc-sandbox), and the extra takes one minor release of it, the one
+   the lock holds, from the release the providers are tested against, 0.5.1 (`hpc-sandbox>=0.5.1,<0.6`). To move to
+   another, set the range, run `uv lock` in the repository root (one lock covers core and the extensions),
+   and run `tests/sandbox/test_sandbox_hpc.py` and `tests/envs/test_harbor_providers.py` after
    `uv sync --dev --extra tinker --extra ors --extra hpc`: their tests of the installed hpc-sandbox check the types,
    errors, options, capabilities and root filesystem layouts that the providers adapt.
 
@@ -926,18 +947,18 @@ next patch release, and yank the broken one on PyPI.
 
 The TextCraft extension, `platoon-textcraft`, has a version of its own, `version` in
 `extensions/textcraft/pyproject.toml`, and is released from tags of its own, `platoon-textcraft-vX.Y.Z`. Its
-`platoon` extra requires one minor release of platoon (`platoon[ors]>=0.3,<0.4`): release it once that release of
+`platoon` extra requires one minor release of platoon (`platoon[ors]>=0.4,<0.5`): release it once that release of
 platoon is on PyPI.
 
 1. On a branch, set its `version` and run `uv lock` in the repository root. Open a pull request, such as
-   `chore: Release platoon-textcraft 0.2.0`, and merge it once CI and the release workflow's checks pass. When
+   `chore: Release platoon-textcraft 0.3.0`, and merge it once CI and the release workflow's checks pass. When
    `version` already names the release, as it does for the first one, go to step 2.
 2. Before its first release, add its publisher on PyPI ([Set up publishing once](#set-up-publishing-once), step 2).
    Tag a commit on `main` that has that version, such as the merge commit, and push the tag:
 
    ```bash
-   git tag -a platoon-textcraft-v0.2.0 -m "platoon-textcraft 0.2.0"
-   git push origin platoon-textcraft-v0.2.0
+   git tag -a platoon-textcraft-v0.3.0 -m "platoon-textcraft 0.3.0"
+   git push origin platoon-textcraft-v0.3.0
    ```
 
 3. The release workflow builds and checks everything as in [Cut a release](#cut-a-release), step 3, except the
@@ -950,7 +971,7 @@ platoon is on PyPI.
 
    When every check passes, the workflow uploads the extension's sdist and wheel, and nothing else, to PyPI from the
    `pypi` environment.
-4. Check the release in a fresh virtual environment (`pip install 'platoon-textcraft[platoon]==0.2.0'`, then
+4. Check the release in a fresh virtual environment (`pip install 'platoon-textcraft[platoon]==0.3.0'`, then
    `platoon env show textcraft-synth`), and create a GitHub release from the tag.
 
 ### What the distribution holds

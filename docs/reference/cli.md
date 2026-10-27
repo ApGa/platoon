@@ -50,6 +50,7 @@ Build and train systems of agents.
     - [`images`](#platoon-harbor-images)
         - [`plan`](#platoon-harbor-images-plan)
         - [`build`](#platoon-harbor-images-build)
+        - [`pin`](#platoon-harbor-images-pin)
         - [`verify`](#platoon-harbor-images-verify)
         - [`alias`](#platoon-harbor-images-alias)
     - [`fetch`](#platoon-harbor-fetch)
@@ -380,8 +381,9 @@ Plan, build and verify the images of a lock's tasks, once per site.
 
 * [`alias`](#platoon-harbor-images-alias): Point the image map's missing keys (or KEY) at an existing image: a prebuilt SIF that matches the build, or ``local`` for the process provider, which runs no image.
 * [`build`](#platoon-harbor-images-build): Build the images the image map lacks and add each to the map, with a receipt (builder, version, time, log, size, SHA-256). Exits 1 if any build failed.
-* [`plan`](#platoon-harbor-images-plan): List the images the tasks need: one per build key, with its task count, base images and whether the image map has it.
-* [`verify`](#platoon-harbor-images-verify): Check the image map against the images the runnable tasks use: each must be in the map, and a local image file must exist and hash to the SHA-256 its entry records. Exits 1 if any is missing or mismatched.
+* [`pin`](#platoon-harbor-images-pin): Pin the registry images that the tasks' stacks' sidecars run (`image: redis:7-alpine`) and the image map has not pinned: each by the digest its registry serves for it, with its image's configuration for this host's platform (ENTRYPOINT, CMD, ENV, WORKDIR, USER, HEALTHCHECK, ...), which sessions run it with. Exits 1 if any could not be pinned.
+* [`plan`](#platoon-harbor-images-plan): List the images the tasks need: one per build key, with its task count, base images and whether the image map has it, and the registry images that their stacks' sidecars run, with whether the map pinned each.
+* [`verify`](#platoon-harbor-images-verify): Check the image map against the images the runnable tasks use: each must be in the map, and a local image file must exist and hash to the SHA-256 its entry records; each registry image that sidecars run must be pinned (but for an entry of the process provider, which runs no image). Exits 1 if any is missing or mismatched.
 
 ##### platoon harbor images plan
 
@@ -389,7 +391,7 @@ Plan, build and verify the images of a lock's tasks, once per site.
 platoon harbor images plan [OPTIONS] CONFIG [ARGS...]
 ```
 
-List the images the tasks need: one per build key, with its task count, base images and whether the image map has it.
+List the images the tasks need: one per build key, with its task count, base images and whether the image map has it, and the registry images that their stacks' sidecars run, with whether the map pinned each.
 
 CONFIG is a training or evaluation config: each Harbor entry's lock, with the entry's image map,
 `images/<provider>.json` in the Harbor cache; or a lock file, with --image-map.
@@ -437,13 +439,34 @@ nodes, build each image once.
 * `--timeout FLOAT`: Seconds each build command may take. *[default: 3600.0]*
 * `--push STR`: docker builder: a repository to push to (registry/name).
 
+##### platoon harbor images pin
+
+```console
+platoon harbor images pin [OPTIONS] CONFIG [ARGS...]
+```
+
+Pin the registry images that the tasks' stacks' sidecars run (`image: redis:7-alpine`) and the image map has not pinned: each by the digest its registry serves for it, with its image's configuration for this host's platform (ENTRYPOINT, CMD, ENV, WORKDIR, USER, HEALTHCHECK, ...), which sessions run it with. Exits 1 if any could not be pinned.
+
+CONFIG is a training or evaluation config: each Harbor entry's lock, into the entry's image map; or a lock file,
+with --image-map.
+
+**Arguments**:
+
+* `CONFIG`: A training or evaluation config, or a lock file. **[required]**
+* `OVERRIDES`: key=value overrides of a training or evaluation config.
+
+**Parameters**:
+
+* `--image-map PATH`: A lock file's image map (JSON), created if missing.
+* `--reference STR..., --empty-reference`: Pin these references (again, if pinned) instead of the unpinned ones.
+
 ##### platoon harbor images verify
 
 ```console
 platoon harbor images verify [OPTIONS] CONFIG [ARGS...]
 ```
 
-Check the image map against the images the runnable tasks use: each must be in the map, and a local image file must exist and hash to the SHA-256 its entry records. Exits 1 if any is missing or mismatched.
+Check the image map against the images the runnable tasks use: each must be in the map, and a local image file must exist and hash to the SHA-256 its entry records; each registry image that sidecars run must be pinned (but for an entry of the process provider, which runs no image). Exits 1 if any is missing or mismatched.
 
 CONFIG is a training or evaluation config (each Harbor entry's lock, with its image map), or a lock file, with
 --image-map.  Each problem is a line on stdout. A registry reference cannot be hashed here, nor can a file whose
@@ -488,12 +511,12 @@ platoon harbor fetch [OPTIONS] CONFIG [ARGS...]
 
 Fetch the Harbor datasets a config names into the cache, and lock them.
 
-CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched. A dataset pinned to a
-commit whose lock answers the config, with a cache that holds its tasks, is left as it is: nothing is downloaded
-or hashed, unless the lock was written before platoon recorded the tasks' input files. A local directory is fetched
-again, since its files may have changed. Fetches of one lock take turns, also on several nodes, so a second one
-finds the first's lock current. Each entry with a hold-out prints the hold-out's report. Prints one JSON line per
-lock.
+CONFIG is a training or evaluation config, whose Harbor entries with a dataset (or an adapter) are fetched. A
+dataset pinned to a commit, revision or digest whose lock answers the config, with a cache that holds its tasks,
+is left as it is: nothing is downloaded or hashed, unless the lock was written before platoon recorded the tasks'
+input files. A local directory is fetched again, since its files may have changed. Fetches of one lock take
+turns, also on several nodes, so a second one finds the first's lock current. Each entry with a hold-out prints
+the hold-out's report. Prints one JSON line per lock.
 
 **Arguments**:
 
@@ -502,7 +525,8 @@ lock.
 
 **Parameters**:
 
-* `--update, --no-update`: Resolve a moving reference (a branch, a tag, no revision) to its current commit, and fetch it. *[default: False]*
+* `--update, --no-update`: Resolve a moving reference (a branch, a tag, no revision; a Harbor Hub tag; a registry task at HEAD) to what it
+    names now, and fetch it. *[default: False]*
 * `--repair, --no-repair`: Fetch a pinned dataset even when its lock answers: hash every cache entry again, and replace a damaged one. *[default: False]*
 * `--workers INT`: Parallel downloads (default 8).
 

@@ -97,7 +97,7 @@ def test_config_validate_warns_of_a_raised_bound_without_a_limit(tmp_path, capsy
 
 
 def test_platoon_rollout_runs_a_task_with_its_entry_s_rollout_settings():
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import resolve_config
 
     config = resolve_config(CONFIG, [], PlatoonTinkerRLTrainerConfig).config

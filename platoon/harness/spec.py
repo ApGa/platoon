@@ -38,6 +38,12 @@ config file. ``{mcp_url}`` (the endpoint; clients send the agent key as a
 Bearer token, e.g. from ``PLATOON_API_KEY``) and ``{mcp_config_path}`` render
 only there.
 
+``{task_mcp_servers}`` is the MCP servers the task itself offers its agents, which a harness in the task's sandbox
+may reach on its own, as Harbor's agents do: a JSON list of objects with each server's ``name`` and ``transport``,
+and its ``url`` or, for ``stdio``, its ``command`` and ``args``.  It is ``[]`` for a task without any, and for a
+harness that runs locally, which reaches only the servers that the env's tools serve (a Harbor stack's ``http://``
+ones), through those tools.
+
 ``[install] toolchain`` is an absolute path, or the name of a toolchain under the
 environment's toolchain root (``toolchains`` in the site profile's cache, else
 ``~/.cache/platoon/toolchains``), which a rollout stages and mounts read-only at
@@ -60,7 +66,7 @@ import math
 import posixpath
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -79,7 +85,17 @@ OptionType = Literal["bool", "int", "float", "str"]
 TOOLCHAIN_CACHES = ("tiktoken",)
 
 PLACEHOLDERS = frozenset(
-    {"instruction", "base_url", "api_key", "model", "workdir", "state_dir", "toolchain", "max_steps"}
+    {
+        "instruction",
+        "base_url",
+        "api_key",
+        "model",
+        "workdir",
+        "state_dir",
+        "toolchain",
+        "max_steps",
+        "task_mcp_servers",
+    }
 )
 SECRET_PLACEHOLDER = "api_key"
 # Defined only when the agent serves tools over MCP, so they render only into [mcp].
@@ -344,6 +360,8 @@ class RenderContext:
     # The entry's harness_options, as the route carries them: checked against the spec's [options] and completed
     # with their defaults when the launch renders.
     options: Mapping[str, Any] | None = None
+    # The task's own MCP servers, as a harness where it runs reaches them ({task_mcp_servers}).
+    task_mcp_servers: Sequence[Mapping[str, Any]] = ()
 
     def values(self) -> dict[str, str]:
         values = {
@@ -354,6 +372,7 @@ class RenderContext:
             "workdir": self.workdir,
             "state_dir": self.state_dir,
             "toolchain": self.toolchain or "",
+            "task_mcp_servers": json.dumps([dict(server) for server in self.task_mcp_servers]),
         }
         if self.max_steps is not None:
             values["max_steps"] = str(self.max_steps)

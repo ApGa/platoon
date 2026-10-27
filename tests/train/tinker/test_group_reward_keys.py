@@ -16,10 +16,10 @@ import tinker
 import torch
 from tinker import TensorData
 
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.train.tinker.workflows.group_rollout_workflow import _SingleRolloutOutcome
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workflow.group import GroupRolloutWorkflow
+from platoon.train.workflow.output import _SingleRolloutOutcome
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import StatsTracker
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats

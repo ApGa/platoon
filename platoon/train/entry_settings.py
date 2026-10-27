@@ -40,6 +40,7 @@ from typing import Any
 from platoon.config_defs import InferenceParams
 from platoon.train.components import ENTRY_ROLLOUT_KEYS, ENTRY_WORKFLOW_KEYS, ENVIRONMENT_COLUMN, row_entry
 from platoon.train.labels import task_label
+from platoon.train.workflow.protocol import capabilities_of
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +126,7 @@ def _eval_settings(config: Any, train: Any, overlay: Mapping[str, Any]) -> Any:
     if given is None:
         laid = run
     else:
-        from platoon.train.tinker.config_defs import eval_workflow_base
+        from platoon.train.config_defs import eval_workflow_base
 
         base = eval_workflow_base({"train": SimpleNamespace(workflow_config=train)}, _eval_default(config))
         laid = lay_over(base, given) if given else base
@@ -201,13 +202,14 @@ def entry_settings(config: Any) -> dict[str, EntrySettings]:
 
 def sets_anything(entry: Any) -> bool:
     """Whether an environment entry sets settings of its own: a ``workflow_config``, an
-    ``eval_overrides.workflow_config`` or a ``max_staleness``."""
+    ``eval_overrides.workflow_config``, a ``max_staleness`` or a ``group_admission``."""
 
     overrides = getattr(entry, "eval_overrides", None)
     return bool(
         getattr(entry, "workflow_config", None)
         or getattr(overrides, "workflow_config", None)
         or getattr(entry, "max_staleness", None) is not None
+        or getattr(entry, "group_admission", None) is not None
     )
 
 
@@ -390,9 +392,10 @@ def warnings(config: Any, settings: Mapping[str, EntrySettings]) -> list[str]:
     """What a training config's entry settings may get wrong without being wrong, one line each: an entry whose groups
     have one rollout, which trains nothing under the group baselines; an entry that raises its staleness bound (the
     sign of a slow entry) without a limit on its label; an entry's rollout setting that evaluation's section
-    overrides for its evaluation rollouts; and, for the default label column, a ``train.max_concurrent_rollouts`` that
+    overrides for its evaluation rollouts; for the default label column, a ``train.max_concurrent_rollouts`` that
     the capped labels' groups can fill (:func:`permit_warnings`; another column's, once the tasks are listed,
-    :func:`listed_permit_warnings`)."""
+    :func:`listed_permit_warnings`); and a group admission rule under a loss whose objective is not zero at zero
+    advantages (:func:`platoon.train.admissions.loss_warnings`)."""
 
     from platoon.utils.config import given_mapping
 
@@ -433,6 +436,9 @@ def warnings(config: Any, settings: Mapping[str, EntrySettings]) -> list[str]:
         # A mixture's tasks carry their entry as the label; a single environment's carry none.
         by_label = {label: {label} for label in settings} if len(settings) > 1 else {None: set(settings)}
         found += permit_warnings(config, settings, by_label)
+    from platoon.train.admissions import loss_warnings
+
+    found += loss_warnings(config)
     return found
 
 
@@ -528,11 +534,12 @@ def sets_settings(environments: Sequence[Any]) -> list[str]:
 
 def workflow_problems(environments: Sequence[Any], workflow_cls: Any, reference: str) -> list[str]:
     """An entry's training settings beside a workflow class that does not apply them: one that is not a
-    ``GroupRolloutWorkflow`` and does not declare ``applies_entry_settings = True`` never reads them, so they would be
-    ignored without a word."""
+    ``GroupRolloutWorkflow`` and does not declare ``applies_entry_settings = True`` (its capabilities,
+    :func:`~platoon.train.workflow.protocol.capabilities_of`) never reads them, so they would be ignored without a
+    word."""
 
     labels = sets_settings(environments)
-    if not labels or getattr(workflow_cls, "applies_entry_settings", False):
+    if not labels or capabilities_of(workflow_cls).applies_entry_settings:
         return []
     return [
         f"environments[{label}].workflow_config: the run's workflow, {reference}, does not apply an entry's settings "
@@ -757,7 +764,7 @@ def describe(config: Any, label: str, settings: Mapping[str, EntrySettings] | No
     entry = next(entry for entry in config.environments if entry.label == label)
     blocks: list[str] = []
     if getattr(config, "train", None) is not None:
-        from platoon.train.tinker.config_defs import eval_workflow_base, evaluates
+        from platoon.train.config_defs import eval_workflow_base, evaluates
 
         settings = settings if settings is not None else entry_settings(config)
         own = settings[label]
@@ -770,6 +777,10 @@ def describe(config: Any, label: str, settings: Mapping[str, EntrySettings] | No
             blocks.append(_line(f"max_staleness: {entry.max_staleness}", "entry", note))
         else:
             blocks.append(_line(f"max_staleness: {_text(bound)}", "train.max_staleness"))
+        from platoon.train.admissions import describe_line
+
+        if (admission := describe_line(config, label)) is not None:  # under a group admission rule, or set here
+            blocks.append(_line(*admission))
         blocks += _policy_lines(config, label, "train")
         if own.eval is not None and evaluates(config):
             eval_given = given_mapping(config.eval.workflow_config)
@@ -859,17 +870,25 @@ def lock_record(config: Any, settings: Mapping[str, EntrySettings]) -> dict[str,
 
 
 def summary(config: Any, settings: Mapping[str, EntrySettings]) -> list[str]:
-    """One line per entry whose settings differ from the run's: what differs (:func:`differences`)."""
+    """One line per entry whose settings differ from the run's: what differs (:func:`differences`), and its own group
+    admission rule when that is not the run's (:func:`platoon.train.admissions.own_rule_text`)."""
 
+    from platoon.train.admissions import own_rule_text
+
+    found = differences(config, settings)
     lines = []
-    for label, entry in differences(config, settings).items():
+    for label in settings:
+        entry = found.get(label, {})
         parts = [f"{path} {_text(value)}" for path, value in entry.get("train", {}).items()]
         if "max_staleness" in entry:
             parts.append(f"max_staleness {_text(entry['max_staleness'])}")
+        if (rule := own_rule_text(config, label)) is not None:
+            parts.append(rule)
         evaluation = [f"{path} {_text(value)}" for path, value in entry.get("eval", {}).items()]
         if evaluation:
             parts.append("in evaluation: " + ", ".join(evaluation))
-        lines.append(f"environments[{label}]: {', '.join(parts)}")
+        if parts:
+            lines.append(f"environments[{label}]: {', '.join(parts)}")
     return lines
 
 

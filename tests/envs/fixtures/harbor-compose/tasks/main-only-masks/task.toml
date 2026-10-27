@@ -1,0 +1,15 @@
+version = "1.0"
+
+[task]
+name = "platoon/main-only-masks"
+
+[agent]
+timeout_sec = 60.0
+
+[verifier]
+timeout_sec = 30.0
+
+[environment]
+docker_image = "ubuntu:24.04"
+cpus = 2
+memory_mb = 1024

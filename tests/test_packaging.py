@@ -163,8 +163,9 @@ def test_a_checkout_takes_every_requirement_from_pypi():
 
 def test_the_hpc_extra_takes_the_minor_release_a_checkout_locks():
     """The hpc extra takes one minor release of hpc-sandbox, the one the lock names, from the release the providers
-    are tested against: an environment that holds an older hpc-sandbox (0.2.0, which checkouts took from git) then
-    upgrades instead of keeping it."""
+    are tested against: an environment that holds an older hpc-sandbox (0.5.0, whose pods fail on group-owned storage
+    and under a umask such as 027; 0.4, without the pods that stacks run as; 0.2.0, which checkouts took from git)
+    then upgrades instead of keeping it."""
 
     [line] = PROJECT["optional-dependencies"]["hpc"]
     requirement = Requirement(line)
@@ -176,7 +177,7 @@ def test_the_hpc_extra_takes_the_minor_release_a_checkout_locks():
     assert locked["source"] == PYPI
     assert requirement.specifier == SpecifierSet(f">={lowest},<{version.major}.{version.minor + 1}")
     assert lowest.release[:2] == version.release[:2] and version in requirement.specifier
-    assert Version("0.2.0") not in requirement.specifier
+    assert not any(Version(older) in requirement.specifier for older in ("0.2.0", "0.4.0", "0.5.0"))
 
 
 def test_the_lock_covers_every_extension():

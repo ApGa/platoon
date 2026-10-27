@@ -26,6 +26,7 @@ from platoon.envs.service import (
     get_service,
 )
 from platoon.task import Task
+from platoon.utils.stopping import CleanupScope, cleanups
 
 pytestmark = pytest.mark.asyncio
 
@@ -886,17 +887,43 @@ async def test_a_sync_tool_whose_caller_gave_up_holds_off_teardown_until_it_retu
     assert ors_toys.EVENTS == ["setup:SlowToolEnv", "slow:done", "teardown:SlowToolEnv"]
 
 
+async def test_a_teardown_that_waits_for_a_sync_tool_joins_the_rollouts_cleanup_scope():
+    """So an in-process rollout's permit waits for it; it is no cleanup that a stopping rollout worker lets finish,
+    since its wait has no bound (``platoon.utils.stopping.in_cleanup_scope``)."""
+
+    scope = CleanupScope()
+    with scope:
+        session = await _open("python://ors_toys:SlowToolEnv", close_timeout_s=0.2)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(session.call_tool("slow", {}), 0.2)
+        await session.close()
+    assert ors_toys.EVENTS == ["setup:SlowToolEnv"]
+    assert [task for task in scope.running() if task not in cleanups()]  # the teardown waiting for the tool
+    assert await scope.finish(10) == 0
+    assert ors_toys.EVENTS == ["setup:SlowToolEnv", "slow:done", "teardown:SlowToolEnv"]
+
+
 async def test_an_env_waiting_on_an_abandoned_sync_tool_is_torn_down_when_the_loop_ends():
     """A rollout worker's or an evaluation slot's loop ends with its rollout, and asyncio.run then cancels the
-    background teardown: it still tears the env down, while the tool runs on."""
+    background teardown: it still tears the env down, while the tool runs on.
+
+    No step waits a short time, which a loaded runner's stall can outlast: the rollout gives up on the call once the
+    tool runs, and the env's teardown keeps the default bound (``close_timeout_s``, which the env takes as it opens).
+    Only the close's wait for the call is cut short, since the call never returns here."""
 
     async def rollout() -> None:
-        session = await _open("python://ors_toys:HeldToolEnv", close_timeout_s=0.2)  # the close stops waiting
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(session.call_tool("held", {}), 0.2)
+        service = get_service("python://ors_toys:HeldToolEnv")
+        session = await service.open(await service.get_task("train:0"), rollout_id="rollout-1")
+        call = asyncio.create_task(session.call_tool("held", {}))
+        await _until(ors_toys.HELD.is_set)  # the tool runs in its thread
+        call.cancel()  # and the rollout gives up on it
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        service.close_timeout_s = 0.01  # the close stops waiting for the call at once
         await session.close()
         assert ors_toys.EVENTS == ["setup:HeldToolEnv"]  # the teardown waits for the tool
 
+    ors_toys.HELD.clear()
     ors_toys.RELEASE.clear()
     try:
         await asyncio.to_thread(asyncio.run, rollout())  # a loop of its own, which ends with the rollout

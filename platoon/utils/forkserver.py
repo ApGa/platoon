@@ -1,6 +1,6 @@
 """A fork server: a process that imports a worker's modules once, then forks one worker process per request.
 
-The rollout worker supervisor uses it (``worker_start_method: forkserver``, :mod:`platoon.train.tinker.workers`): an
+The rollout worker supervisor uses it (``worker_start_method: forkserver``, :mod:`platoon.train.workers`): an
 exec'd rollout worker spends most of its start importing the tinker / torch / transformers stack, 17-24 s alone and
 about a minute when 64 start at once on one node, which they contend for, CPUs and the shared filesystem the venv
 lives on alike.  Forked from a server that has imported that stack, a worker starts in a few seconds.
@@ -8,17 +8,39 @@ lives on alike.  Forked from a server that has imported that stack, a worker sta
 **A forked worker is the process an exec'd one would be.**  ``python -m <module> <argv>`` with the environment, the
 working directory and the log file the caller gives: right after the fork the child leads a session of its own,
 takes ``/dev/null`` as stdin and the log file as stdout and stderr, closes the server's descriptors, enters the
-working directory and replaces its environment with the one given.  It reseeds numpy's and torch's global
+working directory and replaces its environment with the one given (then makes in it what the server's optional imports
+made in the server's: see below).  It reseeds numpy's and torch's global
 generators and every ``random.Random`` the server's imports seeded from the OS (libraries make their own at import:
 sympy's, datasets' fingerprint generator, aiohttp's websocket masks), as a fresh interpreter would seed them
 (Python's global ``random`` reseeds itself at every fork; a generator seeded with a value keeps it), calls the
 server's ``child_init`` functions (what a package init that the server already ran would have done in a fresh
 interpreter, with this environment), then runs the module as ``__main__``, as ``python -m`` does, and exits as the
 interpreter does: it waits for its non-daemon threads, runs the ``atexit`` handlers and flushes.  What it inherits
-from the server is what the imports left behind, and the server's hash seed.
+from the server is what the imports left behind, and the server's hash seed.  A preload may hold more than an exec'd
+worker imports before it runs its module: the rollout workers' (``platoon.train.workers.supervisor.WORKER_PRELOAD``)
+holds the trainer's modules, and with them datasets, pandas and requests, which an exec'd worker imports only if its
+rollout does; a forked worker holds them, and what their imports left (their loggers, warning filters and ``atexit``
+handlers).
 
 The server may also build, once, what each worker would otherwise build for itself (``prepare``): each worker it
 forks then holds its own copy, copy-on-write.  A build that fails is reported, and the workers build it themselves.
+
+**What it imports beyond the worker's stack is checked, one item at a time.**  ``preload`` is the worker's stack, which
+the server needs; ``optional`` modules (what a worker's environment and harness import when they open) and the
+``prepare`` builds are each kept only when they leave the server as safe to fork as it was: no thread started (but
+:data:`FORK_SAFE_THREADS`), no file, socket or event loop left open (but a shared object's, read only), no process
+started and no seed drawn from the OS for a numpy generator (which every worker would share; ``random.Random``
+generators are seeded again in each worker).  An environment variable one sets or removes is set or removed in each
+worker too, once the worker's environment has replaced the server's, as the import would have in an exec'd worker.
+An optional module that does not import is left out and reported.  What
+an item that is not fork-safe left cannot be undone in the process, so once the server has tried every item, each
+checked against the state the one before it left, it starts over: it ends the processes those items started and
+executes itself again, with the same control socket, environment and working directory and no other descriptor,
+without them, and reports each, with what it left behind, in its hello.  The workers then import or build it
+themselves, as they would without the server.  What the checks cannot see stays the item's own: a value an import
+makes once per process (an id, a temporary directory and the ``atexit`` handler that removes it, the interpreter's path
+under a rollout's Python overlay) is shared by every worker forked from the server, as it would be by any forked
+process, so a module that keeps one belongs to the workers, not to ``optional``.
 
 **The server is safe to fork from because it does nothing else.**  It runs no thread but its own (it refuses to
 fork while any other runs, but jemalloc's background purger, whose own fork handlers make it safe), no event loop,
@@ -66,6 +88,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import runpy
 import select
 import selectors
@@ -77,12 +100,22 @@ import threading
 import time
 import traceback
 import warnings
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, NoReturn
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["FORK_SAFE_THREADS", "ForkServer", "ForkServerError", "ForkedWorker", "unsafe_threads"]
+__all__ = [
+    "FORK_SAFE_THREADS",
+    "ForkServer",
+    "ForkServerError",
+    "ForkedWorker",
+    "child_processes",
+    "fork_safe_descriptor",
+    "open_descriptors",
+    "prepare_key",
+    "unsafe_threads",
+]
 
 SERVER_MODULE = "platoon.utils.forkserver"
 #: Threads the server may run next to its own when it forks (by name): jemalloc's background purging thread, which
@@ -163,6 +196,266 @@ def _describe_threads(tasks: Sequence[tuple[int, str]]) -> str:
     return ", ".join(described)
 
 
+#: How long a thread an optional module or a build started may take to end before it counts against them.
+THREAD_GRACE_S = 0.5
+
+
+def prepare_key(item: Mapping[str, Any]) -> str:
+    """How a ``prepare`` build is named where the server reports it: its reference and its keyword arguments."""
+
+    kwargs = item.get("kwargs") or {}
+    arguments = ", ".join(f"{name}={value!r}" for name, value in sorted(kwargs.items()))
+    return f"{item['ref']}({arguments})"
+
+
+def open_descriptors() -> dict[int, str]:
+    """This process's open file descriptors and what each is (``/proc/self/fd``): a path, ``socket:[...]``,
+    ``pipe:[...]`` or ``anon_inode:[eventpoll]`` (an event loop's)."""
+
+    found = {}
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            found[int(name)] = os.readlink(f"/proc/self/fd/{name}")
+        except OSError:
+            continue  # the listing's own descriptor, closed already
+    return found
+
+
+def child_processes() -> set[int]:
+    """This process's live children."""
+
+    found: set[int] = set()
+    try:
+        tids = os.listdir("/proc/self/task")
+        for tid in tids:
+            with open(f"/proc/self/task/{tid}/children") as handle:
+                found.update(int(pid) for pid in handle.read().split())
+        return found
+    except OSError:
+        pass  # a kernel without /proc/<pid>/task/<tid>/children: read every process's parent
+    own = os.getpid()
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue
+        fields = raw[raw.rindex(b")") + 2 :].split()
+        if int(fields[1]) == own and fields[0] not in (b"Z", b"X", b"x"):
+            found.add(int(name))
+    return found
+
+
+#: A shared object's file name: ``libffi.so.8.1.2``, ``_ctypes.cpython-312-x86_64-linux-gnu.so``.
+_SHARED_OBJECT = re.compile(r".+\.so(?:\.\d+)*")
+
+
+def fork_safe_descriptor(fd: int, target: str) -> bool:
+    """Whether the open descriptor ``fd`` (to ``target``, :func:`open_descriptors`) may be inherited by a forked
+    worker: a read-only one of the interpreter's executable or of a shared object (a file named ``*.so`` or
+    ``*.so.<n>...``, or one this process maps executable), which libffi holds open to map its closures' trampolines
+    from (from ``import ctypes`` on Python 3.14, from a process's first ctypes callback on 3.12 and 3.13), and never
+    reads.  Any other file a worker would share the offset of with its siblings."""
+
+    path = target.removesuffix(" (deleted)")
+    if not path.startswith("/"):
+        return False
+    shared_object = path == os.path.realpath(sys.executable) or _SHARED_OBJECT.fullmatch(os.path.basename(path))
+    if not shared_object and path not in _executable_mappings():
+        return False
+    try:
+        with open(f"/proc/self/fdinfo/{fd}") as handle:
+            flags = next(int(line.split()[1], 8) for line in handle if line.startswith("flags:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return False
+    return flags & os.O_ACCMODE == os.O_RDONLY
+
+
+def _executable_mappings() -> set[str]:
+    """The files this process maps executable (``/proc/self/maps``)."""
+
+    found = set()
+    try:
+        with open("/proc/self/maps") as handle:
+            for line in handle:
+                fields = line.split(maxsplit=5)
+                if len(fields) == 6 and "x" in fields[1]:
+                    found.add(fields[5].strip().removesuffix(" (deleted)"))
+    except OSError:
+        pass
+    return found
+
+
+@contextlib.contextmanager
+def _counting_os_seeds() -> Iterator[list[int]]:
+    """Count, in the list it yields, the seeds drawn from the OS through ``secrets.randbits`` while the block runs:
+    numpy draws one for each generator made without a seed (``numpy.random.default_rng()``, ``RandomState()``, a bit
+    generator), which a fresh interpreter would draw anew in every worker, but which every worker forked from the
+    server would share."""
+
+    import secrets
+
+    draws: list[int] = []
+    original = secrets.randbits
+
+    def randbits(k: int) -> int:
+        draws.append(k)
+        return original(k)
+
+    def patch(value: Any) -> None:
+        secrets.randbits = value  # a numpy imported meanwhile binds it as its own
+        bit_generator = sys.modules.get("numpy.random.bit_generator")
+        if bit_generator is not None and getattr(bit_generator, "randbits", None) in (original, randbits):
+            with contextlib.suppress(Exception):
+                bit_generator.randbits = value
+
+    patch(randbits)
+    try:
+        yield draws
+    finally:
+        patch(original)
+
+
+class _ForkState:
+    """What makes forking unsafe, as it stands: the threads besides the server's own (:func:`_unsafe_tasks`), the open
+    descriptors, the child processes, the environment and the seeds drawn from the OS so far (``seeds``, the list
+    :func:`_counting_os_seeds` yields)."""
+
+    def __init__(
+        self,
+        tasks: list[tuple[int, str]],
+        descriptors: dict[int, str],
+        children: set[int],
+        environ: dict[str, str],
+        seeds: list[int],
+    ) -> None:
+        self.tasks = tasks
+        self.descriptors = descriptors
+        self.children = children
+        self.environ = environ
+        self.seeds = seeds
+        self.seeded = len(seeds)
+        # numpy's global generator, which numpy.random seeds from the OS when it is first imported, and each worker
+        # seeds again (_reseed).
+        self.numpy_random = "numpy.random.mtrand" in sys.modules
+
+    @classmethod
+    def now(cls, seeds: list[int]) -> _ForkState:
+        return cls(_unsafe_tasks(), open_descriptors(), child_processes(), dict(os.environ), seeds)
+
+    def after(self) -> tuple[_ForkState, str, list[int], dict[str, str | None]]:
+        """The state now, what an import or a build since this one left that makes forking unsafe (empty when
+        nothing), the processes it started, and the environment variables it set (to their values) or removed (to
+        None).  A new thread may take :data:`THREAD_GRACE_S` to end."""
+
+        deadline = time.monotonic() + THREAD_GRACE_S
+        while True:
+            now = _ForkState.now(self.seeds)
+            threads = [task for task in now.tasks if task not in self.tasks]
+            if not threads or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        descriptors = {
+            fd: what
+            for fd, what in now.descriptors.items()
+            if self.descriptors.get(fd) != what and not fork_safe_descriptor(fd, what)
+        }
+        children = sorted(now.children - self.children)
+        names = sorted({*self.environ, *now.environ})
+        changed = {name: now.environ.get(name) for name in names if self.environ.get(name) != now.environ.get(name)}
+        hazards = []
+        if threads:
+            hazards.append(f"it started threads: {_describe_threads(threads)}")
+        if descriptors:
+            opened = ", ".join(f"{fd} ({what})" for fd, what in sorted(descriptors.items()))
+            hazards.append(f"it left file descriptors open: {opened}")
+        if children:
+            hazards.append(f"it started processes: {children}")
+        seeded = now.seeded - self.seeded - (now.numpy_random and not self.numpy_random)
+        if seeded > 0:
+            hazards.append(
+                f"it drew {seeded} seed(s) from the OS (a numpy generator made without a seed, or secrets.randbits), "
+                "which every worker would share"
+            )
+        return now, "; ".join(hazards), children, changed
+
+
+def _end_processes(pids: Sequence[int]) -> None:
+    """End and reap the server's children ``pids``, which an item left out started: SIGTERM, then SIGKILL to one
+    still running after a second."""
+
+    for pid in pids:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 1.0
+    left = set(pids)
+    while left:
+        for pid in list(left):
+            try:
+                done, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                done = pid
+            if done:
+                left.discard(pid)
+        if not left:
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    for pid in left:
+        with contextlib.suppress(OSError):
+            os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+
+
+def _start_over(
+    control_fd: int,
+    module: str,
+    *,
+    preload: Sequence[str],
+    child_init: Sequence[str],
+    prepare: Sequence[Mapping[str, Any]],
+    optional: Sequence[str],
+    skipped: Sequence[Mapping[str, str]],
+    began: float,
+    environ: Mapping[str, str],
+    cwd: str,
+) -> NoReturn:
+    """Execute this server again, with the same control socket, arguments, environment and working directory, and
+    ``skipped`` left out: what an import or a build left in this process cannot be undone.  No descriptor but the
+    standard streams and the control socket passes to the new server, whose workers would inherit it."""
+
+    argv = [
+        sys.executable,
+        "-m",
+        SERVER_MODULE,
+        "--fd",
+        str(control_fd),
+        "--module",
+        module,
+        *itertools.chain.from_iterable(("--preload", name) for name in preload),
+        *itertools.chain.from_iterable(("--child-init", ref) for ref in child_init),
+        *itertools.chain.from_iterable(("--prepare", json.dumps(item)) for item in prepare),
+        *itertools.chain.from_iterable(("--optional", name) for name in optional),
+        *itertools.chain.from_iterable(("--skipped", json.dumps(dict(entry))) for entry in skipped),
+        "--began",
+        repr(began),
+    ]
+    for stream in (sys.stdout, sys.stderr):
+        with contextlib.suppress(Exception):
+            stream.flush()
+    for fd in open_descriptors():
+        if fd not in (0, 1, 2, control_fd):
+            with contextlib.suppress(OSError):
+                os.set_inheritable(fd, False)
+    os.set_inheritable(control_fd, True)
+    os.chdir(cwd)
+    os.execve(sys.executable, argv, dict(environ))
+
+
 def _resolve(ref: str) -> Callable[[], Any]:
     module, _, name = ref.partition(":")
     target: Any = importlib.import_module(module)
@@ -197,19 +490,55 @@ def serve(
     preload: Sequence[str],
     child_init: Sequence[str],
     prepare: Sequence[Mapping[str, Any]] = (),
+    optional: Sequence[str] = (),
+    *,
+    skipped: Sequence[Mapping[str, str]] = (),
+    began: float | None = None,
+    environ: Mapping[str, str] | None = None,
+    cwd: str | None = None,
 ) -> int:
-    """Import ``preload`` and ``module``, call each ``prepare`` (``{"ref": "module:function", "kwargs": {...}}``,
-    what the workers would otherwise each build: a failure is reported and their workers build it), say hello on
-    the control socket, then fork one worker per request until the socket closes, and exit once the workers have
-    exited.  It answers each request before it reads the next, which the caller relies on (:class:`ForkServer`)."""
+    """Import ``preload`` and ``module``, then each ``optional`` module and each ``prepare`` build (``{"ref":
+    "module:function", "kwargs": {...}}``, what the workers would otherwise each build: a failure is reported and
+    their workers build it) that leaves the server fork-safe, say hello on the control socket, then fork one worker per
+    request until the socket closes, and exit once the workers have exited.  It answers each request before it reads
+    the next, which the caller relies on (:class:`ForkServer`).
+
+    The optional modules and builds that are not fork-safe make the server start over without them, once it has
+    tried them all (see the module docstring): ``skipped`` lists what earlier passes, or an earlier server of the same
+    caller, left out (``{"item": ..., "reason": ...}``), ``began`` is when the first pass began
+    (``time.monotonic()``), and ``environ`` and ``cwd`` are what it started with, which it starts over with (default:
+    this process's)."""
 
     parent = os.getppid()
     _die_with(parent)
     sock = socket.socket(fileno=control_fd)
-    began = time.monotonic()
+    began = time.monotonic() if began is None else began
+    environ = dict(os.environ if environ is None else environ)
+    cwd = os.getcwd() if cwd is None else cwd
     error = None
     initializers: list[Callable[[], Any]] = []
     prepare_errors = []
+    skipped = [{"item": str(entry["item"]), "reason": str(entry["reason"])} for entry in skipped]
+    left_out = {entry["item"] for entry in skipped}
+    preloaded = 0  # the optional modules it imported (not those the worker's stack had imported already)
+    not_fork_safe: list[dict[str, str]] = []  # what this pass found not fork-safe, which it starts over without
+    started: list[int] = []  # the processes those started, which it ends before it starts over
+    # The environment variables the optional imports and builds set (to their values) or removed (None), in order:
+    # each worker's environment replaces the server's, and then takes these, as its own imports would have made them.
+    environ_changes: list[tuple[str, str | None]] = []
+
+    def check(item: str, state: _ForkState) -> tuple[_ForkState, bool]:
+        """Whether ``item``, imported or built since ``state``, left the server fork-safe; the next item is checked
+        against the state after it, so that one pass finds every item that is not."""
+
+        state, hazards, children, changed = state.after()
+        if hazards:
+            print(f"fork server: {item} is not fork-safe ({hazards})", file=sys.stderr)
+            not_fork_safe.append({"item": item, "reason": hazards})
+            started.extend(children)
+        environ_changes.extend(changed.items())
+        return state, not hazards
+
     with _tracking_os_seeded_generators():
         try:
             for name in dict.fromkeys([*preload, module]):
@@ -218,12 +547,48 @@ def serve(
         except BaseException as exc:  # noqa: BLE001 - reported; the caller starts its workers otherwise
             error = f"importing the worker's modules failed: {type(exc).__name__}: {exc}"
             traceback.print_exc()
-        for item in prepare if error is None else ():
-            try:
-                _resolve(item["ref"])(**item.get("kwargs", {}))
-            except Exception as exc:  # noqa: BLE001 - the workers build it themselves
-                prepare_errors.append(f"{item['ref']}: {type(exc).__name__}: {exc}")
-                traceback.print_exc()
+        with _counting_os_seeds() as seeds:
+            state = _ForkState.now(seeds) if error is None else None
+            for name in dict.fromkeys(optional) if state is not None else ():
+                if name in left_out:
+                    continue
+                failed, imported = None, name not in sys.modules
+                if imported:
+                    try:
+                        importlib.import_module(name)
+                    except BaseException as exc:  # noqa: BLE001 - the workers import it themselves, as without it
+                        failed = f"it does not import: {type(exc).__name__}: {exc}"
+                state, safe = check(name, state)
+                if safe and failed is not None:
+                    skipped.append({"item": name, "reason": failed})
+                    print(f"fork server: left {name} out: {failed}", file=sys.stderr)
+                elif safe and imported:
+                    preloaded += 1
+            for item in prepare if state is not None else ():
+                key = prepare_key(item)
+                if key in left_out:
+                    continue
+                try:
+                    _resolve(item["ref"])(**item.get("kwargs", {}))
+                except Exception as exc:  # noqa: BLE001 - the workers build it themselves
+                    prepare_errors.append(f"{item['ref']}: {type(exc).__name__}: {exc}")
+                    traceback.print_exc()
+                state, _ = check(key, state)
+    if not_fork_safe:
+        print(f"fork server: starting over without {len(not_fork_safe)} item(s) not fork-safe", file=sys.stderr)
+        _end_processes(started)
+        _start_over(
+            control_fd,
+            module,
+            preload=preload,
+            child_init=child_init,
+            prepare=prepare,
+            optional=optional,
+            skipped=[*skipped, *not_fork_safe],
+            began=began,
+            environ=environ,
+            cwd=cwd,
+        )
     gc.collect()
     gc.freeze()  # imported objects are never collected: the children's collections leave their pages shared
     if error is None and (unsafe := _unsafe_tasks()):
@@ -234,7 +599,7 @@ def serve(
     if error is not None:
         print(f"fork server: {error}", file=sys.stderr)  # its log says why too, should nobody read its hello
     hello = {"op": "hello", "pid": os.getpid(), "seconds": round(time.monotonic() - began, 3), "error": error}
-    _send(sock, {**hello, "prepare_errors": prepare_errors})
+    _send(sock, {**hello, "prepare_errors": prepare_errors, "skipped": skipped, "preloaded": preloaded})
     if error is not None:
         return 1
     # A thread in FORK_SAFE_THREADS is allowed; the interpreter's warning about forking next to it is not news.
@@ -265,7 +630,7 @@ def serve(
                     continue
                 if message.get("op") == "fork":
                     own = (sock.fileno(), wake_r, wake_w, selector.fileno())
-                    pid = _fork(message, sock, module, initializers, close_in_child=own)
+                    pid = _fork(message, sock, module, initializers, environ_changes, close_in_child=own)
                     if pid is not None:
                         children.add(pid)
             else:
@@ -298,6 +663,7 @@ def _fork(
     sock: socket.socket,
     module: str,
     initializers: Sequence[Callable[[], Any]],
+    environ_changes: Sequence[tuple[str, str | None]] = (),
     *,
     close_in_child: Sequence[int],
 ) -> int | None:
@@ -318,7 +684,7 @@ def _fork(
         return None
     if pid == 0:
         os.close(sync_r)
-        _become_worker(message, module, initializers, sync_w, close_in_child)
+        _become_worker(message, module, initializers, sync_w, close_in_child, environ_changes)
     os.close(sync_w)
     poller = select.poll()
     poller.register(sync_r, select.POLLIN)
@@ -352,8 +718,11 @@ def _become_worker(
     initializers: Sequence[Callable[[], Any]],
     sync_w: int,
     close: Sequence[int],
+    environ_changes: Sequence[tuple[str, str | None]] = (),
 ) -> NoReturn:
-    """In the forked child: become the process ``python -m module argv`` would be, then run ``module``."""
+    """In the forked child: become the process ``python -m module argv`` would be, then run ``module``.  Its
+    environment is the one given, with the changes the server's optional imports and builds made to the server's
+    (``environ_changes``: a variable set to its value, or removed), as those imports make them in an exec'd worker."""
 
     code: int = 1
     try:
@@ -370,6 +739,11 @@ def _become_worker(
         os.chdir(message["cwd"])
         os.environ.clear()
         os.environ.update(message["env"])
+        for name, value in environ_changes:
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         _reseed()
         sys.argv = [module, *message["argv"]]
         for initialize in initializers:
@@ -489,8 +863,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--prepare", action="append", default=[], help='JSON {"ref": "module:function", "kwargs": {...}}, called once'
     )
+    parser.add_argument(
+        "--optional", action="append", default=[], help="a module to import once, in the server, if it is fork-safe"
+    )
+    parser.add_argument(
+        "--skipped", action="append", default=[], help='JSON {"item": ..., "reason": ...}: left out by an earlier pass'
+    )
+    parser.add_argument("--began", type=float, default=None, help="when the first pass began (time.monotonic())")
+    environ, cwd = dict(os.environ), os.getcwd()  # what the server started with, which it starts over with
     args = parser.parse_args(argv)
-    return serve(args.fd, args.module, args.preload, args.child_init, [json.loads(item) for item in args.prepare])
+    return serve(
+        args.fd,
+        args.module,
+        args.preload,
+        args.child_init,
+        [json.loads(item) for item in args.prepare],
+        args.optional,
+        skipped=[json.loads(item) for item in args.skipped],
+        began=args.began,
+        environ=environ,
+        cwd=cwd,
+    )
 
 
 # ------------------------------------------------------------------------------------------------- the caller side
@@ -572,6 +965,10 @@ class ForkServer:
         self.loop = loop
         self.seconds = 0.0  # what its imports took, once it said hello
         self.prepare_errors: list[str] = []  # what it could not build ahead (its workers build it)
+        # The optional modules and builds it left out, each {"item": ..., "reason": ...} (its workers import or build
+        # them), and how many optional modules it imported, once it said hello.
+        self.skipped: list[dict[str, str]] = []
+        self.preloaded = 0
         self.error: str | None = None  # why it cannot serve, once it said so, whether or not someone still waited
         self.dead = False
         self._serving = False  # it said hello without an error
@@ -599,6 +996,8 @@ class ForkServer:
         preload: Sequence[str] = (),
         child_init: Sequence[str] = (),
         prepare: Sequence[Mapping[str, Any]] = (),
+        optional: Sequence[str] = (),
+        skipped: Sequence[Mapping[str, str]] = (),
         env: Mapping[str, str],
         cwd: str | None = None,
         log_path: str | None = None,
@@ -614,6 +1013,8 @@ class ForkServer:
             preload=preload,
             child_init=child_init,
             prepare=prepare,
+            optional=optional,
+            skipped=skipped,
             env=env,
             cwd=cwd,
             log_path=log_path,
@@ -634,11 +1035,15 @@ class ForkServer:
         preload: Sequence[str] = (),
         child_init: Sequence[str] = (),
         prepare: Sequence[Mapping[str, Any]] = (),
+        optional: Sequence[str] = (),
+        skipped: Sequence[Mapping[str, str]] = (),
         env: Mapping[str, str],
         cwd: str | None = None,
         log_path: str | None = None,
     ) -> ForkServer:
-        """Start a server, for the running event loop; it imports its modules meanwhile (:meth:`ready`)."""
+        """Start a server, for the running event loop; it imports its modules meanwhile (:meth:`ready`): ``preload``
+        and ``module``, then each of ``optional`` and builds each of ``prepare`` that leaves it fork-safe.
+        ``skipped`` (``{"item": ..., "reason": ...}``, an earlier server's :attr:`skipped`) are left out at once."""
 
         loop = asyncio.get_running_loop()
         cwd = cwd or os.getcwd()
@@ -658,6 +1063,8 @@ class ForkServer:
                     *itertools.chain.from_iterable(("--preload", name) for name in preload),
                     *itertools.chain.from_iterable(("--child-init", ref) for ref in child_init),
                     *itertools.chain.from_iterable(("--prepare", json.dumps(item)) for item in prepare),
+                    *itertools.chain.from_iterable(("--optional", name) for name in optional),
+                    *itertools.chain.from_iterable(("--skipped", json.dumps(dict(entry))) for entry in skipped),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=log if log is not None else subprocess.DEVNULL,
@@ -831,6 +1238,8 @@ class ForkServer:
                 else:  # it serves from now on, whether or not someone still waits
                     self.seconds = float(message.get("seconds") or 0.0)
                     self.prepare_errors = list(message.get("prepare_errors") or [])
+                    self.skipped = [dict(entry) for entry in message.get("skipped") or []]
+                    self.preloaded = int(message.get("preloaded") or 0)
                     self._serving = True
                 self._hello.set_result(message)
         elif op == "forked":

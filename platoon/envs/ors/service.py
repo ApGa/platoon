@@ -50,6 +50,7 @@ import base64
 import contextlib
 import dataclasses
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -489,6 +490,31 @@ class OrsEnvironmentService:
 
         return {TaskRef(split, index).task_id: name for index, name in await self._names(split)}
 
+    def warm_task_lists(self, splits: Sequence[str]) -> None:
+        """List each of ``splits`` of the in-process environment class once, into the class's task cache, which the
+        task lookups of this process's sessions, and of the processes it forks, then read instead of listing them.
+
+        A rollout worker's fork server calls it before it forks the workers
+        (:mod:`platoon.train.startup`).  It runs ``list_tasks`` in the calling thread (awaiting it in an
+        event loop of its own when it returns an awaitable, which is closed again), and stores what it returns where
+        the SDK's ``get_task`` and ``num_tasks`` look first (the class's ``_tasks_cache``, which
+        :func:`_own_task_cache` gives each class of its own); a cache that already holds a split keeps it.  A split
+        the class does not list is skipped.  A remote environment's tasks are the env servers' to list: a no-op."""
+
+        if self.is_remote:
+            return
+        cls = self.environment_class
+        known = set(sdk.split_names(cls.list_splits()))
+        cache = cls.__dict__.get("_tasks_cache")
+        for split in splits:
+            if split not in known or (isinstance(cache, dict) and split in cache):
+                continue
+            tasks = cls.list_tasks(split)
+            if inspect.isawaitable(tasks):
+                tasks = asyncio.run(_awaited(tasks))
+            if isinstance(cache, dict):
+                cache[split] = tasks
+
     async def get_task(self, task_id: str) -> Task:
         """The task for a ``<split>:<index>`` id, a task name (in the default split) or an OpenReward task
         reference, which must name this service's ``label`` when it has one."""
@@ -827,6 +853,10 @@ async def _list_server_environments(url: str) -> tuple[str, ...]:
     listed = tuple(str(name).lower() for name in body) if isinstance(body, list) else ()
     _SERVER_ENVIRONMENTS[url] = listed
     return listed
+
+
+async def _awaited(value: Any) -> Any:
+    return await value
 
 
 def _own_task_cache(cls: Any) -> Any:

@@ -41,7 +41,10 @@ class HarborDataset:
     to the registry gives each task its ``HarborTask.index`` row.
 
     Splits come from a manifest mapping split names to task ids: a mapping, or a JSON or TOML file (relative paths
-    resolve against ``dataset_dir``).  Without a manifest every split holds every task.
+    resolve against ``dataset_dir``).  Without a manifest every split holds every task.  ``stack_refusal`` says why no
+    multi-container stack can run (the service's provider runs none), which skips such tasks as platoon cannot run, as
+    does ``on_host_network``, the service's running them on the host-network fallback, which no stack of a directory
+    passes (its rules come from a fetch's overlays).
     """
 
     def __init__(
@@ -52,6 +55,8 @@ class HarborDataset:
         splits: SplitManifest | None = None,
         agent_user: AgentUserPolicy = "refuse",
         verifier_user: VerifierUserPolicy | None = None,
+        stack_refusal: str | None = None,
+        on_host_network: bool = False,
     ) -> None:
         if (dataset_dir is None) == (task_dirs is None):
             raise ValueError("Pass exactly one of dataset_dir or task_dirs")
@@ -71,7 +76,12 @@ class HarborDataset:
                 raise ValueError(f"Two Harbor tasks are named {task_id!r}")
             try:
                 task = HarborTask.load(
-                    task_dir, agent_user=agent_user, verifier_user=verifier_user, index=index.get(task_id)
+                    task_dir,
+                    agent_user=agent_user,
+                    verifier_user=verifier_user,
+                    index=index.get(task_id),
+                    stack_refusal=stack_refusal,
+                    on_host_network=on_host_network,
                 )
             except HarborTaskError as exc:
                 logger.warning("Skipping Harbor task %s: %s", task_dir, exc)
@@ -109,7 +119,7 @@ class HarborDataset:
         (:func:`~platoon.envs.harbor.inputs.input_files`, hashed now): what a hold-out splits."""
 
         rows = [
-            HoldoutRow(name, dict(task.index or {}), input_files=input_files(self._dirs[name]))
+            HoldoutRow(name, dict(task.index or {}), input_files=input_files(self._dirs[name], compose=task.compose))
             for name, task in self._tasks.items()
         ]
         rows += [

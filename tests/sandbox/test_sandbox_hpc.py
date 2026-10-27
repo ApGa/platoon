@@ -3,14 +3,17 @@ hpc-sandbox a checkout locks where it is installed."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import sys
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import platoon.sandbox
 from platoon.sandbox import (
     CWD_ERROR_EXIT_CODE,
     CWD_ERROR_PREFIX,
@@ -22,27 +25,31 @@ from platoon.sandbox import (
     SandboxSnapshot,
     SandboxSpec,
     base,
+    cleanup,
     cwd_error,
     get_provider,
     network_none_refusal,
 )
 from platoon.sandbox.enroot import EnrootProvider, enroot_options
 from platoon.sandbox.hpc import HpcProvider
+from platoon.sandbox.hpc_stacks import pods_refusal
 from platoon.sandbox.singularity import SingularityProvider
+from platoon.sandbox.stacks import STACKS
 
 PROVIDERS = {"singularity": SingularityProvider, "enroot": EnrootProvider}
 IMAGES = {"singularity": "x.sif", "enroot": "x.sqsh"}
 
 
-def _fake_hpc_sandbox(calls: list[tuple], *, can_delete: bool = True) -> types.ModuleType:
+def _fake_hpc_sandbox(calls: list[tuple], *, can_delete: bool = True, file_owners: bool = False) -> types.ModuleType:
     """An ``hpc_sandbox`` stand-in whose types mirror the field names of platoon's, with a fake provider per
-    runtime that records its calls."""
+    runtime that records its calls; with ``file_owners``, its spec takes an image's owner manifest, as 0.5's does."""
 
     module = types.ModuleType("hpc_sandbox")
     module.Mount = dataclasses.make_dataclass("Mount", ["source", "target", "read_only"])
-    module.SandboxSpec = dataclasses.make_dataclass(
-        "SandboxSpec", ["image", "workdir", "env", "mounts", "network", "cpus", "memory_mb", "labels"]
-    )
+    fields: list[Any] = ["image", "workdir", "env", "mounts", "network", "cpus", "memory_mb", "labels"]
+    if file_owners:
+        fields.append(("file_owners", str | None, dataclasses.field(default=None)))
+    module.SandboxSpec = dataclasses.make_dataclass("SandboxSpec", fields)
     module.SandboxSnapshot = dataclasses.make_dataclass(
         "SandboxSnapshot", ["id", "provider", "path", "image", "metadata"]
     )
@@ -143,7 +150,11 @@ async def test_adapts_hpc_sandbox_types_and_calls(monkeypatch, tmp_path: Path, n
     assert type(report) is DownloadReport and type(report.dropped_links[0]) is DroppedLink
     assert calls[4:6] == [("upload", "local", "/tests"), ("download", "/logs", "out")]
     await sandbox.kill_processes()
-    assert calls[6][1][3:] == ["platoon-kill", "100", "0.05", "14:12", "1:10"]  # every process but these dies
+    assert calls[6][1][3:] == ["platoon-kill", "100", "0.05", "", "14:12", "1:10"]  # every process but these dies
+    del calls[6]
+    sandbox.keep_processes(["30:40"])  # a task's init: it lives on, with its descendants
+    await sandbox.kill_processes()
+    assert calls[6][1][3:] == ["platoon-kill", "100", "0.05", "30:40", "14:12", "1:10"]
     del calls[6]
 
     snapshot = await sandbox.snapshot()
@@ -223,9 +234,10 @@ def test_options_and_capabilities_come_from_the_inner_provider(monkeypatch, name
 
 @pytest.mark.parametrize("name", sorted(PROVIDERS))
 def test_capabilities_outside_platoons_contract_are_left_out(monkeypatch, name: str):
-    """A capability says what platoon may ask of a provider (``base.CAPABILITIES``): hpc-sandbox 0.3's providers also
-    report ``pods``, services that share one network, which platoon never starts, so the adapter leaves it out, and
-    any capability hpc-sandbox adds later until platoon has a use for it."""
+    """A capability says what platoon may ask of a provider (``base.CAPABILITIES``): hpc-sandbox's providers also
+    report ``pods``, which is not one of them (an adapter declares ``stacks`` where it runs stacks as pods:
+    ``test_sandbox_hpc_stacks.py``), so the adapter leaves it out, and any capability hpc-sandbox adds later until
+    platoon has a use for it."""
 
     monkeypatch.setitem(sys.modules, "hpc_sandbox", _fake_hpc_sandbox([]))
 
@@ -256,6 +268,8 @@ def test_both_providers_share_one_adapter():
 
 # Fields the adapter implements itself rather than passing to hpc-sandbox: upstreams become binds and forwarders.
 ADAPTER_FIELDS = {"SandboxSpec": {"upstreams"}}
+# Fields of a later hpc-sandbox, which the adapter passes only to one that has them: an image's owner manifest (0.5).
+LATER_FIELDS = {"SandboxSpec": {"file_owners"}}
 
 
 @pytest.mark.parametrize(
@@ -266,7 +280,8 @@ def test_hpc_sandbox_types_match_platoon(name: str):
 
     theirs = [field.name for field in dataclasses.fields(getattr(hpc_sandbox, name))]
     ours = [field.name for field in dataclasses.fields(getattr(base, name))]
-    assert theirs == [field for field in ours if field not in ADAPTER_FIELDS.get(name, set())]
+    later = LATER_FIELDS.get(name, set()) - set(theirs)
+    assert theirs == [field for field in ours if field not in ADAPTER_FIELDS.get(name, set()) | later]
 
 
 def test_enroot_passes_the_singularity_option_names_through(monkeypatch):
@@ -301,6 +316,14 @@ def test_enroot_refuses_root_and_remap_root_together():
         enroot_options({"root": True, "remap_root": True})
 
 
+def _with_stacks(provider: object, *capabilities: str) -> frozenset[str]:
+    """``capabilities``, and ``stacks`` where the installed hpc-sandbox's pods run them here (0.5 on a node that nests
+    user namespaces)."""
+
+    assert isinstance(provider, HpcProvider)
+    return frozenset({*capabilities, *([STACKS] if pods_refusal(provider.name, provider.inner_class) is None else [])})
+
+
 def _published_hpc_sandbox():
     hpc_sandbox = pytest.importorskip("hpc_sandbox")
     if not hasattr(hpc_sandbox, "EnrootProvider"):
@@ -309,10 +332,10 @@ def _published_hpc_sandbox():
 
 
 def test_one_block_builds_both_published_providers(tmp_path: Path):
-    """Against the hpc-sandbox a checkout locks (0.4.0): its EnrootProvider takes every option its
+    """Against the installed hpc-sandbox (the lock's 0.5.1): its EnrootProvider takes every option its
     SingularityProvider takes, so one provider_options block builds both providers and means the same on both, with
-    platoon's capabilities only (not its pods); root, which the SingularityProvider refuses, builds the
-    EnrootProvider too."""
+    platoon's capabilities only (not its pods), and ``stacks`` where its pods run them here; root, which the
+    SingularityProvider refuses, builds the EnrootProvider too."""
 
     hpc_sandbox = _published_hpc_sandbox()
     singularity_names = set(inspect.signature(hpc_sandbox.SingularityProvider).parameters)
@@ -330,18 +353,19 @@ def test_one_block_builds_both_published_providers(tmp_path: Path):
 
     singularity, enroot = get_provider("singularity", **block), get_provider("enroot", **block)
 
-    assert (
-        singularity.capabilities
-        == enroot.capabilities
-        == frozenset({"snapshot", "isolation", "gpu", "routes", "host_loopback"})
-    )
+    for provider in (singularity, enroot):
+        assert provider.capabilities == _with_stacks(
+            provider, "snapshot", "isolation", "gpu", "routes", "host_loopback"
+        )
     assert (singularity.inner.bind_resolv_conf, enroot.inner.bind_resolv_conf) == (False, False)
     assert enroot.inner.gpus == "all"
     with pytest.raises(TypeError, match="root"):
         get_provider("singularity", **block, root=True)
     enroot = get_provider("enroot", scratch_root=str(tmp_path), gpu="nv", gpus=None, root=False)
     assert (enroot.inner.gpus, enroot.inner.remap_root) == ("all", False)
-    assert enroot.capabilities == frozenset({"snapshot", "isolation", "network_none", "gpu", "routes", "host_loopback"})
+    assert enroot.capabilities == _with_stacks(
+        enroot, "snapshot", "isolation", "network_none", "gpu", "routes", "host_loopback"
+    )
 
 
 @pytest.mark.parametrize("provider", ["singularity", "enroot"])
@@ -491,3 +515,109 @@ def test_the_published_enroot_provider_takes_digest_pins(tmp_path: Path):
         images.format.check(reference)  # what a sandbox start checks before it creates anything
         uri = images.format.pull_uri(reference)
         assert uri.endswith(f"task:{digest}") and "@" not in uri, uri
+
+
+@pytest.mark.asyncio
+async def test_an_owner_manifest_reaches_an_hpc_sandbox_that_applies_one(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", _fake_hpc_sandbox(calls, file_owners=True))
+    provider = get_provider("singularity", fakeroot=True)
+
+    await provider.start(SandboxSpec(image="x.sif", file_owners="/srv/images/x.owners"))
+    await provider.start(SandboxSpec(image="x.sif"))
+
+    owners = [call[1].file_owners for call in calls if call[0] == "start"]
+    assert owners == ["/srv/images/x.owners", None]
+    assert platoon.sandbox.file_owners_refusal("singularity", {"fakeroot": True}) is None
+    assert platoon.sandbox.loses_file_owners("singularity") and platoon.sandbox.loses_file_owners(provider)
+    assert not platoon.sandbox.loses_file_owners("docker")  # its images keep their owners
+
+
+@pytest.mark.asyncio
+async def test_an_hpc_sandbox_before_0_5_refuses_an_owner_manifest_and_runs_without_one(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", _fake_hpc_sandbox(calls))
+    provider = get_provider("singularity", fakeroot=True)
+
+    with pytest.raises(ValueError, match="SandboxSpec.file_owners.* Install hpc-sandbox 0.5"):
+        await provider.start(SandboxSpec(image="x.sif", file_owners="/srv/images/x.owners"))
+    await provider.start(SandboxSpec(image="x.sif"))
+
+    assert [call[0] for call in calls].count("start") == 1  # the refused one never started
+    assert "hpc-sandbox 0.5" in (platoon.sandbox.file_owners_refusal("singularity", {}) or "")
+    assert platoon.sandbox.file_owners_refusal("docker", {}) is None  # it needs none
+
+
+def test_the_owner_manifest_refusal_matches_the_installed_hpc_sandbox():
+    """Against the installed hpc-sandbox: a manifest is refused exactly when its SandboxSpec has no file_owners."""
+
+    hpc_sandbox = pytest.importorskip("hpc_sandbox")
+    takes = "file_owners" in {field.name for field in dataclasses.fields(hpc_sandbox.SandboxSpec)}
+
+    assert (platoon.sandbox.file_owners_refusal("singularity", {"fakeroot": True}) is None) is takes
+
+
+@pytest.mark.asyncio
+async def test_a_start_given_up_runs_to_its_end_and_its_sandbox_is_stopped(monkeypatch):
+    """Cancelled while hpc-sandbox makes the container, a start raises at once, while hpc-sandbox's start runs to its
+    end uncancelled (killing the runtime's command midway can leave a container that hpc-sandbox's own rollback does
+    not stop); the sandbox it made is stopped then, and its registration for cleanup goes with it."""
+
+    calls: list[tuple] = []
+    fake = _fake_hpc_sandbox(calls)
+    started, release = asyncio.Event(), asyncio.Event()
+    start = fake.SingularityProvider.start
+
+    async def slow_start(self, spec):
+        started.set()
+        await release.wait()  # the runtime making the container: a cancellation here would kill it midway
+        return await start(self, spec)
+
+    monkeypatch.setattr(fake.SingularityProvider, "start", slow_start)
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", fake)
+    provider = get_provider("singularity")
+    registered = len(cleanup._live)
+    opening = asyncio.ensure_future(provider.start(SandboxSpec(image="x.sif", labels={"k": "v"})))
+    await asyncio.wait_for(started.wait(), timeout=10)
+    opening.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert len(cleanup._live) == registered + 1  # until what it starts is stopped
+    release.set()
+    for _ in range(500):
+        if ("stop",) in calls:
+            break
+        await asyncio.sleep(0.01)
+    assert [call[0] for call in calls] == ["init", "start", "stop"]  # never cancelled, then stopped
+    assert len(cleanup._live) == registered
+
+
+@pytest.mark.asyncio
+async def test_a_start_given_up_in_the_step_in_which_it_returns_its_sandbox_stops_that_sandbox(monkeypatch):
+    """The caller is cancelled in the very step of the loop in which hpc-sandbox's start returns the sandbox (as a
+    deadline or a rollout's stop can): the start raises, and the sandbox it made is stopped, never left running with
+    its registration for cleanup dropped."""
+
+    calls: list[tuple] = []
+    fake = _fake_hpc_sandbox(calls)
+    start = fake.SingularityProvider.start
+    opening: list[asyncio.Future[Any]] = []
+
+    async def returning_as_its_caller_is_cancelled(self, spec):
+        sandbox = await start(self, spec)
+        asyncio.get_running_loop().call_soon(opening[0].cancel)  # before the start's own completion reaches its caller
+        return sandbox
+
+    monkeypatch.setattr(fake.SingularityProvider, "start", returning_as_its_caller_is_cancelled)
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", fake)
+    provider = get_provider("singularity")
+    registered = len(cleanup._live)
+    opening.append(asyncio.ensure_future(provider.start(SandboxSpec(image="x.sif", labels={"k": "v"}))))
+    with pytest.raises(asyncio.CancelledError):
+        await opening[0]
+    for _ in range(500):
+        if ("stop",) in calls:
+            break
+        await asyncio.sleep(0.01)
+    assert [call[0] for call in calls] == ["init", "start", "stop"]
+    assert len(cleanup._live) == registered

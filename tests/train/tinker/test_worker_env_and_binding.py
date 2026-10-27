@@ -18,14 +18,15 @@ from __future__ import annotations
 import os
 import signal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
-from platoon.train.tinker import worker_env  # noqa: E402
-from platoon.train.tinker.rl import PlatoonTinkerRLTrainer  # noqa: E402
+from platoon.train.trainer.rl import PlatoonTinkerRLTrainer  # noqa: E402
+from platoon.train.workers import env as worker_env  # noqa: E402
 
 
 @pytest.fixture
@@ -145,12 +146,12 @@ def test_inprocess_mode_never_resolves_node_local_scratch(monkeypatch):
     mode that is supposed to be untouched by any of this.
     """
 
-    from platoon.train.tinker.workflows import group_rollout_workflow as module
+    from platoon.train.workflow import group as group_module
 
     def _explode() -> str:
         raise AssertionError("inprocess mode resolved the rollout worker scratch directory")
 
-    workflow = object.__new__(module.GroupRolloutWorkflow)
+    workflow = object.__new__(group_module.GroupRolloutWorkflow)
     workflow.rollout_isolation = "inprocess"
     workflow.config = SimpleNamespace(
         rollout_config=SimpleNamespace(max_steps=None, timeout=None, output_dir="out"),
@@ -163,14 +164,12 @@ def test_inprocess_mode_never_resolves_node_local_scratch(monkeypatch):
     )
     monkeypatch.setattr(workflow, "_ipc_dir", _explode, raising=False)
 
-    binding = module.GroupRolloutWorkflow._model_binding(
-        SimpleNamespace(
-            _isolation="inprocess",
-            model_info=SimpleNamespace(llm=None, model_name="m"),
-            config=workflow.config,
-            _ipc_dir=_explode,
-        ),
-        7,
+    fake: Any = SimpleNamespace(  # the method's self
+        _isolation="inprocess",
+        model_info=SimpleNamespace(llm=None, model_name="m"),
+        config=workflow.config,
+        _ipc_dir=_explode,
     )
+    binding = group_module.GroupRolloutWorkflow._model_binding(fake, 7)
     assert binding.binding_path == ""
     assert binding.checkpoint_version == 7

@@ -1,0 +1,25 @@
+# Written for platoon: sidecars with privileges that only Docker gives, to a dataset fetched with
+# refuse: {privileges: false}. router holds NET_ADMIN, judge is privileged, and main holds neither; judge shares a
+# volume with main.
+services:
+  main:
+    volumes:
+      - shared:/shared
+    depends_on:
+      router:
+        condition: service_started
+      judge:
+        condition: service_started
+  router:
+    image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+    command: ["sleep", "infinity"]
+    cap_add:
+      - NET_ADMIN
+  judge:
+    image: python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+    command: ["sleep", "infinity"]
+    privileged: true
+    volumes:
+      - shared:/shared
+volumes:
+  shared: {}

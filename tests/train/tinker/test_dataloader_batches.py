@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from platoon.train.components import task_ids_to_dataset
-from platoon.train.tinker.rl import PlatoonTinkerDataloader
+from platoon.train.dataloader import PlatoonTinkerDataloader
 
 TASK_IDS = ["train:0", "train:1", "train:2", "train:3"]
 

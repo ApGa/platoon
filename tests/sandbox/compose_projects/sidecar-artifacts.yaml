@@ -1,0 +1,56 @@
+outcome: opened and closed
+project:
+  name: <project>
+  services:
+    main:
+      image: python:3.12-slim
+      container_name: <project>-main
+      entrypoint: [sleep, infinity]
+      working_dir: /app
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-sidecar-artifacts, platoon.task: platoon/sidecar-artifacts, platoon.stack: <project>, platoon.service: main}
+      environment: {API_URL: 'http://api:8000'}
+      networks:
+        internal: {}
+      cpus: 1
+      mem_limit: 512m
+    api:
+      image: python:3.12-slim
+      container_name: <project>-api
+      entrypoint: [python3, /srv/api/server.py]
+      working_dir: /
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-sidecar-artifacts, platoon.task: platoon/sidecar-artifacts, platoon.stack: <project>, platoon.service: api}
+      environment: {API_URL: 'http://api:8000'}
+      volumes:
+      - {type: bind, source: <tmp>/dataset/sidecar-artifacts/environment/api, target: /srv/api, read_only: true}
+      networks:
+        internal: {}
+  networks:
+    internal:
+      name: <project>-internal
+      internal: true
+      driver_opts: {com.docker.network.bridge.inhibit_ipv4: 'true'}
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-sidecar-artifacts, platoon.task: platoon/sidecar-artifacts, platoon.stack: <project>}
+commands:
+  <project>:
+  - [compose, version]
+  - [version, --format, '{{.Server.Version}}']
+  - [network, create, --driver=bridge, --label=platoon.env=harbor, --label=platoon.rollout_id=rollout-sidecar-artifacts, --label=platoon.task=platoon/sidecar-artifacts, --label=platoon.stack=<project>, <project>-egress]
+  - [ps, --all, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, ls, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, rm, <project>-egress, <project>-internal]
+  api:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, api]
+  - [network, connect, <project>-egress, <project>-api]
+  - [start, <project>-api]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-api, python3, /srv/api/fetch.py, 'http://api:8000/stats']
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-api]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-api, python3, /srv/api/fetch.py, 'http://api:8000/stats']
+  - [rm, --force, --volumes, <project>-api]
+  main:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, main]
+  - [network, connect, <project>-egress, <project>-main]
+  - [start, <project>-main]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, --user, '0', <project>-main, /bin/sh, -c, <script>, platoon-list]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /logs/agent, /logs/verifier, /logs/artifacts, /app]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-main]
+  - [rm, --force, --volumes, <project>-main]

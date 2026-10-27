@@ -59,7 +59,7 @@ class Policy:
 @pytest.fixture
 def no_tinker(monkeypatch):
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # eval serves a policy: past its key check
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     monkeypatch.setattr(sys.modules[cli._evaluation().__package__], "EvalPolicy", Policy, raising=False)
     monkeypatch.setattr("platoon.eval.config_defs.EvalPolicy.install", lambda self: None)
 
@@ -149,10 +149,13 @@ def test_the_parser_joins_the_components_in_each_lock(tmp_path, no_tinker, choic
     cli.main(["rollout", str(evaluation), "--task", "solved", "--output-dir", str(tmp_path / "debug")])
 
     components = {(kind, ENVIRONMENT[kind]) for kind in ("dataset_loader", "task_loader", "rollout")}
-    for lock_path in (tmp_path / "logs/exp/trial/lock.json", tmp_path / "out/lock.json", tmp_path / "debug/lock.json"):
+    # A training run also records the task sampler it draws its tasks with.
+    trains = {**dict.fromkeys(("out", "debug"), components), "logs/exp/trial": components | {("task_sampler", "auto")}}
+    for where, expected in trains.items():
+        lock_path = tmp_path / where / "lock.json"
         lock = json.loads(lock_path.read_text())
         assert lock["tool_call_parsing"]["parser"] == "hermes", lock_path
-        assert {(component["kind"], component["ref"]) for component in lock["components"]} == components, lock_path
+        assert {(component["kind"], component["ref"]) for component in lock["components"]} == expected, lock_path
         assert "extensions" in lock, lock_path
 
 
@@ -169,7 +172,7 @@ def test_a_template_no_parser_reads_is_a_configuration_error_before_training(tmp
     from platoon.train.tinker.renderers import ToolCallParserError
 
     trained = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", trained.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", trained.append)
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # train checks its key before anything else: past it
 
     def refuse(model_name, renderer_name, renderer_kwargs=None):

@@ -130,7 +130,7 @@ which `platoon viz` shows. The same command resumes it from its last checkpoint.
 
 | To | Change |
 |---|---|
-| Train on your dataset | `dataset: hf://<org>/<name>@<commit>`, a dataset repository on the Hugging Face Hub pinned to a commit (set `HF_TOKEN` for a private one), or a directory of your tasks |
+| Train on your dataset | `dataset: hf://<org>/<name>@<commit>`, a dataset repository on the Hugging Face Hub pinned to a commit (set `HF_TOKEN` for a private one), a package of the Harbor Hub (`harbor://<org>/<name>@<revision>`), or a directory of your tasks ([more sources](../../docs/how-to/sandboxes-and-harbor.md#fetch-a-dataset-by-name)) |
 | Hold out your dataset's groups | `holdout.group_by` (and `index`): the field that says which tasks belong together, from each task's `[metadata]` or the dataset's `task-index.json`; `stratify_by` gives each source its own share |
 | Use another agent | `harness: mini-swe-agent@2.4.6`, or `openhands@1.54.0`, whose toolchain `platoon prepare` builds |
 | Train another model | `train.model_name`, and the `renderer_name` that matches it ([Models and tool calling](../../docs/how-to/models-and-tool-calling.md)) |

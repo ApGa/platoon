@@ -16,17 +16,14 @@ import os
 import pickle
 import stat
 import threading
-import time
+from types import SimpleNamespace
 
 import pytest
 
 import platoon.train.tinker  # noqa: F401
 from platoon.train.tinker import proxy
-from platoon.train.tinker.workers.binding import (
-    FollowingSamplingClient,
-    publish_binding,
-    read_binding,
-)
+from platoon.train.workers import binding
+from platoon.train.workers.binding import FollowingSamplingClient, publish_binding, read_binding
 
 
 class _StubRenderer:
@@ -200,7 +197,10 @@ def test_a_concurrent_reader_never_sees_a_partial_binding(tmp_path):
         assert tag == f"v{version}"
 
 
-def test_following_client_reloads_within_the_poll_interval(tmp_path):
+def test_following_client_reloads_within_the_poll_interval(tmp_path, monkeypatch):
+    # On a clock the test moves: on a loaded runner the wall clock can pass the interval during the publish.
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(binding, "time", SimpleNamespace(monotonic=lambda: clock.now))
     path = str(tmp_path / "model_binding.pkl")
     publish_binding(_StubClient("first"), 1, path)
     follower = FollowingSamplingClient(path, b"", poll_seconds=0.05)
@@ -208,11 +208,11 @@ def test_following_client_reloads_within_the_poll_interval(tmp_path):
     assert follower.sample() == "first-sample"
     assert follower.followed_version == 1
 
-    time.sleep(0.02)
+    clock.now += 0.02
     publish_binding(_StubClient("second"), 2, path)
     # Inside the interval the old client is still in service...
     assert follower.sample() == "first-sample"
-    time.sleep(0.1)
+    clock.now += 0.1
     # ... and after it, the new one is picked up without a restart.
     assert follower.sample() == "second-sample"
     assert follower.followed_version == 2

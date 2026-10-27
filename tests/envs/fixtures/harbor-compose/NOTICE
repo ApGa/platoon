@@ -1,0 +1,28 @@
+tests/envs/fixtures/harbor-compose: third-party notices
+
+Platoon is licensed under the MIT License (the LICENSE file at the root of the repository).  The files below
+upstream/ are copies of files of Harbor, which is licensed under the Apache License, Version 2.0:
+
+  Harbor (https://github.com/harbor-framework/harbor), by its authors
+  Licensed under the Apache License, Version 2.0; a copy of the License is in LICENSE-APACHE-2.0 in this
+  directory, and at http://www.apache.org/licenses/LICENSE-2.0.  Unless required by applicable law or agreed to
+  in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+  CONDITIONS OF ANY KIND, either express or implied.
+
+Copied from Harbor's commit c178c20 (2026-08-26), unchanged:
+
+  upstream/examples/hello-mcp/              examples/tasks/hello-mcp/
+  upstream/examples/sidecar-artifacts/      examples/tasks/sidecar-artifacts/
+  upstream/examples/environment-env-multi/  examples/tasks/environment-env-multi/
+  upstream/examples/compose-sidecar-controlled/
+  upstream/examples/compose-sidecar-uncontrolled-network/
+                                            examples/tasks/network-policy-matrix/static/<the same name>/
+
+Copied from the same commit with the placeholders that an adapter fills when it writes a task filled with sample
+values (cybergym's {auth_token}; frontier-cs-algorithm's {main_volumes}, {judge_source} and {judge_volumes}, as its
+adapter renders them without a judge image; swelancer's {environment}), otherwise unchanged:
+
+  upstream/adapters/<adapter>.yaml          adapters/<adapter>/.../environment/docker-compose.yaml, the compose
+                                            template of each adapter (gaia2's: template/docker-compose-cli.yaml)
+
+The tasks below tasks/ and every other file of this directory are written for platoon.

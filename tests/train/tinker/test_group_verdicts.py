@@ -16,18 +16,14 @@ from tinker import TensorData
 
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.dispatcher import POSITION_COLUMN, SEQ_COLUMN
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN, SEQ_COLUMN
+from platoon.train.task_records import TaskRecorder
 from platoon.train.tinker.rollout_metrics import RolloutTimeline, timeline_scope
-from platoon.train.tinker.task_records import TaskRecorder
-from platoon.train.tinker.workers import run as worker_run
-from platoon.train.tinker.workers.protocol import (
-    PROTOCOL_VERSION,
-    ConversionPolicy,
-    ModelBinding,
-    RolloutWorkerRequest,
-)
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.workers import run as worker_run
+from platoon.train.workers.protocol import PROTOCOL_VERSION, ConversionPolicy, ModelBinding, RolloutWorkerRequest
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import output as output_module
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 
@@ -56,12 +52,12 @@ def _outcome(
     key: str | None = None,
     success: float | None = None,
     status: str | None = "scored",
-) -> grw._SingleRolloutOutcome:
+) -> output_module._SingleRolloutOutcome:
     """One member: ``reward`` None for one that returned nothing (a dead worker); ``valid`` False for a root that
     ended untrainable; ``success`` the reward its environment scored, before any reward processor."""
 
     if reward is None:
-        return grw._SingleRolloutOutcome(
+        return output_module._SingleRolloutOutcome(
             result=None, workload=RolloutWorkload(), observed=False, disposition="worker_crashed"
         )
     result = TrajectoryCollectionResult(
@@ -81,7 +77,7 @@ def _outcome(
         root_rewards_dict={},
         task_reward_valid=valid,
     )
-    return grw._SingleRolloutOutcome(
+    return output_module._SingleRolloutOutcome(
         result=result,
         workload=RolloutWorkload(
             trajectories=1,
@@ -97,8 +93,8 @@ def _outcome(
     )
 
 
-class _Workflow(grw.GroupRolloutWorkflow):
-    def __init__(self, outcomes: list[grw._SingleRolloutOutcome], **config) -> None:
+class _Workflow(group_module.GroupRolloutWorkflow):
+    def __init__(self, outcomes: list[output_module._SingleRolloutOutcome], **config) -> None:
         super().__init__(
             rollout_fn=None,
             get_task_fn=None,
@@ -112,7 +108,7 @@ class _Workflow(grw.GroupRolloutWorkflow):
         return self.outcomes[rollout_number]
 
 
-def _run(outcomes: list[grw._SingleRolloutOutcome], **config) -> grw._TaskRolloutOutput:
+def _run(outcomes: list[output_module._SingleRolloutOutcome], **config) -> output_module._TaskRolloutOutput:
     return asyncio.run(_Workflow(outcomes, **config).arun_episode({"task_id": "t"}))
 
 
@@ -172,13 +168,13 @@ def test_a_member_passes_on_the_reward_its_environment_scored_not_the_one_it_tra
     """A reward processor that scales every reward by 0.98 trains 0.98 for a correct rollout: the member keeps the
     1.0 its environment scored and passes at the default threshold of 1.0."""
 
-    scaled = grw._member(_outcome(0.98, success=1.0))
+    scaled = output_module._member(_outcome(0.98, success=1.0))
     assert (scaled.reward, scaled.scored, scaled.passes(1.0)) == (0.98, 1.0, True)
     # A rollout that records no scored reward (a legacy one without a success flag) passes on its trained reward.
-    assert grw._member(_outcome(1.0)).scored == 1.0
+    assert output_module._member(_outcome(1.0)).scored == 1.0
     # An outcome that was not scored is censored, and so is a member without a result.
-    assert grw._member(_outcome(1.0, valid=False)).scored is None
-    crashed = grw._member(_outcome(None))
+    assert output_module._member(_outcome(1.0, valid=False)).scored is None
+    crashed = output_module._member(_outcome(None))
     assert (crashed.valid, crashed.scored, crashed.outcome, crashed.passes(0.0)) == (False, None, "none", False)
     # What the member's root and datums record.
     assert (scaled.steps, scaled.output_tokens, scaled.seconds, scaled.versions) == (4, 7, 12.5, {"main": (3, 3)})
@@ -266,7 +262,7 @@ def test_a_worker_s_member_keeps_the_scored_reward_through_a_reward_processor(tm
 
     assert response.status == "completed"
     assert (response.result.task_reward, response.success_reward) == (pytest.approx(0.98), 1.0)
-    member = grw._member(_Workflow([_outcome(0.0)])._outcome_from_response(response, "completed"))
+    member = output_module._member(_Workflow([_outcome(0.0)])._outcome_from_response(response, "completed"))
     assert (member.reward, member.scored, member.passes(1.0)) == (pytest.approx(0.98), 1.0, True)
 
 
@@ -325,4 +321,4 @@ def test_training_judges_a_pass_as_platoon_eval_judges_success(root, processed, 
         reward_key=None,
         seconds=1.0,
     )
-    assert grw._member(outcome).passes(threshold) == evaluated
+    assert output_module._member(outcome).passes(threshold) == evaluated

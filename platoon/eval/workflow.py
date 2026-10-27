@@ -627,7 +627,7 @@ class DefaultEvalGroupWorkflow:
                 task.max_steps = rollout_config.max_steps
             if self.config.use_subprocesses:
                 from platoon.eval.subprocess_worker import PARENT_GRACE_SECONDS, run_rollout_subprocess
-                from platoon.train.tinker.workers.protocol import validated_ref
+                from platoon.train.workers.protocol import validated_ref
 
                 rollout_ref = validated_ref(self.rollout_fn, what="evaluation rollout function")
                 result = await self._process_slots().run(

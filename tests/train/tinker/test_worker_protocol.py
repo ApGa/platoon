@@ -24,7 +24,7 @@ from tinker import TensorData
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import InferenceParams, RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker.workers.protocol import (
+from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
@@ -42,7 +42,7 @@ from platoon.train.tinker.workers.protocol import (
     resolve_ref,
     validated_ref,
 )
-from platoon.train.tinker.workers.workload import add_datum_funnel
+from platoon.train.workers.workload import add_datum_funnel
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.tinker_data_processing import (
@@ -118,7 +118,7 @@ def _request(tmp_path, **overrides) -> RolloutWorkerRequest:
             include_traj_depth=True,
             include_traj_start=True,
             reward_processor_is_default=False,
-            reward_processor_ref="platoon.train.tinker.workers.run:default_reward_processor",
+            reward_processor_ref="platoon.train.workers.run:default_reward_processor",
             subagent_datum_sampler=DeterministicSubagentDatumSampler(keep_probability=0.25, seed=11),
         ),
         response_path=str(tmp_path / "task-r0-deadbeef.res"),
@@ -142,6 +142,21 @@ def test_request_round_trips_task_config_and_sampler(tmp_path):
     assert rebuilt.inference_params == InferenceParams(temperature=0.7, top_p=0.9, max_completion_tokens=1024)
     assert rebuilt.output_dir.endswith(os.path.join("out", "3"))
     assert loaded.conversion.subagent_datum_sampler == DeterministicSubagentDatumSampler(keep_probability=0.25, seed=11)
+
+
+def test_a_request_asks_for_the_first_model_call_s_marker_only_when_told_and_names_it_after_its_response(tmp_path):
+    """The start limit's signal (``train.max_starting_rollouts``): off unless asked for; ``first_call_path`` follows
+    ``response_path``, so a retried request, which gets a fresh response path, gets a fresh marker too."""
+
+    request = _request(tmp_path)
+    assert request.signal_first_call is False
+    assert request.first_call_path == request.response_path + ".first_call"
+    asked = replace(request, signal_first_call=True)
+    path = str(tmp_path / "req.pkl")
+    dump_request(asked, path)
+    assert load_request(path) == asked
+    retried = replace(asked, response_path=str(tmp_path / "task-r0-cafebabe.res"))
+    assert retried.first_call_path == str(tmp_path / "task-r0-cafebabe.res.first_call")
 
 
 def test_response_round_trips_datums_including_routing_handle(tmp_path):
@@ -208,18 +223,18 @@ def test_dump_is_atomic_under_a_failing_pickle(tmp_path):
 
 
 def test_resolve_ref_and_callable_ref():
-    from platoon.train.tinker.workers.run import default_reward_processor
+    from platoon.train.workers.run import default_reward_processor
 
-    assert resolve_ref("platoon.train.tinker.workers.run:default_reward_processor") is default_reward_processor
-    assert callable_ref(default_reward_processor) == "platoon.train.tinker.workers.run:default_reward_processor"
+    assert resolve_ref("platoon.train.workers.run:default_reward_processor") is default_reward_processor
+    assert callable_ref(default_reward_processor) == "platoon.train.workers.run:default_reward_processor"
     assert validated_ref(default_reward_processor, what="reward_processor") == (
-        "platoon.train.tinker.workers.run:default_reward_processor"
+        "platoon.train.workers.run:default_reward_processor"
     )
 
     with pytest.raises(RefResolutionError):
-        resolve_ref("platoon.train.tinker.workers.run")
+        resolve_ref("platoon.train.workers.run")
     with pytest.raises(RefResolutionError):
-        resolve_ref("platoon.train.tinker.workers.run:does_not_exist")
+        resolve_ref("platoon.train.workers.run:does_not_exist")
     with pytest.raises(ModuleNotFoundError):
         resolve_ref("platoon.no.such.module:thing")
 
@@ -227,7 +242,7 @@ def test_resolve_ref_and_callable_ref():
 def test_callable_ref_rejects_closures_and_partials():
     import functools
 
-    from platoon.train.tinker.workers.run import default_reward_processor
+    from platoon.train.workers.run import default_reward_processor
 
     def outer():
         def inner(traj):
@@ -255,10 +270,10 @@ def test_callable_ref_maps_main_through_the_module_spec(monkeypatch):
     import sys
     import types
 
-    from platoon.train.tinker.workers.run import default_reward_processor
+    from platoon.train.workers.run import default_reward_processor
 
     shim = types.ModuleType("__main__")
-    shim.__spec__ = importlib_spec("platoon.train.tinker.workers.run")
+    shim.__spec__ = importlib_spec("platoon.train.workers.run")
     monkeypatch.setitem(sys.modules, "__main__", shim)
 
     main_scoped = types.FunctionType(
@@ -266,7 +281,7 @@ def test_callable_ref_maps_main_through_the_module_spec(monkeypatch):
     )
     main_scoped.__module__ = "__main__"
     main_scoped.__qualname__ = "default_reward_processor"
-    assert callable_ref(main_scoped) == "platoon.train.tinker.workers.run:default_reward_processor"
+    assert callable_ref(main_scoped) == "platoon.train.workers.run:default_reward_processor"
 
 
 def importlib_spec(name):

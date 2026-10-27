@@ -82,22 +82,26 @@ def test_loaders_use_absolute_task_dirs_as_ids(harbor_fixtures: Path):
     assert resolve_component("task_loader", "platoon.envs.harbor.loaders:load_task") is load_task
 
 
-def test_multi_container_tasks_are_refused_by_name_and_in_manifests(make_task, caplog):
+def test_multi_container_tasks_are_refused_by_name_and_in_manifests_where_no_stack_runs(make_task, caplog):
     runnable = make_task("single", task_toml='[environment]\ndocker_image = "ubuntu:24.04"\n')
     stack = make_task("stack", task_toml='[environment]\ndocker_image = "ubuntu:24.04"\n')
-    (stack / "environment" / "docker-compose.yaml").write_text("services:\n  judge:\n    image: judge\n")
+    (stack / "environment" / "docker-compose.yaml").write_text(
+        'services:\n  judge:\n    image: judge\n    command: ["judge"]\n'
+    )
     dataset_dir = runnable.parent
+    none = "the docker provider runs no multi-container stacks"
 
     with caplog.at_level(logging.WARNING):
-        dataset = HarborDataset(dataset_dir)
+        dataset = HarborDataset(dataset_dir, stack_refusal=none)
     assert dataset.names("train") == ["single"]  # never listed, so never run
     assert "Skipping Harbor task" in caplog.text and "multi-container" in caplog.text
     with pytest.raises(ValueError, match="multi-container"):  # by name: why, not "unknown"
         dataset.get("stack")
     with pytest.raises(ValueError, match="names Harbor tasks platoon cannot run: .*multi-container"):
-        HarborDataset(dataset_dir, splits={"train": ["single", "stack"]})
+        HarborDataset(dataset_dir, splits={"train": ["single", "stack"]}, stack_refusal=none)
     with pytest.raises(ValueError, match="No runnable Harbor tasks in .*multi-container"):
-        HarborDataset(task_dirs=[stack])
+        HarborDataset(task_dirs=[stack], stack_refusal=none)
+    assert HarborDataset(dataset_dir).names("train") == ["single", "stack"]  # where stacks run, it is one
 
 
 def test_a_refused_task_shares_its_name_with_no_other(make_task, tmp_path: Path):
@@ -213,7 +217,8 @@ def test_the_dataset_passes_agent_user_to_its_tasks(make_task, tmp_path: Path, c
 
     with caplog.at_level(logging.WARNING):
         assert HarborDataset(tmp_path / "tasks").names("train") == ["plain"]
-    assert "rootless sandboxes run every process as one user" in caplog.text
+    assert "the environment refuses tasks that name users" in caplog.text
     ignoring = HarborDataset(tmp_path / "tasks", agent_user="ignore")
     assert ignoring.names("train") == ["plain", "runs-as-user"]
+    assert HarborDataset(tmp_path / "tasks", agent_user="honor").names("train") == ["plain", "runs-as-user"]
     assert ignoring.get("runs-as-user").ignored_users == {"agent": "agent"}

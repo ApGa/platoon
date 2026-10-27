@@ -2,9 +2,10 @@
 
 ``platoon harbor fetch`` (or ``platoon train``/``eval`` for a pinned reference) writes a lock next to a
 content-addressed cache. Each locked task records its id, its Harbor content digest, where its files are in the
-cache, the dataset index's metadata, the flags platoon reads from ``task.toml``, its build plan, why platoon
-refuses it, if it does, and the digest of each of its input files (a text file's that of its text, line endings
-normalized), by which a hold-out keeps the tasks that share data together. Workers look a task up by id in the lock,
+cache, the dataset index's metadata, the flags platoon reads from ``task.toml``, its build plan, its compose file's
+stack plan (:mod:`platoon.envs.harbor.compose`), why platoon refuses it, if it does, and the digest of each of its
+input files (a text file's that of its text, line endings normalized), by which a hold-out keeps the tasks that share
+data together. Workers look a task up by id in the lock,
 never by scanning a directory, and check each cache entry's digest once per node before its first session.
 
 Field names follow Harbor's ``TaskLock`` where they overlap (``name``, ``digest``).
@@ -23,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from platoon.envs.harbor.compose import COMPOSE_RULE
 from platoon.envs.harbor.hashing import HASH_RULE, content_hash
 from platoon.site import cache_root
 from platoon.utils.scratch import node_scratch
@@ -56,6 +58,9 @@ class LockedTask:
     # a text file's text, line endings normalized): what a hold-out joins groups by. None in a lock written before
     # platoon recorded them.
     input_files: Mapping[str, str] | None = None
+    # The stack plan of its compose file (platoon.envs.harbor.compose.ComposePlan), with overlays' edits applied;
+    # None without a compose file, for a file outside the subset (the task is refused), and in older locks.
+    compose: Mapping[str, Any] | None = None
 
     @classmethod
     def from_json(cls, data: Mapping[str, Any]) -> LockedTask:
@@ -74,6 +79,7 @@ class LockedTask:
                 overlays=tuple(data.get("overlays") or ()),
                 refused=data.get("refused"),
                 input_files=None if files is None else {str(path): str(digest) for path, digest in files.items()},
+                compose=dict(data["compose"]) if data.get("compose") else None,
             )
         except (KeyError, TypeError, AttributeError) as exc:
             raise LockError(f"malformed locked task {data!r}: {exc}") from None
@@ -94,23 +100,48 @@ class LockedTask:
         data["refused"] = self.refused
         if self.input_files is not None:
             data["input_files"] = dict(self.input_files)
+        if self.compose:
+            data["compose"] = dict(self.compose)
         return data
+
+    def service_builds(self) -> list[Mapping[str, Any]]:
+        """The build plans of its stack's services that build their images from a context of the task (``build``,
+        with its whole build key: ``context``, ``dockerfile``, ``args``, ``key``, ``base``), in the plan's order."""
+
+        return [
+            service["build"]
+            for service in self._services()
+            if isinstance(service.get("build"), Mapping) and service["build"].get("key")
+        ]
+
+    def service_images(self) -> list[str]:
+        """The registry images its stack's services run (a compose ``image`` reference, not ``main``'s), in the
+        plan's order."""
+
+        return [service["image"] for service in self._services() if isinstance(service.get("image"), str)]
+
+    def _services(self) -> list[Mapping[str, Any]]:
+        return list(((self.compose or {}).get("services") or {}).values())
 
 
 @dataclass(frozen=True)
 class DatasetLock:
-    dataset: str  # as written in the config
+    dataset: str  # as written in the config (an adapter: adapter:<repo>@<commit>#<path>)
     resolved: str  # commit, revision or digest (a local source: its absolute path)
-    fetched_with: str  # e.g. "huggingface_hub==1.33.0"
+    fetched_with: str  # e.g. "huggingface_hub==1.33.0", "harbor==0.24.0 (cli)", "git 2.47.3"
     tasks: tuple[LockedTask, ...]
     hash_rule: str = HASH_RULE
     build_key_rule: str = ""
+    compose_rule: str = ""  # the Harbor compose layering the stack plans follow (compose.COMPOSE_RULE)
     overlay: str | None = None  # sha256 over the overlays applied, in order
     inputs: str | None = None  # sha256 over what was asked for (source, selection, overlays, refusals)
     selection: Mapping[str, Any] = field(default_factory=dict)  # how tasks were chosen, for the record
     modes: str = ""  # how file modes were restored after the download
     created_at: str = ""
     version: int = LOCK_VERSION
+    # How a Harbor Hub, registry, git or adapter source resolved (platoon.envs.harbor.sources): the package and its
+    # digest, the registry file's digest and the repositories' commits, an adapter's command and arguments, ...
+    source: Mapping[str, Any] = field(default_factory=dict)
 
     @functools.cached_property
     def _by_name(self) -> dict[str, LockedTask]:
@@ -135,20 +166,26 @@ class DatasetLock:
         return all(task.input_files is not None for task in self.tasks)
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "version": self.version,
             "dataset": self.dataset,
             "resolved": self.resolved,
             "fetched_with": self.fetched_with,
-            "hash_rule": self.hash_rule,
-            "build_key_rule": self.build_key_rule,
-            "overlay": self.overlay,
-            "inputs": self.inputs,
-            "selection": dict(self.selection),
-            "modes": self.modes,
-            "created_at": self.created_at,
-            "tasks": [task.to_json() for task in self.tasks],
         }
+        if self.source:  # only sources that say how they resolved: the locks of others read as they always have
+            data["source"] = dict(self.source)
+        data.update(
+            hash_rule=self.hash_rule,
+            build_key_rule=self.build_key_rule,
+            compose_rule=self.compose_rule,
+            overlay=self.overlay,
+            inputs=self.inputs,
+            selection=dict(self.selection),
+            modes=self.modes,
+            created_at=self.created_at,
+            tasks=[task.to_json() for task in self.tasks],
+        )
+        return data
 
 
 # path -> (file stamp, lock): the rollouts of one process read a lock once
@@ -181,18 +218,27 @@ def _parse_lock(path: Path) -> DatasetLock:
         raise LockError(f"Harbor lock {path}: expected version {LOCK_VERSION}, got {data.get('version')!r}")
     if data.get("hash_rule") != HASH_RULE:
         raise LockError(f"Harbor lock {path} uses hash rule {data.get('hash_rule')!r}; this platoon knows {HASH_RULE}")
+    tasks = tuple(LockedTask.from_json(task) for task in data.get("tasks") or ())
+    compose_rule = data.get("compose_rule", "")
+    if compose_rule != COMPOSE_RULE and any(task.compose for task in tasks):
+        raise LockError(
+            f"Harbor lock {path} plans its tasks' compose files by rule {compose_rule!r}; this platoon plans them by "
+            f"{COMPOSE_RULE}: fetch the dataset again"
+        )
     return DatasetLock(
         dataset=data["dataset"],
         resolved=data["resolved"],
         fetched_with=data.get("fetched_with", ""),
-        tasks=tuple(LockedTask.from_json(task) for task in data.get("tasks") or ()),
+        tasks=tasks,
         hash_rule=data["hash_rule"],
         build_key_rule=data.get("build_key_rule", ""),
+        compose_rule=compose_rule,
         overlay=data.get("overlay"),
         inputs=data.get("inputs"),
         selection=dict(data.get("selection") or {}),
         modes=data.get("modes", ""),
         created_at=data.get("created_at", ""),
+        source=dict(data.get("source") or {}),
     )
 
 

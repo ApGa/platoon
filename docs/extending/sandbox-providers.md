@@ -63,6 +63,8 @@ class SandboxProvider(Protocol):
 | `snapshot()` | Capture the filesystem (not the processes) as a `SandboxSnapshot`; only when the provider declares `snapshot`. The snapshot stays valid until the sandbox it came from stops |
 | `restore(snapshot, spec)` | Start a new sandbox from a snapshot this provider made; refuse another provider's |
 | `kill_processes()` | Kill every process the commands left running, ones that left their process group or session included, and keep the sandbox running with its files. Raise `RuntimeError` when one survives, or when the sandbox cannot tell them from the processes that keep it alive. Harbor grading calls it before the tests and after them, and its grade is an untrainable `error` (`verifier_isolation`) when it raises; a sandbox without it is graded with a warning, while what the agents left running runs on |
+| `keep_processes(entries)` | Optional (*since 0.5.0*): spare the processes `entries` ("<pid>:<start time>" as `/proc` in the sandbox lists them) and their descendants from `kill_processes()`, until the sandbox stops. A session keeps what it started for the task before any agent ran: the init a main-only compose file gives `main`, and what that started. `platoon.sandbox._processes` has the scripts the built-in providers use. A Harbor task whose compose file gives `main` a command is refused on a sandbox without it |
+| `exec_as(user, cmd, ...)` | Optional (*since 0.5.0*): `exec` as `user` of the image, in one of Docker's `--user` forms (a name or a uid, optionally with a group or a gid), as `docker exec --user` runs one. A Harbor session that honors the users a task names runs its users' commands through it; on a sandbox without it, the session switches users with a tool of the image (`setpriv`, `su` or Python) from the sandbox's root, which the sandbox must then give |
 | `stop()` | Kill everything running in the sandbox and release it. Idempotent |
 | `routes` | For each of `spec.upstreams` that a process in the sandbox cannot reach as it is, the URL that reaches it from inside, such as a loopback port forwarded to the model gateway's Unix socket in a sandbox without a network (`platoon/sandbox/routes.py` implements them for the built-in providers). Optional: platoon reads it with `getattr(sandbox, "routes", {})`, and an `ensure_routes()` method, when there is one, starts a route's forwarder again after `kill_processes()` ended it |
 | `reap(labels)` | Optional, on the provider: stop the sandboxes whose labels include `labels`, also those a process that died without stopping them left behind, and return how many. A training worker's supervisor and `platoon eval` call it for what a killed worker left. The built-in providers put this process's labels (`platoon.sandbox.cleanup.labels()`: a run's `platoon.run`, a rollout worker's `platoon.worker`) on every sandbox beside `spec.labels`; do the same, and a run's label finds your sandboxes too |
@@ -77,6 +79,8 @@ Capabilities tell platoon what it may ask for, instead of checking provider name
 | `gpu` | The sandbox can reach GPUs |
 | `routes` | The provider implements `spec.upstreams` and `Sandbox.routes` |
 | `host_loopback` | A sandbox on the host network shares this host's network namespace, so its processes reach the model gateway on this host's loopback as they are. A provider whose sandboxes run elsewhere (another node, a cloud) must not declare it: platoon then places a harness in one of its sandboxes only through a route to the gateway |
+| `stacks` | *Since 0.5.0.* The provider also starts stacks, a task's services each in a sandbox of its own (`start_stack`, [below](#run-multi-container-stacks)): a Harbor task whose compose file names services besides `main` runs only on such a provider |
+| `privileged` | *Since 0.5.0.* The provider's stacks give a service every privilege of the host, or any capability, when its spec asks for it (`ServiceSpec.privileged`, `cap_add`), as Docker does: a Harbor stack fetched with `refuse: {privileges: false}` whose services ask for them runs only on such a provider. Declare it only when the provider grants exactly that |
 
 Two optional class attributes concern a site's profile, which can choose a provider for every config run on the
 site ([Write the site's profile](../how-to/clusters.md#4-write-the-sites-profile-once)):
@@ -85,7 +89,9 @@ site ([Write the site's profile](../how-to/clusters.md#4-write-the-sites-profile
 |---|---|
 | `isolates = True` | The provider isolates its sandboxes from the host, so a site profile may name it. A profile refuses a provider whose class does not say so, and `platoon train` refuses one that says `isolates = False`, as `process` does, unless the run config itself names it |
 | `unavailable(options)` | A class method that says why this host cannot run the provider with `options` (no runtime executable, a missing package), or returns `None`, without building it. `platoon train`, `eval`, `rollout` and `prepare` refuse a provider from the profile that the node cannot run, quoting the profile, instead of failing every rollout |
-| `root_refusal(options)` | *Since 0.3.0.* A class method that says why a sandbox of the provider built with `options` could not run its commands as root with other users to switch to, or returns `None` when it can, or cannot tell, without building it. A Harbor task whose verifier runs as root (`verifier_user: honor`) is refused when the tasks are listed if its verifiers' provider says why not. Every root verifier's sandbox is also checked when it starts, whatever its provider ([Verifiers that run as root](../how-to/sandboxes-and-harbor.md#verifiers-that-run-as-root)) |
+| `root_refusal(options)` | *Since 0.3.0.* A class method that says why a sandbox of the provider built with `options` could not run its commands as root with other users to switch to, or returns `None` when it can, or cannot tell, without building it. A Harbor task whose sandboxes honor its users (`agent_user: honor`, `verifier_user: honor`) is refused when the tasks are listed if the provider of a sandbox that runs them says why not. Every such sandbox is also checked when it starts, whatever its provider ([Users in task sandboxes](../how-to/sandboxes-and-harbor.md#users-in-task-sandboxes)) |
+| `loses_file_owners = True` | *Since 0.5.0.* The provider's sandboxes give their files other owners than their image does, as hpc-sandbox's, which extract every image as your user: a Harbor sandbox that runs a user other than root then needs the image's owner manifest, and passes it as `SandboxSpec.file_owners` (a host file of one `UID GID PATH` line for each path the image gives an owner other than root), which the provider applies where it maps those users. A provider whose images keep their owners (Docker's) leaves it out and needs no manifest |
+| `file_owners_refusal(options)` | *Since 0.5.0.* With `loses_file_owners`, a class method that says why a provider built with `options` could not apply an owner manifest, or returns `None` when it can, without building it: hpc-sandbox before 0.5 cannot. A Harbor task that needs one is then refused when the tasks are listed |
 
 Every rollout builds its own environment service and so its own provider, with `provider_options` as keyword
 arguments. Keep the constructor cheap, and keep long-lived state (a client, a pool of warm sandboxes) at module
@@ -153,7 +159,8 @@ class AuditedProvider:
     ) -> None:
         self.inner = get_provider(inner, **(inner_options or {}))
         self.name = f"audited-{self.inner.name}"
-        self.capabilities = frozenset(self.inner.capabilities)  # no more than the inner provider can do
+        # No more than the inner provider can do, and no stacks: the wrapper has no start_stack.
+        self.capabilities = frozenset(self.inner.capabilities) - {"stacks"}
         self.log = Path(log_path)
 
     async def start(self, spec: SandboxSpec) -> AuditedSandbox:
@@ -251,6 +258,102 @@ environments:
 The module must be importable in every process that runs rollouts: install your package, or put its directory on
 `PYTHONPATH`.
 
+## Run multi-container stacks
+
+*Since 0.5.0.* A Harbor task whose compose file names services besides `main` (a database, a judge, an MCP server)
+runs as a **stack**, only on a provider that declares the `stacks` capability and has `start_stack`
+(`platoon/sandbox/stacks.py`); elsewhere the task is refused, never started without its services ([Multi-container
+tasks](../how-to/sandboxes-and-harbor.md#multi-container-tasks)). The Harbor service turns the task's stack plan into a
+`StackSpec`, and the provider starts every service of it, or raises having stopped what it started:
+
+```python
+@dataclass
+class ServiceSpec:
+    sandbox: SandboxSpec  # image, workdir, env, binds, resources; main's carries the harness's upstreams
+    command: list[str] | None = None  # the final argv (compose's rules over the image's); None: it only idles
+    healthcheck: Healthcheck | None = None  # an argv, with Docker's interval, timeout, start period and retries
+    depends_on: dict[str, Dependency] = ...  # service_started, service_healthy or service_completed_successfully
+    volumes: list[Volume] = ...  # directories the stack owns: named ones shared by name, anonymous ones its own
+    ports: tuple[int, ...] = ()  # the TCP ports it declares
+    listen: dict[int, str] = ...  # by declared port, the variables that tell it the port it listens on (host network)
+    aliases: tuple[str, ...] = ()  # names it answers to besides its own
+    network_of: str | None = None  # the service whose network it shares
+    run_as: RunMode | None = None  # root, caller or subids; None: the provider's choice
+    user: str | None = None  # the user its image runs its command as (USER); None: root
+    shm_mb: int | None = None  # with ulimits, cap_add and stop_signal: what the provider applies where it can
+    setup: Callable[[Sandbox], Awaitable[None]] | None = None  # awaited once its sandbox runs, before its command
+    timeout_s: float | None = None  # an init job's longest run
+
+
+@dataclass(frozen=True)
+class Volume:
+    target: str
+    name: str | None = None  # a named volume, shared by every service that names it; None: the service's own
+    tmpfs: bool = False
+    read_only: bool = False
+    subpath: str | None = None  # mount what fill made at this path of the volume, not the whole
+    fill: Callable[[Path], None] | None = None  # fills its directory once, before a service that mounts it starts
+
+
+@dataclass
+class StackSpec:
+    services: dict[str, ServiceSpec]  # "main" is the agents' sandbox
+    network: Literal["egress", "none"] = "egress"
+    labels: dict[str, str] = ...
+
+
+class Stack(Protocol):
+    id: str
+    main: Sandbox  # services["main"]
+    services: Mapping[str, Sandbox]
+    network: Literal["egress", "none"]
+    run_modes: Mapping[str, str]
+
+    async def health(self, services=None) -> dict[str, ServiceState]: ...  # running, healthy, unhealthy, exited, completed
+    async def logs(self, service: str, *, max_bytes: int = 2000) -> str: ...
+    async def set_network(self, network) -> None: ...
+    async def connect(self, service: str, port: int) -> str: ...  # a host endpoint: unix:///... or tcp://host:port
+    def rewrite(self, value: str, *, service: str | None = None) -> str: ...
+    def volume_path(self, name: str) -> Path: ...  # a named volume's directory on this host, which the caller reads
+    async def stop(self) -> None: ...
+```
+
+| A stack provider must | |
+|---|---|
+| Start in dependency order | Start each service once its dependencies reach their conditions: `service_started` once their command started, `service_healthy` once their healthcheck passed (failures in its start period do not count; `retries` failures in a row make the service unhealthy), `service_completed_successfully` once their command exited with status 0 (an init job). Await a service's `setup` with its sandbox once it runs and before its command starts: the Harbor service prepares `main` that way |
+| Start everything, or nothing | Make the stack's volumes, filled by their `fill` where they have one (the Harbor service copies the task's files that its services bind writable that way, so that they share one copy and the stack owns it), before any service starts: `platoon.sandbox.stacks.make_volumes(spec, root)` makes them below a directory of the stack's, and gives each service's mounts of them. Return once every service runs, each one with a healthcheck has passed it and each init job has completed within its `timeout_s`, as `docker compose up --wait` does, and a last probe finds every service up. A service that fails, exits or never turns healthy raises `StackStartError(service, message, log=<its log's tail>)`, which a session reports as `sidecar_start`, after the provider stopped every service it started; a cancelled start stops them too, also a service caught in the middle of its start, before it raises. Make each stop a cleanup that a stopping process lets finish (`platoon.utils.stopping.let_finish`). A `setup`'s own exception passes through as it is |
+| Tell each service's state | `health()` probes: an init job `completed` (or `exited` with another status), any other service `running`, `healthy` or `unhealthy` by its healthcheck (or by what the provider finds wrong with it: a service handle's optional `problem()`, which `drive_stack` asks), or `exited`. Harbor grading probes the sidecars before and after the tests, and a sidecar that is not up makes the outcome `invalid` (`sidecar_unhealthy`) |
+| Address the services | Where the services share a network of their own (a pod, a compose project), each reaches the others by name at their declared ports, and `rewrite` is the identity, and the stack says so (`host_loopback` false, as `drive_stack(..., host_loopback=False)` makes it): a harness in `main` then reaches the gateway only through its route. Where they share the host's network, give each declared port a port of the host that the stack holds for its life, which no other stack is given and the service learns from its listen variables (`PLATOON_PORT_<port>`, and those its `listen` names), and make `rewrite` turn a reference to a service at a port it declares (`scheme://<service>:<port>`, `<service>:<port>`), and a service's own `localhost:<port>`, into the address that reaches it; environment values, commands and healthchecks are rewritten so before the services start |
+| Reach a service from this host | `connect(service, port)` gives an endpoint on this host that reaches the port of that service, as the service's own network has it: `unix://<socket>`, a socket only your uid reaches, or `tcp://<host>:<port>` (the port of this host that a stack on the host's network holds for it). Harbor's tool plane reaches a task's MCP servers through it. A socket's path holds at most 107 bytes: `platoon.sandbox.stacks.SocketLinks` hands out a short link to one whose path is longer |
+| Be reaped | Register the stack for cleanup as its sandboxes are (`platoon.sandbox.cleanup.register` before it starts, `attach` once it runs, `unregister` once it stopped), with this process's labels on every service's sandbox, and remove what a dead process's stacks left in `reap(labels)`, their volumes too |
+
+`platoon.sandbox.stacks.drive_stack(backend, spec, id=...)` does the first three for you, over a `StackBackend` that
+starts one service at a time (`start_service(name, spec)`, which returns the service's sandbox with its command's state
+and log), sets the network, connects and rewrites, and releases what the stack holds besides its services (`close()`).
+The `process` provider's stacks use it (`platoon/sandbox/process_stacks.py`, `start_host_stack`): each service is a
+process sandbox, its command runs in the background there, and its declared ports are ports outside the kernel's
+ephemeral range that the stack holds for its life (a claim the kernel arbitrates between processes), which it learns
+from its listen variables. A service that must also run there listens on `${PLATOON_PORT_6379:-6379}`, as a script
+writes below `${PLATOON_SANDBOX_ROOT:-}`, both of which real stacks leave unset. The host-network fallback
+(`platoon/sandbox/host_network_stacks.py`, `HostNetworkStackProvider(provider)`) runs stacks the same way over another
+provider's single sandboxes, for sites where pods cannot run: it needs sandboxes that share this host's network (the
+`host_loopback` capability) and run as your own uid (a `root_refusal` that says so), refuses a stack without a network,
+keeps its stacks' directories in a root of your uid's alone (`process_stacks.private_root`), and finds a service
+unhealthy where a listener at one of its declared ports is beyond the loopback or another user's (a handle's
+`problem()`, which the driver's probes ask) (`platoon.sandbox.host_network_stacks.host_network_refusal` says why a
+provider cannot host it). What a rewrite acts on is `platoon.sandbox.stacks.service_references`, which Harbor's
+fetch-time scan reads with the same grammar. The `docker` provider's stacks use it too (`platoon/sandbox/compose.py`):
+each stack a `docker compose` project whose file it writes from the spec, each service a container that
+`docker compose create` makes once its dependencies hold and `docker start` starts, on a network of the project's own
+(so `rewrite` is the identity), with its volumes directories of the project's, which `volume_path` names, and a relay
+container in a service's network for `connect`. So do the `singularity` and `enroot` providers'
+(`platoon/sandbox/hpc_stacks.py`): each stack is an hpc-sandbox pod, whose services share one network namespace, with
+`main`'s upstreams relayed by the pod itself, each service's run mode chosen from its image's user and what the runtime
+and the node give, and the pod's ports exposed as sockets for `connect`. A provider class whose stacks need something of
+the host says why it has none in a `stack_refusal(options)` class method, which `platoon.sandbox.stack_refusal` asks
+also of a built provider, with its `options` (the `docker` provider's: the CLI's compose plugin; the HPC providers':
+hpc-sandbox's pods, on a node that nests user namespaces).
+
 ## Test it like the built-ins
 
 Before you train with a new provider, check what the Harbor service and harnesses rely on, with a small task that
@@ -262,10 +365,15 @@ has a reference solution:
 - `stop()` twice is fine, and after it the sandbox's processes are gone.
 - `kill_processes()` ends a process a command left running in the background, also one that moved to a session of
   its own (`setsid`), and the sandbox runs commands and keeps its files afterwards.
+- With `keep_processes()`: a kept process, its children and a daemon it detached survive `kill_processes()`, and
+  `stop()` ends them.
 - With `snapshot`: a file written before `snapshot()` is in a sandbox `restore`d from it, and a file written in that
   restored sandbox is not in the original.
 - With `network_none`: a sandbox started with `network="none"` cannot open a connection.
 - The task's reference solution scores 1 through `session.grade()`, and doing nothing scores 0.
+- With `stacks`: a stack whose `main` waits for a sidecar to be healthy starts it first; a sidecar that never turns
+  healthy fails the start and nothing of the stack is left; `health()` tells a killed sidecar `exited`; `stop()`, and a
+  start cancelled midway, leave nothing.
 
 ## Next steps
 

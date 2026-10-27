@@ -41,14 +41,15 @@ from datasets import Dataset
 from tinker_service_fakes import FakeTinkerService, make_pruning_trainer
 from trainer_fakes import TrainingClient, make_trainer, trainer_config
 
+from platoon.train import dataloader as dataloader_module
+from platoon.train import task_records
+from platoon.train.checkpoints import kept_groups
+from platoon.train.checkpoints.pruning import DELETED_CHECKPOINTS_NAME, read_checkpoint_records
 from platoon.train.components import ENVIRONMENT_COLUMN, WeightedOrder, task_ids_to_dataset
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
+from platoon.train.dispatch.dispatcher import POSITION_COLUMN, Dispatcher
 from platoon.train.task_stats import TaskStatsStore, read_events
-from platoon.train.tinker import kept_groups, task_records
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.checkpoint_pruning import DELETED_CHECKPOINTS_NAME, read_checkpoint_records
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
-from platoon.train.tinker.dispatcher import POSITION_COLUMN, Dispatcher
 from platoon.utils.config import resolve_config
 
 
@@ -180,7 +181,7 @@ def test_at_k_0_every_step_trains_exactly_the_rows_of_its_batch(tmp_path, monkey
     assert logged == [1, 2, 3, 4, 5, 6]
     assert [sorted(step) for step in client.steps] == [list(range(4 * step, 4 * step + 4)) for step in range(6)]
     assert sorted(workflow.started) == list(range(24))  # every group a step consumed, and no other
-    dataloader = rl_module.PlatoonTinkerDataloader(trainer.train_dataset, 4, order=trainer.train_order)
+    dataloader = dataloader_module.PlatoonTinkerDataloader(trainer.train_dataset, 4, order=trainer.train_order)
     batches = [[row["task_id"] for row in dataloader.get_batch(step)] for step in range(6)]
     assert [[workflow.tasks[position] for position in range(4 * step, 4 * step + 4)] for step in range(6)] == batches
 

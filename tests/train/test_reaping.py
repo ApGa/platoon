@@ -10,9 +10,12 @@ import inspect
 import json
 import logging
 import os
+import shlex
+import signal
 import socket
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -23,9 +26,10 @@ from sandbox_leftovers import alive, leave_sandbox
 from platoon import cli
 from platoon.sandbox import SandboxSpec
 from platoon.sandbox import cleanup as sandbox_cleanup
+from platoon.sandbox import process as sandbox_process
 from platoon.sandbox.process import ProcessProvider
 from platoon.train import reaping
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.utils.config import ConfigError, resolve_config
 
 RUN = sandbox_cleanup.RUN_LABEL
@@ -238,6 +242,86 @@ def test_a_reap_takes_the_runs_sandboxes_and_no_other_runs(tmp_path, caplog):
     finally:
         reaping.RunReaper(tmp_path / "run-2", [("process", {"root": str(root)})]).reap("after the test")
     assert not alive(theirs)
+
+
+# A sleep that holds memory in small pages (PR_SET_THP_DISABLE), which a SIGKILLed process takes a while to give back
+# before it has exited; argv: how many MiB, and "group" to stay in its command's process group or "session" to leave
+# it for a session of its own.
+_HOLDER = (
+    "import ctypes, mmap, os, sys, time; "
+    "os.setsid() if sys.argv[2] == 'session' else None; "
+    "ctypes.CDLL(None).prctl(41, 1, 0, 0, 0); "
+    "held = mmap.mmap(-1, int(sys.argv[1]) << 20, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS | mmap.MAP_POPULATE); "
+    "time.sleep(300)"
+)
+_HELD_MIB = 1024
+
+
+def _holds(pid: int, mib: int) -> bool:
+    """Whether the process ``pid`` comes to hold ``mib`` MiB, within a minute."""
+
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        try:
+            resident = int(Path(f"/proc/{pid}/statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+        except (OSError, IndexError, ValueError):
+            return False
+        if resident >= mib << 20:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.parametrize("where", ["group", "session"])
+def test_a_reap_returns_once_the_processes_it_killed_have_exited(tmp_path, where):
+    """A SIGKILLed process gives back its memory, then its files and ports, before it has exited, which takes a while
+    when it holds much memory: the reap waits for that, so that what runs next has them, as the run that reaps before
+    it starts does.  The process is in the process group of the command that started it, or it left that group and
+    the reap finds it by its sandbox's environment variable."""
+
+    root = tmp_path / "sandboxes"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(_HOLDER)} {_HELD_MIB} {where}"
+    pid = asyncio.run(leave_sandbox(root, sandbox_cleanup.run_label(tmp_path / "run"), command))
+    reaper = reaping.RunReaper(tmp_path / "run", [("process", {"root": str(root)})])
+    try:
+        assert _holds(pid, _HELD_MIB)
+        assert (os.getpgid(pid) == pid) == (where == "session")
+
+        assert reaper.reap("for the test") == 1
+
+        assert not alive(pid)
+    finally:
+        reaper.reap("after the test")
+
+
+class _OsWithoutKill:
+    """The os module as platoon.sandbox.process sees it, but SIGKILL ends nothing."""
+
+    def __getattr__(self, name: str):
+        return getattr(os, name)
+
+    @staticmethod
+    def kill(pid: int, signum: int) -> None:
+        return None
+
+
+def test_a_reap_waits_a_bounded_time_for_a_process_that_outlives_its_sigkill(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "sandboxes"
+    pid = asyncio.run(leave_sandbox(root, sandbox_cleanup.run_label(tmp_path / "run")))
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(sandbox_process, "signal_process_group", lambda pgid, start_time, signum: True)
+            patch.setattr(sandbox_process, "os", _OsWithoutKill())
+            patch.setattr(sandbox_process, "_KILL_PASSES", 3)
+            patch.setattr(sandbox_process, "_EXIT_WAIT_S", 0.5)
+            began = time.monotonic()
+            assert reaping.RunReaper(tmp_path / "run", [("process", {"root": str(root)})]).reap("now") == 1
+            waited = time.monotonic() - began
+
+        assert alive(pid) and 0.5 <= waited < 5
+        assert f"still run 0.5s after SIGKILL: {pid}" in caplog.text
+    finally:
+        os.kill(pid, signal.SIGKILL)
 
 
 def test_a_reap_stops_the_sandboxes_this_process_still_holds_when_asked(tmp_path, caplog):

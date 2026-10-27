@@ -31,9 +31,10 @@ from platoon.gateway import set_default_gateway
 from platoon.harness.rollout import harness_rollout
 from platoon.train.auto import TaskRouter
 from platoon.train.components import EnvironmentConfig
-from platoon.train.tinker.config_defs import WorkflowConfig
+from platoon.train.config_defs import WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo, TinkerLLM, proxy_interactions
-from platoon.train.tinker.workflows.group_rollout_workflow import GroupRolloutWorkflow, _SingleRolloutOutcome
+from platoon.train.workflow.group import GroupRolloutWorkflow
+from platoon.train.workflow.output import _SingleRolloutOutcome
 
 MODEL_NAME = "parity/policy"
 CHECKPOINT_VERSION = 7

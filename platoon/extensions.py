@@ -1125,11 +1125,15 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
     Imports the environments' ``package`` modules first, as a run does.  For each named environment, harness,
     program, reward processor, service class and import-string component: the kind, the reference as the config
     gives it, what it resolved to (``name@version``, or ``module:attr``), the distribution and version that
-    provide it, the entry point that named it, and the environments that use it.  A harness with an option schema
-    (a TOML spec's ``[options]``) also records the options each entry runs it with, defaults included, per phase
-    (``options``: ``{entry: {train: ..., eval: ...}}``, :mod:`platoon.options`): the phases the config runs
-    (:func:`platoon.options.config_phases`), or with ``split`` that split's phase only, for a command that runs one
-    split whatever the config says (``platoon rollout``).  A reference that does not resolve, and options its
+    provide it, the entry point that named it, and the environments that use it.  A training config's task samplers
+    too (``kind: task_sampler``): the run's and, under a run sampler that hands slots, each entry's, with their level
+    and their options, defaults included, their options and their checks run as a run's start runs them; and its group
+    admission rules other than ``all`` (``kind: group_admission``), likewise, ``informative`` refused beside a workflow
+    that gives its groups no verdict.  A harness
+    with an option schema (a TOML spec's ``[options]``) also records the options each entry runs it with, defaults
+    included, per phase (``options``: ``{entry: {train: ..., eval: ...}}``, :mod:`platoon.options`): the phases the
+    config runs (:func:`platoon.options.config_phases`), or with ``split`` that split's phase only, for a command that
+    runs one split whatever the config says (``platoon rollout``).  A reference that does not resolve, and options its
     component does not take, raise :class:`~platoon.utils.config.ConfigError` with every problem, which the CLI
     reports with exit 78 before the run starts.
     """
@@ -1190,11 +1194,67 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
             add("workflow", environment.workflow, label, "workflow", describe)
     problems += _check_options(environments, records, phases=config_phases(config, split))
     problems += _check_service_options(environments, records)
+    samplers: list[dict[str, Any]] = []
+    rules: list[dict[str, Any]] = []
     if getattr(config, "train", None) is not None:
         problems += _check_entry_settings_workflow(environments, records)
+        if not unimported:  # a package that does not import may register the samplers the config names
+            samplers, found = _task_samplers(config)
+            problems += found
+            rules, found = _group_admissions(config, environments, records)
+            problems += found
     if problems:
         raise ConfigError(problems)
-    return list(records.values())
+    return [*records.values(), *samplers, *rules]
+
+
+def _task_samplers(config: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Resolve the task samplers a training config chooses (``train.task_sampler``, and each entry's under a run
+    sampler that hands slots), check their options and run their checks
+    (:func:`platoon.train.samplers.choose_samplers`), and describe each for ``lock.json``: one record per sampler, with
+    its level, the entries it chooses for and its options, defaults included.  Returns the records and the
+    problems."""
+
+    from platoon.train.samplers import choose_samplers, sampler_lock_records
+    from platoon.utils.config import ConfigError
+
+    try:
+        choices = choose_samplers(config)
+    except ConfigError as exc:
+        return [], list(exc.problems)
+    return sampler_lock_records(config, choices), []
+
+
+def _group_admissions(
+    config: Any, environments: Sequence[Any], records: Mapping[tuple[str, str], dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Resolve the group admission rules a training config chooses in rule mode (``train.group_admission``, and each
+    entry's own), check their options and run their checks (:func:`platoon.train.admissions.choose_admissions`),
+    refusing ``informative`` beside a training workflow class that gives no verdicts (one that is no
+    ``GroupRolloutWorkflow`` and does not declare ``gives_verdicts = True``), and describe each rule other than ``all``
+    for ``lock.json``.  Returns the records and the problems; neither in a run whose every rule is ``all``."""
+
+    from platoon.registry import resolve_component
+    from platoon.train.admissions import admission_lock_records, choose_admissions, rule_mode
+    from platoon.train.components import merge_run_level_settings
+    from platoon.train.workflow.protocol import capabilities_of
+    from platoon.utils.config import ConfigError
+
+    if not rule_mode(config):
+        return [], []
+    workflow = merge_run_level_settings(environments).workflow
+    gives_verdicts: bool | None = True
+    if workflow != "group_rollout":  # one that does not resolve is reported already
+        gives_verdicts = (
+            capabilities_of(resolve_component("workflow", workflow)).gives_verdicts
+            if ("workflow", workflow) in records
+            else None
+        )
+    try:
+        choices = choose_admissions(config, workflow=workflow, gives_verdicts=gives_verdicts)
+    except ConfigError as exc:
+        return [], list(exc.problems)
+    return admission_lock_records(choices), []
 
 
 def _check_entry_settings_workflow(

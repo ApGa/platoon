@@ -33,9 +33,12 @@ never `process`, and only the options that do not weaken that isolation.
 | Provider | Isolation | Images | Needs | Options |
 |---|---|---|---|---|
 | `process` | None: a host directory, commands run as you | ignored | nothing | `root` (where sandbox directories go; default `<tmp>/platoon-sandboxes`) |
-| `docker` | One long-lived container per sandbox | `docker://repo:tag` or a plain reference | the `docker` CLI (`binary: podman` for Podman) | `binary`, `cli_timeout_s` (600; bounds `docker run` including the pull) |
-| `singularity` | Rootless SingularityCE or Apptainer instances: private PID and IPC namespaces, root filesystem, `/tmp` and environment | `docker://` references, also pinned by digest (`docker://repo@sha256:<digest>`), or local `.sif` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `allow_network_none`, `gpu`, `rootfs_layout` ([below](#the-singularity-providers-root-filesystem)), `fakeroot` (since 0.3.0, with hpc-sandbox 0.4: [root in a verifier](#verifiers-that-run-as-root)), ... |
+| `docker` | One long-lived container per sandbox, and a `docker compose` project per multi-container task ([Stacks on Docker](#stacks-on-docker)) | `docker://repo:tag` or a plain reference | the `docker` CLI (`binary: podman` for Podman), with its compose plugin for stacks | `binary`, `cli_timeout_s` (600; bounds `docker run` including the pull), `stack_root` (where stacks' project directories go; default `platoon-docker-stacks-<uid>` in node scratch) |
+| `singularity` | Rootless SingularityCE or Apptainer instances: private PID and IPC namespaces, root filesystem, `/tmp` and environment | `docker://` references, also pinned by digest (`docker://repo@sha256:<digest>`), or local `.sif` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `allow_network_none`, `gpu`, `rootfs_layout` ([below](#the-singularity-providers-root-filesystem)), `fakeroot` (since 0.3.0, with hpc-sandbox 0.4: [root and other users](#users-in-task-sandboxes)), ... |
 | `enroot` | Rootless enroot containers in their own user, mount, PID and IPC namespaces | `docker://` references, also pinned by digest, or local `.sqsh` files | the `hpc` extra | passed to hpc-sandbox: `scratch_root`, `image_cache`, `gpus`, `remap_root`, ...; the singularity names also work (below) |
+
+Both hpc-sandbox providers also run multi-container tasks, as rootless pods, with hpc-sandbox 0.5 ([Stacks as
+pods](#stacks-as-pods-on-singularity-apptainer-and-enroot)).
 
 Every provider runs a string command with `bash -c`, so a Harbor task's `bash` tool takes bash syntax (`[[ ]]`,
 `source`, `set -o pipefail`) on all of them, and an image without bash runs only argv commands. A command that
@@ -68,7 +71,7 @@ commands in a sandbox need a proxy, set its variables in the Harbor service's `e
 
 `rootfs_layout` picks how each sandbox gets its root filesystem, and `HPC_SANDBOX_ROOTFS_LAYOUT` in the job's
 environment sets it for every provider that does not. hpc-sandbox has the layouts from 0.3 on, and the `hpc` extra
-installs 0.4 ([The hpc extra](../getting-started/install.md#the-hpc-extra)); with an older one, every sandbox gets a
+installs 0.5.1 ([The hpc extra](../getting-started/install.md#the-hpc-extra)); with an older one, every sandbox gets a
 copy, and a run that sets `rootfs_layout`, even to `copy`, is refused when its tasks are listed. The layouts:
 
 | `rootfs_layout` | A sandbox's root filesystem | Start, alone / 64 at once on one node | Needs |
@@ -91,6 +94,12 @@ needs the node's extraction of the image (hpc-sandbox's `rootfs_templates`, on b
 `rootfs_layout: fuse-overlay` with `gpu`, `cgroup_limits`, `fakeroot` (or `--fakeroot` in `extra_start_args`) or
 `rootfs_templates: false` is refused, and the job-wide default leaves such a provider on copies. The enroot provider
 ignores `rootfs_layout`.
+
+The copy layout and the enroot provider extract a root filesystem at each sandbox's start, so many starts at once on
+a node, as at a run's start, contend for its filesystem. `train.max_starting_rollouts` bounds how many rollouts start
+up at once, their sandboxes and harnesses included ([Rollout
+start-ups](train-and-eval.md#rollout-start-ups-experimental)); a separate verifier's sandbox and a copy fork start
+after their rollout's first model call, outside it.
 
 ## Steps
 
@@ -185,9 +194,10 @@ environments:
 ```
 
 `service_kwargs` are the options of the Harbor service (`platoon/envs/harbor/service.py`). The ones that name files
-platoon reads, `dataset`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`, `overlays` and `mounts[].source`,
-are relative to the config file that names them, so `./tasks` is the `tasks` directory beside the config, wherever
-platoon runs from ([Write and override configs](configs.md#2-build-on-it-with-extends)):
+platoon reads, `dataset`, `registry`, `adapter.repo`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`,
+`overlays` and `mounts[].source`, are relative to the config file that names them, so `./tasks` is the `tasks`
+directory beside the config, wherever platoon runs from ([Write and override
+configs](configs.md#2-build-on-it-with-extends)):
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -199,19 +209,20 @@ platoon runs from ([Write and override configs](configs.md#2-build-on-it-with-ex
 | `default_image` | none | The image for tasks without `docker_image`, used as written (a task's own `docker_image` gets a `docker://` prefix unless it names a scheme or is a `.sif` or `.sqsh` file or an absolute path) |
 | `workdir` | `/app` | The working directory for tasks that do not set one |
 | `env`, `mounts` | none | Extra environment variables, and `{source, target, read_only}` host mounts, for every sandbox |
-| `tool_timeout_s` | 300 | The limit of one tool call (`bash`, `view`, `write`, `edit`) for harnesses that use the env's tools |
+| `tool_timeout_s` | 300 | The limit of one tool call (`bash`, `view`, `write`, `edit`, and the tools of the task's MCP servers) for harnesses that use the env's tools |
 | `verifier_timeout_multiplier` | 1.0 | Scales each task's `[verifier] timeout_sec` (default 600) |
 | `agent_timeout_multiplier` | 1.0 | Scales each task's `[agent] timeout_sec`, which bounds the harness ([below](#harness-timeouts-and-crashes)) and, without a rollout `timeout`, a rollout's deadline ([Run it](#4-run-it)) |
 | `reward` | `{primary: reward}` | The [reward contract](#rewards-the-reward-contract-and-log-classifiers): `{primary, components, range, check}`, a reward name, or a list of the names that may train |
 | `verifier_classifiers` | none | Verifier-log patterns that make an outcome `invalid`: a named set (`harbor-common`), `{pattern, kind}` tables, or a list of both |
-| `agent_user` | `refuse` | A task that sets `[agent].user` or `[verifier].user`: `refuse` it, or `ignore` the user and run as the sandbox's single uid (recorded in the outcome's `ignored_users`) |
-| `verifier_user` | as `agent_user` | *Since 0.3.0.* What `[verifier].user` gets instead, when set: `refuse`, `ignore`, or `honor`, which runs a separate verifier whose user is root as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
+| `agent_user` | `refuse` | A task that sets `[agent].user` or `[verifier].user`: `refuse` it, `ignore` the user and run as the sandbox's own user (recorded in the outcome's `ignored_users`), or, since 0.5.0, `honor` it, running each phase as its user as Harbor does ([Users in task sandboxes](#users-in-task-sandboxes)) |
+| `verifier_user` | as `agent_user` | *Since 0.3.0.* What `[verifier].user` gets instead, when set: `refuse`, `ignore`, or `honor`, which runs the tests as that user, root among them ([Verifiers that run as root](#verifiers-that-run-as-root)) |
 | `verifier_provider_options` | none: `provider_options` | *Since 0.3.0.* The provider options of every separate verifier's sandbox, laid over `provider_options`, such as `{rootfs_layout: copy, fakeroot: true}` for verifiers that run as root |
 | `concurrent_tools` | none | Tools that may overlap other calls on the same sandbox (`bash`, `view`) |
 | `queue_timeout_s` | 240 | How long a call or a grade waits for its turn before it is refused (`env_busy`) |
 | `close_timeout_s` | 30 | How long closing waits for calls in flight before it stops the sandbox |
 | `max_artifact_bytes` | 1 GiB | The largest artifact a separate verifier receives; a larger one is left out, and the tests decide what its absence means |
 | `sandbox_start_budget_s` | 600 | What a rollout's deadline allows each sandbox start, the task's and a separate verifier's ([Run it](#4-run-it)) |
+| `stacks`, `network_policy`, `on_sidecar_down` | `auto`, `task`, `invalid` | *Since 0.5.0.* Whether and how multi-container tasks run, the network of every sandbox, and what a sidecar that is down at grading makes the outcome ([Multi-container tasks](#multi-container-tasks)) |
 
 Values like `${HF_TOKEN}` or `${REGION:-us}` in a task's `env` tables are read from the host: `[environment] env`
 when a session opens (an unset variable without a default fails the session as a configuration error), and
@@ -315,11 +326,17 @@ For each entry of the config (a training or evaluation config, or a file of envi
 
 1. **The dataset.** A Harbor entry's `dataset` is fetched into its lock, as `platoon harbor fetch` fetches it
    ([Fetch a dataset by name](#fetch-a-dataset-by-name)), and an entry with a hold-out prints its report.
-2. **The images** that its tasks build from Dockerfiles, and its image map lacks, are built with the builder of its
-   sandbox provider and recorded in its image map ([Build task images](#build-task-images)): `oci` for
-   `singularity`, `docker` for `docker`. The `process` provider runs no image, so their keys are recorded as
-   `local`. For any other provider, which pulls its images from a registry, the step fails and names the command
-   that builds and pushes them. An entry that serves a directory builds nothing: its tasks run their own images.
+2. **The images** that its tasks, their separate verifiers and their stacks' sidecars build from Dockerfiles, and its
+   image map lacks, are built with the builder of its sandbox provider and recorded in its image map ([Build task
+   images](#build-task-images)): `oci` for `singularity` (`def` where its runtime is Apptainer), `docker` for
+   `docker`. The `process` provider runs no image, so their keys are recorded as `local`. For any other provider,
+   which pulls its images from a registry, the step fails and names the command that builds and pushes them. An
+   entry that serves a directory builds nothing: its tasks run their own images. Then, on every provider but
+   `process`, **the registry images** that its stacks' sidecars run are pinned in the map, by the digest each
+   registry serves and with the configuration it gives the image ([Multi-container tasks](#multi-container-tasks)),
+   and, where its stacks run as pods with egress, **the pod tools**: slirp4netns, fetched with `hpc-sandbox
+   fetch-tools` where no slirp4netns on `PATH` does what pods need. Run prepare on a node like the run's: what it
+   finds on `PATH` is its own node's.
 3. **The toolchains** its harness specs run from, under the toolchain root ([Harness toolchains](#harness-toolchains)).
    One built from another recipe is left as it is, since a run of another config, or of another platoon, may be
    staging its rollouts from it: the step fails and names the forced build that replaces it, to run while no job uses
@@ -362,10 +379,11 @@ refuses to run while one of the variables is set, each with exit 78 and a messag
 
 Runs check what prepare makes before any rollout: `platoon train`, `eval` and `rollout` stop with exit 78 and the
 `platoon prepare` command for their config, overrides included, when a harness's toolchain is not built, or when a
-fetched dataset's tasks build images that their image map lacks (checked when the tasks are listed, which takes
-seconds once the lock exists). A toolchain built from another recipe stops them too, naming the forced build
-instead. `platoon train` and `eval` still fetch a dataset pinned to a commit that no lock answers, when they list its
-tasks; `platoon rollout`, which runs one task, stops instead.
+fetched dataset's tasks build images that their image map lacks, or run registry images in sidecars that it has not
+pinned (checked when the tasks are listed, which takes seconds once the lock exists).
+A toolchain built from another recipe stops them too, naming the forced build instead. `platoon train` and `eval` still
+fetch a dataset pinned to a commit that no lock answers, when they list its tasks; `platoon rollout`, which runs one
+task, stops instead.
 
 ```text
 platoon: what the run needs is not prepared on this site:
@@ -374,7 +392,7 @@ platoon: what the run needs is not prepared on this site:
 ```
 
 The `platoon harbor` and `platoon toolchain` commands remain for what needs their flags: `--shard`, `--push`,
-`--key`, `--builder`, `--repair`, `--update` and `images alias`.
+`--key`, `--builder`, `--repair`, `--update`, `images pin --reference` and `images alias`.
 
 ### Prepare as a run starts, on one machine
 
@@ -404,7 +422,18 @@ seconds and names the `platoon prepare` command.
 ## Fetch a dataset by name
 
 Instead of a directory, a Harbor environment can name a dataset that platoon fetches once into a cache and pins with
-a lock: a Hugging Face dataset repository at a commit (`hf://org/name@<commit>[#subdir]`), or a local directory.
+a lock. It comes from one of these sources ([below](#the-harbor-hub-git-repositories-and-adapters) for all but the
+first and the last):
+
+| Source | `service_kwargs` | Pinned (fetched by `platoon train` and `platoon eval` themselves) by |
+|---|---|---|
+| A Hugging Face dataset repository | `dataset: hf://org/name@<commit>[#subdir]` | a commit; a branch moves |
+| A package of the Harbor Hub: a dataset, or a single task | `dataset: harbor://org/name@<ref>` | a revision (`@4`) or a digest (`@sha256:...`); a tag (`@latest`, `@v4.0.0`, or none) moves |
+| A dataset of Harbor's legacy registry | `dataset: harbor://name@<version>`, and `registry:` a `registry.json` (a file, its directory or a URL; default: Harbor's own) | a version in a registry file, or at a URL with a commit in its path; Harbor's own registry, on a branch, moves, and so does a task at `HEAD` |
+| A directory of a git repository | `dataset: git+<url>@<commit>[#<path>]` | a full 40-character commit; a branch or a tag moves |
+| An adapter that generates the tasks | `adapter: {repo, commit, path, command, args, env, sparse}`, instead of `dataset` | a full commit |
+| A local directory | `dataset: <path>` | (copied again by every fetch, since its files may change) |
+
 The entry's `service_kwargs` say what to fetch:
 
 ```yaml
@@ -417,7 +446,8 @@ environments:
       select: {source_dataset: [data-analysis]}  # filters on the dataset index's fields
       tasks: [splits/phase0.json]          # optional allowlists of task ids (a JSON list or split manifest)
       overlays: [overlays/install-first]   # optional edits of task files, hashed into the lock
-      refuse: {sidecars: true, gpus: true, agent_user: true, per_task_build: true, uploads_over_mb: 100}
+      refuse: {sidecars: false, gpus: true, agent_user: true, privileges: true, per_task_build: true,
+               uploads_over_mb: 100}
       index:                               # more index fields: from the dataset's files, and from task.toml
         - {path: data/tasks.jsonl, key: task_id, fields: [split_group]}
         - {metadata: [kaggle_dataset_name]}
@@ -460,13 +490,16 @@ an absolute path or one with `..` fails the fetch. The lock records, for every t
 metadata, the flags platoon reads from `task.toml` (verifier mode, network, GPUs, users, stacks) and the bytes a
 session uploads into one of its sandboxes (`upload_bytes`), its image build plan (below), the digest of each of its
 input files (`input_files`, which a [hold-out](#shared-input-files) joins groups by), and why platoon refuses it,
-if it does: what `refuse` names (`stack`, `gpus`, `agent_user`, `per_task_build`, `uploads_over_mb`), and anything
-platoon's task loader cannot run (`task_config`: a bad `network_mode`, a separate
-verifier built from `tests/docker-compose.yaml`, an artifact path with `..` or from another compose service, and the
-rest of [What platoon refuses](#what-platoon-refuses)), which would fail every rollout. Sidecar stacks stay refused
-with `sidecars: false` too, as `task_config`, until platoon runs stacks. A refused task stays in the lock with its
-reason: it is never listed, and a split manifest that names it is an error. `refuse`'s switches take `true` or
-`false`; anything else is an error.
+if it does: a compose file outside the subset platoon runs (`compose`, [Compose files](#compose-files)), what
+`refuse` names (`stack`, `gpus`, `agent_user`, `per_task_build`, `uploads_over_mb`), and anything platoon's task
+loader cannot run (`task_config`: a bad `network_mode`, a separate verifier built from `tests/docker-compose.yaml`, an
+artifact path with `..` or of a compose service the task does not start, and the rest of [What platoon
+refuses](#what-platoon-refuses)), which would fail every rollout. A stack is locked as runnable, and runs where the
+provider runs stacks ([Multi-container tasks](#multi-container-tasks)), unless `sidecars: true` refuses it (`stack`,
+the default before 0.5.0); with `privileges: false`, so is a stack whose compose services ask for `privileged` or for
+a `cap_add` that a rootless service does not hold, which runs on the `docker` provider alone ([Stacks on
+Docker](#stacks-on-docker)). A refused task stays in the lock with its reason: it is never listed, and a split
+manifest that names it is an error. `refuse`'s switches take `true` or `false`; anything else is an error.
 
 **Tasks that upload too much.** When a session opens, platoon copies a task's inputs into its sandbox: the sources of
 its Dockerfile's deferred `COPY` steps ([Build task images](#build-task-images)), or, for a task with a prebuilt
@@ -488,18 +521,20 @@ environments:
 
 | Option | Meaning |
 |---|---|
-| `dataset` | A source to fetch (`hf://org/name@<commit>` or a directory), with `tasks`, `select`, `overlays`, `refuse` and `index` choosing and editing what is fetched |
+| `dataset` | A source to fetch (`hf://org/name@<commit>`, `harbor://org/name@<ref>`, `harbor://name@<version>`, `git+<url>@<commit>#<path>` or a directory), with `tasks`, `select`, `overlays`, `refuse` and `index` choosing and editing what is fetched |
+| `registry` | The legacy registry of a `harbor://name@<version>` dataset: a `registry.json` file, its directory or a URL (default: Harbor's own) |
+| `adapter` | An adapter that generates the tasks, instead of a `dataset`: `{repo, commit, path, command, args, env, sparse}` ([above](#the-harbor-hub-git-repositories-and-adapters)) |
 | `lock` | The lock to read (and, with `dataset`, to write; default `<Harbor cache>/locks/<hash of the fetch settings>.lock.json`) |
 
 The Harbor cache, which holds the tasks' files, the locks and the image maps, is `harbor` in the site profile's
 `cache`, else `~/.cache/platoon/harbor` ([Write the site's profile](clusters.md#4-write-the-sites-profile-once)).
 
-`platoon train` and `platoon eval` fetch a `dataset` pinned to a commit when no lock lists it yet, in the process that
-lists the tasks; a moving reference (a branch, or no revision) is fetched only by `platoon harbor fetch --update`. A
-local directory is copied into the cache when it is fetched: run `platoon harbor fetch` again after changing it.
-For a dataset pinned to a commit, `platoon harbor fetch` does nothing when the lock answers the config and the cache
-holds a directory for each of its tasks; `--repair` fetches anyway, and so does a fetch of a lock written before
-platoon recorded `input_files`, once. A fetch hashes each cache entry it would reuse
+`platoon train` and `platoon eval` fetch a pinned `dataset` (or `adapter`; the table above says what pins each source)
+when no lock lists it yet, in the process that lists the tasks; a moving reference (a branch, a tag, or no revision) is
+fetched only by `platoon harbor fetch --update`. A local directory is copied into the cache when it is fetched: run
+`platoon harbor fetch` again after changing it. For a pinned dataset, `platoon harbor fetch` does nothing when the lock
+answers the config and the cache holds a directory for each of its tasks; `--repair` fetches anyway, and so does a
+fetch of a lock written before platoon recorded `input_files`, once. A fetch hashes each cache entry it would reuse
 again, and replaces one that no longer matches its digest, so `--repair` (and any fetch of a local directory) also
 repairs a damaged cache; `platoon harbor verify` finds one without changing it.
 Rollout workers never fetch and never scan: they look each task up by id in the lock, and check its cache entry
@@ -535,6 +570,102 @@ recorded, a task without a field records none for it, and a field that the datas
 with another value fails the fetch, naming both values. Like every `index` entry, it is one of the lock's inputs:
 adding it fetches a new lock.
 
+### The Harbor Hub, git repositories and adapters
+
+A moving reference (a Hub tag, a branch, a registry task at `HEAD`) is fetched only by `platoon harbor fetch CONFIG
+--update`, which records what it resolved to (a digest, a commit) in the lock; the runs then read that lock until the
+next update. Rollout workers never fetch from any source: they read the lock and the cache. A source downloads or
+checks out into a directory of its own in the Harbor cache, removed once its tasks are cached, and the lock records how
+it resolved (`source`: the package and its digest, the repositories and their commits, an adapter's command). Its
+tasks are cached and locked as any fetched task is, overlays, build plans and the stack plans of their compose files
+([Compose files](#compose-files)) included: a main-only task of the Hub runs on every provider, and one with sidecars
+runs as a stack where the provider runs stacks ([Multi-container tasks](#multi-container-tasks)), unless the fetch's
+`refuse: {sidecars: true}` refuses it.
+
+```yaml
+environments:
+  - name: terminal-bench
+    service: harbor
+    service_kwargs:
+      dataset: harbor://terminal-bench/terminal-bench@4   # revision 4 of the dataset
+      tasks: [splits/cpu-tasks.json]                      # optional: only these are cached and locked
+  - name: kumo
+    service: harbor
+    service_kwargs:
+      dataset: harbor://kumo@1.0                          # Harbor's legacy registry, which moves: fetch it with --update
+  - name: gaia2
+    service: harbor
+    service_kwargs:
+      dataset: git+https://github.com/laude-institute/harbor-datasets@37db108843a49bb31a592e37a75e2c40dc3f9749#datasets/gaia2-cli
+```
+
+**The Harbor Hub.** platoon runs the Harbor CLI (`harbor==0.24.0`, through `uvx` in an environment of its own, with
+its dependencies as PyPI had them at its release, `--exclude-newer 2026-10-06T00:00:00Z`, so that every host installs
+the same packages; set `PLATOON_HARBOR_CLI` to the command line of another Harbor CLI, such as an installed `harbor`),
+never imports Harbor, and needs [uv](https://docs.astral.sh/uv/) on the fetching host; Harbor's telemetry is off
+(`HARBOR_TELEMETRY=0`) unless the environment sets it. `harbor version show --json` resolves the reference to the
+package's digest, and for a dataset to each task's digest; `harbor download` then downloads that digest. The CLI has no
+task filter, so a dataset downloads whole and `tasks` and `select` choose among its tasks afterwards. Each task's files
+must hash to the digest the Hub gives it, by Harbor's content hash, which platoon computes itself: a task that does not
+fails the fetch. Task ids are the tasks' names, the directories of `harbor download --export`. A step that fails for
+a reason that may pass (a reset stream, a timeout, a server error) is tried up to four times; one that the CLI reports
+as a package or a version that is not found, or not yours to read, is not tried again.
+
+**Harbor's legacy registry.** platoon reads the `registry.json` itself, and takes each selected task from its
+`git_url` at its `git_commit_id` and `path`, through a sparse clone that downloads only the selected tasks' files,
+rather than a clone of each whole repository; a task in a Hugging Face dataset repository comes through `hf://`'s
+downloads, which need no git-lfs. Task ids are the registry's names. Of two entries with one name and version, the last
+counts, as in Harbor. A task without a `git_url` is a directory next to a registry file, which a fetch copies again
+every time, as it copies a local directory, so `platoon harbor fetch` takes its changes.
+
+**A git repository.** The fetch takes the commit's tree without its files (a shallow, blobless fetch), finds the tasks
+under `path` as it finds them in a directory (its `registry.json`, else `task-index.json`, else every directory that
+holds a `task.toml`), and checks out only the selected tasks. A commit must be named in full: git cannot fetch an
+abbreviated one. Files kept in Git LFS need `git lfs` on the fetching host; without it, a task that has one fails the
+fetch, naming the file.
+
+**An adapter** generates the tasks from an upstream repository at a pinned commit, as Harbor's adapters and
+Frontier-CS's do. Frontier-CS's adapters, written for Harbor's tree, do not run as projects of their own in
+Frontier-CS's repository, so this entry names the command Frontier-CS runs them with, a module on `PYTHONPATH`:
+
+```yaml
+environments:
+  - name: frontier-cs
+    service: harbor
+    service_kwargs:
+      adapter:
+        repo: https://github.com/FrontierCS/Frontier-CS.git
+        commit: ede1b44d2fe22a65320c5e36b1014b3defc03671
+        path: adapters/frontier-cs-algorithm   # where the command runs
+        sparse: [/adapters/, /algorithmic/, "!/algorithmic/problems/*/testdata/"]   # what to check out
+        command: [uv, run, --no-project, --python, "3.12", --with, pyyaml==6.0.2, python, -m, frontier_cs_algorithm.main]
+        env: {PYTHONPATH: src}
+        args: [--source, "{checkout}"]         # --output-dir {output} is added
+```
+
+The fetch checks the repository out at the commit (whole, or what the `sparse` patterns name: git's sparse-checkout
+patterns, where `!` excludes), runs `command` with `args` in the directory `path`, with `env` added to the fetching
+process's environment, and fetches the directory it wrote as a local directory. In `command`, `args` and `env`,
+`{checkout}` is the checkout and `{output}` the directory the tasks go to; `--output-dir {output}` is added when none of
+them names `{output}`, since Harbor's adapters all take it. Without a `command`, the adapter runs as its own project
+runs it: `uv run --project . <script>`, with the one script of its `pyproject.toml`, and `--locked` when it has a
+`uv.lock`, whose digest the lock records. A `repo` may be a local repository, relative to the config file like every
+input path. An adapter runs the repository's code, with the network and the credentials of the host that fetches: name
+a commit you have read. The repository, commit, command, arguments, environment and patterns are the lock's inputs.
+
+**Links and credentials.** What the Hub, git or a registry brings must stay inside each task. A symbolic link in a
+task is taken as the file it names when that file is in the same task, as Harbor's content hash takes it; a link that
+leaves its task (an absolute one, one that climbs out, a `solution/` or `tests/` directory that links elsewhere, or a
+task that is itself a link or lies behind one) fails the fetch, naming the task and the path, since it would bring
+files of the fetching host into the cache and into every sandbox. It fails the fetch also where it names a directory or
+nothing that was downloaded or checked out (a file of the repository outside the selected tasks), which the hash would
+skip, so that no task loses a file unnoticed, such as a compose file that links out of its task. A link that the
+task's `.gitignore` (without one, Harbor's default ignores) leaves out of the hash is left out of the cache instead of
+refused, wherever it leads, but for the `.gitignore` itself and the task's directories (`environment/`, `tests/`,
+`solution/`), which are checked whatever it says. The lock and the fetch's log lines record each URL as written, so a
+URL that carries credentials (`https://user:token@host/...`) is refused: give private repositories' credentials to git
+(a credential helper, `~/.netrc` or an SSH key) instead.
+
 ## Build task images
 
 Tasks that build from `environment/Dockerfile` run images built once per site. platoon splits each Dockerfile at its
@@ -544,7 +675,9 @@ last step that must run at build time (a `RUN`, a `FROM`, a `COPY --from`, ...):
   it reads, so tasks whose prefixes match share one image however their last steps differ;
 - the **deferred suffix**, the trailing `COPY` and `ADD` of local files, `WORKDIR`, `ENV` and metadata, is applied
   when a session opens: the files are uploaded, the directories created and the variables set, with the result a
-  build would have had. A `USER` there is refused, since rootless sandboxes run as one uid.
+  build would have had. A `USER` there is the agents' user where users are honored ([Users in task
+  sandboxes](#users-in-task-sandboxes)), and gives the directories that a later `WORKDIR` makes to that user, as
+  BuildKit does; a fetch refuses it otherwise (`refuse.agent_user`).
 
 A step that fetches remote content, an `ADD` of a URL or of a git repository, always stays in the build prefix,
 wherever it is, also when an `ARG` or `ENV` value holds the URL (`ARG BASE=https://...`, then
@@ -563,27 +696,32 @@ on to BuildKit.
 platoon harbor images plan configs/train.yaml             # one image per build key, and which the image map lacks
 platoon harbor images build configs/train.yaml            # build the missing ones with the provider's builder
 platoon harbor images build configs/train.yaml --shard 3/8   # every 8th missing image from the 4th, for job arrays
+platoon harbor images pin configs/train.yaml              # pin the registry images that sidecars run
 platoon harbor images verify configs/train.yaml
 platoon harbor images plan locks/my-tasks.lock.json --image-map images/site.json   # a lock file and a map of yours
 ```
 
 Each takes a training or evaluation config, with overrides, and acts on each Harbor entry's lock (the one that
 answers its `dataset`, or the `lock` it names) with the entry's image map, `images/<provider>.json` in its Harbor
-cache. `build` uses the builder of the entry's sandbox provider, `oci` for `singularity` and `docker` for `docker`
-(`--builder` names another), and puts the image files in `images/<provider>/` next to the entry's map, or, for a
-lock file, in `images/` next to the map `--image-map` names (`--out` names another directory). Builds of one map at
-once, also on several nodes, take turns on each image and build it once. The commands also take a lock file, with
-`--image-map` (and, for `build`, `--cache`).
+cache. `build` uses the builder of the entry's sandbox provider, `oci` for `singularity` (`def` where its runtime is
+Apptainer) and `docker` for `docker` (`--builder` names another), and puts the image files in `images/<provider>/` next
+to the entry's map, or, for a lock file, in `images/` next to the map `--image-map` names (`--out` names another
+directory). Builds of one map at once, also on several nodes, take turns on each image and build it once. The commands
+also take a lock file, with `--image-map` (and, for `build`, `--cache`).
 
 `plan` lists one image per build key, with its task count, base images and whether the map has it, plus the
 prebuilt images tasks name in `docker_image`; an entry whose image file is gone, or is not the size its build
-recorded (a truncated copy), counts as missing. `build` builds
-the missing ones from a representative task and adds each to the image map as soon as it is built, with a receipt:
-the builder and its version, the build time, the log, the image's SHA-256, the base images as the Dockerfile names
-them (`base`) and the digest each one resolved to (`base_digests`). A build asks each base image's registry for the
-digest its tag points to and builds from `name@digest`, so the receipt says exactly what the image was built from;
-the build key stays the one the lock recorded. A base whose digest cannot be resolved (no network, a private
-registry) is built as written, with a warning, and its digest in the receipt is `null`.
+recorded (a truncated copy), counts as missing. A stack's sidecar that builds from a context of the task is a key of
+its own (role `service`), its whole Dockerfile built, and the registry images that sidecars run are listed apart,
+with whether the map pinned each: `pin` pins those it has not (`--reference` pins one again), each under the key
+`pulled:<reference>`, as an entry of the `pulled` builder whose image is the reference by its digest
+(`docker://redis@sha256:...`), with the configuration its registry gives the image for this host's platform.
+`build` builds the missing ones from a representative task and adds each to the image map as soon as it is built, with a
+receipt: the builder and its version, the build time, the log, the image's SHA-256, the base images as the Dockerfile
+names them (`base`) and the digest each one resolved to (`base_digests`). A build asks each base image's registry for
+the digest its tag points to and builds from `name@digest`, so the receipt says exactly what the image was built from;
+the build key stays the one the lock recorded. A base whose digest cannot be resolved (no network, a private registry)
+is built as written, with a warning, and its digest in the receipt is `null`.
 
 `verify` checks the map against the lock: every image the lock's runnable tasks use must be in the map, and each
 local image file (`.sif`, `.sqsh`, ...) must exist and hash to the SHA-256 its entry records. It prints one line per
@@ -592,9 +730,9 @@ as not checked and do not fail the check.
 
 | Builder | How | Where |
 |---|---|---|
-| `oci` (default) | `singularity build --oci` runs the Dockerfile with rootless BuildKit, as a Docker build does: multi-stage builds, step flags, here-documents, and an `ADD` of a URL (verifying its `--checksum`) or of a git repository; its single squashfs layer is unpacked and rebuilt as a native SIF, and the image config's `ENV`, `WORKDIR`, `USER`, `ENTRYPOINT` and `CMD` go into the map. SingularityCE's BuildKit cannot load the frontend image a `# syntax=` directive names, and builds with its own Dockerfile frontend instead: a directive that names a 1.x release of Docker's (`# syntax=docker/dockerfile:1.7`) is left out, and one that names another frontend (labs, a third party's) is refused | SingularityCE 4.1 or later, `unsquashfs`; the network, for base images and remote `ADD` sources |
-| `def` | a translation to a `Bootstrap: docker` definition file built with `--fakeroot`, in which each `RUN` runs in a shell of its own that starts in the current `WORKDIR` and sees the `ARG` values, as in a Docker build; it refuses what it cannot translate faithfully (multi-stage builds, `ARG` without a default, `USER`, `SHELL`, step flags, here-documents, an `ADD` of a URL, a git repository or an archive), naming the `oci` builder | Singularity or Apptainer with fakeroot |
-| `docker` | `docker build`, tagged `platoon-harbor:<key>` for the `docker` provider; with `--push REPO`, pushed and recorded by digest (enroot sites import that digest) | Docker or Podman (`PLATOON_DOCKER=podman`) |
+| `oci` (default) | `singularity build --oci` runs the Dockerfile with rootless BuildKit, as a Docker build does: multi-stage builds, step flags, here-documents, and an `ADD` of a URL (verifying its `--checksum`) or of a git repository; its single squashfs layer is unpacked and rebuilt as a native SIF, and the image config's `ENV`, `WORKDIR`, `USER`, `ENTRYPOINT` and `CMD` go into the map. SingularityCE's BuildKit cannot load the frontend image a `# syntax=` directive names, and builds with its own Dockerfile frontend instead: a directive that names a 1.x release of Docker's (`# syntax=docker/dockerfile:1.7`) is left out, and one that names another frontend (labs, a third party's) is refused | SingularityCE 4.1 or later, `unsquashfs` (from squashfs-tools 4.4 or later to record the image's file owners, which users honored on hpc-sandbox need); the network, for base images and remote `ADD` sources |
+| `def` | a translation to a `Bootstrap: docker` definition file built with `--fakeroot`, in which each `RUN` runs in a shell of its own that starts in the current `WORKDIR` and sees the `ARG` values, as in a Docker build; it refuses what it cannot translate faithfully (multi-stage builds, `ARG` without a default, `USER`, `SHELL`, step flags, here-documents, an `ADD` of a URL, a git repository or an archive), naming the `oci` builder. A definition file keeps none of the image's configuration, so the map records its base image's, from the registry, under what the Dockerfile sets (`CMD`, `ENTRYPOINT`, `EXPOSE`, ...) | Singularity or Apptainer with fakeroot; the network, for the base image's configuration |
+| `docker` | `docker build`, tagged `platoon-harbor:<key>` for the `docker` provider; with `--push REPO`, pushed and recorded by digest (enroot sites import that digest). The only builder that passes a sidecar's build arguments (compose's `build.args`): the others refuse an image that has any | Docker or Podman (`PLATOON_DOCKER=podman`) |
 
 The image map is a site file; the lock stays the same everywhere. An entry with a fetched dataset (`dataset` or
 `lock`) uses its default image map, `images/<provider>.json` in its Harbor cache (with `provider: singularity` and no
@@ -624,7 +762,582 @@ A separate verifier gets its image the same way. One built from `tests/Dockerfil
 Dockerfile's key, with its own deferred steps (`platoon harbor images build` builds it too); one that runs the task's
 own image gets the task's image and deferred steps, as Harbor's verifier would run the task's built image.
 
-## Verifiers that run as root
+So does a stack's sidecar that builds from a context of the task (`build:` in its compose file,
+[Multi-container tasks](#multi-container-tasks)): its Dockerfile is planned whole, deferring nothing, since a service's
+command starts with its container, so its build key covers every file it copies, and the image is built with its
+`build.args` (`--build-arg`, which only the `docker` builder passes yet: the others refuse such an image). `plan`
+lists it with the role `service` (and, with `--json-output`, its context, such as `environment/mcp-server/Dockerfile`),
+and one image serves every sidecar, of every task, whose key is the same.
+
+## Compose files
+
+*Since 0.5.0.* A Harbor task may ship `environment/docker-compose.yaml`, the only compose file Harbor reads: a
+`compose.yaml`, `compose.yml` or `docker-compose.yml` is a plain file of the task, as in Harbor, and a fetch warns of
+it (`flags.unread_compose` in the lock). platoon reads the file as Harbor layers it, over a `main` service that is the
+task's own sandbox (its image from `environment/Dockerfile` or its `docker_image`, idling on `sh -c "sleep
+infinity"`), and a fetch records what it found in the lock: the kind (`flags.stack`) and the file's stack plan
+(`compose`).
+
+| `flags.stack` | The compose file | platoon runs |
+|---|---|---|
+| `single` | none | one sandbox |
+| `trivial` | names only `main`, with nothing platoon applies (`services: {main: {}}`, or Harbor's base restated) | one sandbox |
+| `main_only` | names only `main`, and gives it settings | one sandbox, with what the file gives `main` (below) |
+| `sidecars` | names services besides `main`: a database, a judge, an MCP server | a stack, on a provider that runs stacks ([Multi-container tasks](#multi-container-tasks)); elsewhere the task is refused, never started without its services. A fetch locks it as runnable (`refuse: {sidecars: true}` refuses it, as `stack`) |
+
+**A main-only file** gives the task's sandbox:
+
+- `environment` and `env_file`: its environment, over the image's and the service's `env`, under the task's
+  `[environment].env`;
+- `working_dir`: its working directory, unless `[environment].workdir` names one;
+- `cpus`, `mem_limit` and `deploy.resources.limits`: its resources, over the task's;
+- `volumes`: a bind of the task's own files (`./data:/data:ro`, `${CONTEXT_DIR}/..:/opt/task-src:ro`) binds the
+  cached task, read-only as written, and a writable one binds a copy of its files, so that the cache is never
+  written; a source the task does not have binds an empty directory, as Docker creates one; anonymous and named
+  volumes below a bind mask what it binds there: the bind is of a filtered copy in which they are empty directories,
+  so a task that hides its `solution/` and `tests/` that way never puts them in the sandbox; a bind of
+  `${HOST_VERIFIER_LOGS_PATH}` (or of the agent's or the artifacts' log directory) at its own path changes nothing; a
+  named volume elsewhere is a directory of the sandbox's own;
+- `command` and `entrypoint`: main's **init**, which the session starts once the sandbox runs, as compose runs a
+  service's command (under the image's `ENTRYPOINT` where the image map knows it), unless it only idles (`sleep
+  infinity`, `tail -f /dev/null`). The kill before grading spares it and what it started, daemons it detached
+  included; an init that is gone by grading, which in Docker would have ended the container, makes the attempt an
+  `error` (`main_exited`), never scored; and a `copy` fork of such a task is refused, since a restore brings back
+  files, not processes;
+- `healthcheck`: waited for once the init has started (else the image's `HEALTHCHECK`), before
+  `[environment.healthcheck]`; one that keeps failing is `env_healthcheck`, as that one is.
+
+Published `ports` are kept as `expose`, since nothing is published on the host, and `container_name`, `restart`,
+`init`, `stdin_open`, `tty`, `labels`, `logging`, `stop_grace_period`, `pull_policy` and a `platform` that is this
+host's are ignored. What one sandbox cannot apply yet (`cap_add`, `shm_size`, `ulimits`, `tmpfs`, a log directory
+bound at another path, a bind inside another, networks that are all `internal`) refuses the task when it loads, as
+`task_config`.
+
+**Variables.** `${NAME}`, `${NAME:-default}`, `${NAME-default}`, `${NAME:?error}`, `${NAME:+value}` and `$$` (a
+literal `$`) work as in compose, and an unset variable without a default is blank, as compose makes it (the lock
+notes it). The variables are Harbor's, with platoon's meaning: `CONTEXT_DIR` (the task's `environment/`, which only
+binds and build contexts may name), `HOST_VERIFIER_LOGS_PATH` and `ENV_VERIFIER_LOGS_PATH` and their agent and
+artifacts counterparts, `MAIN_IMAGE_NAME`, `PREBUILT_IMAGE_NAME`, `CPUS` and `MEMORY` (the task's resources); then
+the task's `[environment].env`. The host's environment counts only for the variables an overlay lists in
+`compose_host_env`, so a file that names an API key gets a blank one otherwise. A listed variable, and a task
+variable that is a host template (`${TOKEN}`), are resolved when a session opens, never written into the lock, under
+the form the file gives them (`${OPENAI_API_KEY:-}` is blank when the host has none); one that the file names without
+a default must be set then, or the session fails as `env_config`. Environment values may name both, and a read-only
+bind the path that a listed variable names, or a path below it
+(`${SCICODE_TEST_DATA}/test_data.h5:/app/test_data.h5:ro`): never a task variable's, which the task, not you, chose.
+
+**What the subset refuses**, when the dataset is fetched, as `compose: <service>.<key>: <why>`: keys outside the
+subset; security-relevant ones (`privileged`, `devices`, `pid`, `ipc`, `security_opt`, `sysctls`, `user`, a
+`cap_add` beyond the capabilities a service's root holds over its own processes and files, such as `NET_ADMIN`,
+`network_mode: host`, ...); binds of host paths; static addresses, and networks that keep a service from `main`; two
+services that declare one port, since a stack's services share one loopback where they run as a pod; GPU requests (a
+task asks for GPUs with `[environment].gpus`); external volumes and networks; a file whose YAML aliases expand it
+beyond 100,000 values; the private-use characters U+E000 to U+E007 anywhere a task writes (platoon marks the
+variables a session resolves with them); and what compose itself would reject, such as an invalid interpolation, an
+env file it cannot read or a dependency on a service that does not start. A dataset's overlay may edit the services:
+
+```toml
+# overlays/drop-net-admin/overlay.toml
+compose_host_env = ["SCICODE_TEST_DATA"]  # host variables the compose file may name
+[match]
+source_dataset = "cybergym"
+[[compose]]
+service = "main"
+unset = ["cap_add"]                    # dotted for a nested key: "deploy.resources.reservations"
+set = {environment = {MODE = "eval"}}  # merged into the service's mappings; other values replace
+[[compose]]
+service = "task-server"
+replace = {command = ["serve", "--port", "9111"]}  # keys set whole
+```
+
+The lock records the edits with the stack plan, and the overlay's hash with the lock's inputs, as for any overlay.
+An entry may also mark a service `external = "<node service>"`: a service that a node service serves, which platoon
+does not start; and say how a service runs on the host-network fallback (`host_network = {listen = {6379 =
+"KV_PORT"}, token = "KV_TOKEN", bind = "KV_HOST"}`, [Stacks on the host network](#stacks-on-the-host-network)), which
+changes nothing elsewhere.
+
+## Multi-container tasks
+
+*Since 0.5.0.* A task whose compose file names services besides `main` (`flags.stack: sidecars`) runs as a **stack**:
+`main`, the agents' sandbox, and its sidecars, each in a sandbox of its own, started and stopped together. Only a
+provider that declares the `stacks` capability runs stacks: `docker`, each stack a `docker compose` project of its
+own ([below](#stacks-on-docker)); `singularity` and `enroot`, as rootless pods
+([below](#stacks-as-pods-on-singularity-apptainer-and-enroot)); and `process`, for tests and for checking a dataset
+with a policy you trust ([below](#stacks-on-the-process-provider)). Where pods cannot run, `stacks: host_network` runs
+the stacks that a dataset's overlays make safe there on the node's own network, each service a single sandbox
+([below](#stacks-on-the-host-network)). Elsewhere such a task is refused, never started without its services: a
+dataset directory skips it with a warning, and a fetched dataset's stacks stop a run when its tasks are listed, naming
+them. A fetch locks stacks as runnable; where the provider runs none, leave them out of the run (`exclude_tasks`), or
+fetch them refused (`stack`) with `refuse: {sidecars: true}`, as platoon before 0.5.0 did by default:
+
+```yaml
+    service_kwargs:
+      dataset: ./tasks
+      provider: singularity       # runs the stacks as pods (docker: as compose projects)
+      # refuse: {sidecars: true}  # on a provider that runs no stacks: lock them refused
+```
+
+A lock that platoon before 0.5.0 wrote for an entry that sets no `refuse.sidecars` still answers it where it refused no
+task as a stack. Where it did, `platoon prepare`, `platoon train` and `platoon eval` fetch a pinned dataset again (its
+cached tasks are reused), which locks its stacks as runnable, and a rollout worker that finds no lock says which lock
+refused them; `refuse: {sidecars: true}` keeps that lock.
+
+**What each service gets.** `main` is the sandbox a main-only file would give the task ([Compose files](#compose-files)):
+its image, environment, working directory, resources, binds, command and healthchecks, with the harness's toolchain
+and gateway route. Each sidecar gets, as compose gives it:
+
+- its image: a registry reference (`postgres:16`, or pinned by digest) as the image map pins it, the image map's image
+  of its build context (`build:`, planned whole, so that its build key covers every file it copies), or `main`'s image
+  (`${MAIN_IMAGE_NAME}`). `platoon prepare` builds a fetched dataset's sidecar contexts with the provider's builder, as
+  it builds the tasks' own images, and **pins** its registry images ([Prepare a
+  config](#prepare-a-config-once-per-site)): the digest the registry serves for each, and the configuration it gives
+  the image (`ENTRYPOINT`, `CMD`, `ENV`, `WORKDIR`, `USER`, `HEALTHCHECK`, ...), which the sidecar runs with, since
+  platoon gives every runtime a sidecar's whole command, and a pod's runtimes apply none of an image's configuration by
+  themselves; `platoon harbor images pin` does the same. A run whose images or pins the image map lacks stops when its
+  tasks are listed (exit 78, naming `platoon prepare`). A dataset directory has no image map: its registry sidecars run
+  as written, with compose's `command` (and `entrypoint`) alone, in compose's `working_dir` (else `/`), so one whose
+  compose file gives it neither cannot run (an overlay's `[[compose]]` `replace` gives it one), nor can a `build:`
+  sidecar. A dataset directory skips such stacks with a warning, as a fetched dataset's stop a run when its tasks are
+  listed, as do stacks that no rollout could start for another reason (a `service_healthy` dependency on a service
+  without a healthcheck, say), never failing rollout after rollout;
+- its `command` and `entrypoint` over its image's, as compose combines them; its `environment` and `env_file` over its
+  image's and the service's `env`; its `healthcheck`, else its image's;
+- its `volumes`: read-only binds of the task's files from the cache; writable, masked and missing ones as copies that
+  the stack owns, one for every service that binds the same path with the same masks, as compose shares the one host
+  directory (so a sidecar sees what `main` writes there, and the cache is never written); named volumes as one
+  directory for every service that names them, anonymous ones and `tmpfs` as directories of its own, empty when the
+  stack starts. A bind of a log directory (`${HOST_VERIFIER_LOGS_PATH}`, the agent's or the artifacts') is a volume of
+  the stack, one per log directory for the sidecars that bind it: grading copies its regular files (never through a
+  link) into that directory of the sandbox the tests run in, once it made the directory afresh, so the agents can
+  neither erase nor forge what a sidecar records there (a judge's log of the agent's actions, say). A sidecar does not
+  see what `main` writes in its own log directories, so a sidecar's read-only bind of one is refused, as are binds of
+  one path that services would share in Docker and platoon would copy apart (one inside another that a service
+  writes, or with other masks). What the stack owns goes with it, and with a reap of a killed worker's sandboxes;
+- its declared ports (`expose`, `ports`), names (`hostname`, network aliases), shared network (`network_mode:
+  service:<x>`), resources, `shm_size`, `ulimits`, `cap_add` and the user its image runs as (`USER`), which each stack
+  provider applies where its runtime can (`process` applies none).
+
+**Task files that not every user may read.** The copies that a stack owns have the modes a Docker host's checkout has,
+which every user may read, and a sidecar's read-only bind of the task's files that not every user may read binds such a
+copy too, since a sidecar may read them as a user of its own (the official postgres image runs its init scripts as
+`postgres`). A dataset fetched under a umask such as 027, as on many shared clusters, leaves its files so, where a
+checkout under Docker's usual 022 leaves them 0644. Fetching under `umask 022` (before `platoon prepare`, say) lets
+those binds take the cache, which every user who reaches it then reads, without a copy at each stack's start.
+
+**Starting.** Each service starts once its `depends_on` conditions hold: `service_started`, `service_healthy` (its
+healthcheck passed, by Docker's rules, where a duration of 0 is Docker's default) or `service_completed_successfully`
+(an init job, such as a seeder, exited with status 0, within `sandbox_start_budget_s`); services that wait for none
+start at once. The session opens once every service runs, each one with a healthcheck has passed it and each init job
+has completed, as `docker compose up --wait` does, and a last probe, before any agent acts, finds every service up. A
+sidecar that fails, exits, never turns healthy, or is down by that last probe fails the session's start
+(`sidecar_start`, an `error`, with its log's tail), and nothing of the stack is left, also when the start is
+cancelled. A rollout's deadlines count the start along the longest path of the services' dependencies:
+`sandbox_start_budget_s` per service start and per init job's run, each healthcheck's longest wait (compose's, else
+its image's), and three probes, besides the collect hooks below.
+
+**Grading.** In `main` (`shared`), grading kills what the agents left in `main`, runs the task's `[[verifier.collect]]`
+hooks (`main`'s first, each in its service, best effort: a failed one is noted in `collect_failed`), switches the stack
+to the verifier's network (`[verifier].network_mode`), probes every sidecar, copies the sidecars' log directories
+in, runs the tests, and probes again. With a separate verifier, it collects, after the kill, `main`'s hooks and
+artifacts, then the sidecars' hooks and the artifacts that `artifacts[].service` names, each from that service's own
+files (an absolute path there; a path another service's artifact already claims is left out), and the sidecars' log
+directories, with a probe before and after, and the verifier's sandbox gets them all. A probe finds every sidecar up
+(an init job completed, any other running, and healthy where it has a healthcheck), else the outcome is `invalid`
+(`sidecar_unhealthy`: `metadata.sidecar`, its state and the tail of its log), whatever the reward files say, and
+never trains. Where an agent may stop a sidecar on purpose and should own that, `on_sidecar_down: grade` grades
+anyway and notes it (`sidecars_down`). Every stack outcome records its services' run modes and their last probed
+states (`metadata.services`).
+
+**Forks.** A `shared` fork shares the stack and a `fresh` one opens a new one; a `copy` fork is refused, since a
+restore brings back `main`'s files, not its services.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `stacks` | `auto` | `auto` runs a stack on a provider that runs stacks, and refuses it elsewhere; `refuse` refuses every stack; `host_network` runs every stack on the host-network fallback, each service a single sandbox of the provider on the node's network ([below](#stacks-on-the-host-network)) |
+| `network_policy` | `task` | `task` gives each phase the network the task asks for (`network_mode`, `[agent]`'s and `[verifier]`'s); `none` gives every sandbox and stack none, in every phase, for datasets whose answers the web holds (a provider that cannot run a sandbox without a network refuses the tasks then) |
+| `on_sidecar_down` | `invalid` | What a sidecar that is down at grading makes the outcome: `invalid` (`sidecar_unhealthy`), or `grade`, which runs the tests anyway |
+
+### Stacks on Docker
+
+The `docker` provider runs each stack as a `docker compose` project of its own, `platoon-stack-<id>`, whose directory
+below the provider's `stack_root` holds the project's `compose.yaml`, written from the stack's spec, and its volumes.
+The file is JSON, which compose reads as the YAML it also is, so that no value changes its type on the way (YAML reads a
+plain `1e3` or `0o17` as a number). `stack_root` must be a directory of your own: a symlink, or a directory of another
+user's, is refused, since on a node's shared scratch whoever made it could change a project's file before compose reads
+it; and so is a path with a `:`, which ends a bind's source where Docker reads one. Stacks need the CLI's compose plugin
+(`docker compose version`); without it, they are refused when a run lists its tasks. Each service is a container,
+`<project>-<service>`, that compose creates once its dependencies hold, and that runs its command (compose's over its
+image's) as its `entrypoint`, as its image's user; `main` idles, as a single sandbox does. platoon starts the services
+in order, runs their healthchecks in them (`docker exec`) and probes them, as on every provider; the project's file
+leaves dependencies and healthchecks out.
+
+- **Networks.** The services share a network of their own, `<project>-internal`, which is `internal` and gives the
+  host no address on it (`com.docker.network.bridge.inhibit_ipv4`): on it each answers to its name and aliases at the
+  ports it declares, as in compose, and nothing beyond the stack answers, the host's own services included. A daemon
+  before 25.0.5 passes an internal network's DNS queries on to the host's resolvers (CVE-2024-29018), through which a
+  stack could send data out in a phase without egress: platoon warns of one when a run lists its tasks. While the
+  stack has egress, each service is also connected to `<project>-egress`, a bridge network that reaches the web, and
+  disconnected from it for a phase without. A bridge network also reaches the host's own addresses (not its
+  loopback), so keep services that must stay out of the agents' reach, such as an inference engine, on `127.0.0.1`.
+  `main` reaches the model gateway through its socket's directory and a forwarder on `127.0.0.1:18080`, as a
+  container without a network does. Each stack takes a network of Docker's address pools, and one more while it has
+  egress, and the default pools hold about 30, so about 15 stacks with egress at once: a host that runs more needs
+  them widened (`default-address-pools` in Docker's `daemon.json`), and a start that finds none left fails
+  (`sidecar_start`).
+- **Volumes** are directories of the project (a named one shared by every service that names it), made and filled
+  before any service starts, which any user of the services may write; `tmpfs` ones are Docker's. They start empty, as
+  on every provider: Docker fills a new volume with what an image has at its path only where the image declares a
+  `VOLUME` that compose leaves alone (`redis`' `/data`, say), and removes those volumes with the stack.
+- **Privileges.** A `cap_add` of a capability that a rootless service's root holds (Docker's defaults, such as
+  `SYS_CHROOT`, and `SYS_PTRACE` over the service's own processes) applies as written. `privileged`, and a `cap_add` of
+  another (`NET_ADMIN`; `DAC_READ_SEARCH`, with which a root that is the host's, as on a rootful Docker, reads any of
+  the host's files by its handle; ...), are refused when the dataset is fetched, unless the fetch keeps them with
+  `refuse: {privileges: false}`: then such a stack runs on `docker` alone, the one provider with the `privileged`
+  capability, and every other refuses it when a run lists its tasks. Grant them only to datasets you trust with them: a
+  privileged container can take the host.
+- **Teardown.** The containers that carry the stack's label go, with their anonymous volumes, then its networks: what
+  the stack made, and also what a docker command that failed or timed out left the daemon to make. Since the daemon
+  carries out a request whatever becomes of the CLI that sent it, a start that is given up waits for its docker commands
+  rather than kill them, and removes what they made once they are done. Then the project's directory goes, what the
+  services wrote there as root or as another user through a container of `main`'s image that runs `rm` as root, and its
+  record last. A reap by label (a killed worker's,
+  [Sandboxes left by stopped rollouts](#sandboxes-left-by-stopped-rollouts)) removes the stacks whose containers or
+  directories carry the label, with their networks and directories, and a stack whose teardown failed stays registered
+  for that reap.
+
+### Stacks on the process provider
+
+The `process` provider runs each service as a process sandbox on your machine, its command in the background there,
+so it isolates nothing: images, networks, resources, users, capabilities and read-only mounts are not enforced (what
+is written through a read-only bind reaches the task's files), and the services share the host's network. So that
+stacks running at once never take one another's ports, each port a service declares is a port of the host that the
+stack holds for its life: one outside the kernel's ephemeral range (`ip_local_port_range`, which neither a bind to
+port 0 nor an outgoing connection takes), free when the stack starts, and claimed so that no other stack, in any
+process, is given it. The service learns it from its **listen variable**, `PLATOON_PORT_<declared port>`
+(`PLATOON_PORT_6379=21234`), and every reference to a service at a port it declares (`http://kv:6379`, `kv:6379`, its
+name or an alias in any case) in the services' environment values, commands, healthchecks and collect hooks, in
+`[verifier].env` and in the task's MCP servers' URLs becomes `127.0.0.1:<that port>`, as does a service's reference to
+its own port on its loopback (`localhost:6379` in its healthcheck). A service written to run there too listens on
+`${PLATOON_PORT_6379:-6379}` and writes below `${PLATOON_SANDBOX_ROOT:-}`, which real stacks leave unset; a reference
+elsewhere (a literal in a script) is not rewritten. `tests/envs/fixtures/harbor-stacks` has tasks written that way.
+
+### Stacks as pods on Singularity, Apptainer and enroot
+
+The `singularity` and `enroot` providers run each stack as an hpc-sandbox **pod**: a user and network namespace of its
+own, which a small process (the holder) keeps, with each service a container in it (hpc-sandbox's
+[pods](https://github.com/ApGa/hpc-sandbox/blob/main/docs/pods.md)). The services share the pod's one loopback, so
+each reaches the others by name at the ports it declares, as in a compose project, with nothing rewritten, and
+nothing outside the pod reaches them: two stacks of one task on one node, their sidecars on one port, never see each
+other's. Pods need hpc-sandbox 0.5, whose pod services run as your uid or with your subordinate ids and whose pods take
+host aliases and expose ports to the host, and a node that lets unprivileged users nest user namespaces (the pod's,
+each service's inside it, and its runtime's own); with hpc-sandbox 0.4, or on a node that does not nest them, every
+stack is refused when the tasks are listed, naming what is missing. The `hpc` extra installs 0.5.1, with which a sidecar
+that switches users (`subids`, below) also starts where the run's directory or the task's files are on storage that only
+one of your groups opens, and reaches the mount points made for its binds under a umask such as 027, and with which
+`main`, idle while the agents' commands run in it, outlives an agent's `kill -9 -1`, as a single sandbox does; with
+0.5.0, such a sidecar fails to start or to enter those directories, and such a kill ends `main` and makes the attempt an
+`error`. Pods on Apptainer and on enroot are *experimental*: `tests/integration/test_harbor_stacks_hpc.py` is what a
+site runs to check them.
+
+Each service runs in a **run mode**, which outcomes record in `metadata.services`:
+
+| Service | Run mode | It runs as |
+|---|---|---|
+| `main` | `root` | root, which is your uid on the host, as a single sandbox's commands do |
+| A sidecar whose image runs as root (no `USER`), on Singularity or Apptainer, where your user has subordinate ids | `subids` | root that can switch users, as Docker's does: the official database images give their data to a user of their own (`chown`) and switch to it (`gosu`, `su-exec`). What that user writes belongs to your subordinate ids on the host, which hpc-sandbox gives back to you before it deletes the pod |
+| Any other sidecar: its image runs as another user, or enroot runs it (enroot maps one id into a container), or your user has no subordinate ids | `caller` | your own uid, without root, who owns the image's files; the database images skip their switch when they do not start as root |
+
+The first pod of a process that runs a `subids` sidecar maps your subordinate ids (`newuidmap`), which can take tens of
+seconds, or more than a minute, where `/etc/subuid` lists many users; the later pods of the process start without it.
+Each rollout worker is such a process, so its first stack pays it, within that start's budget and while it holds a
+start slot (`train.max_starting_rollouts`). Where the mapping is refused, each such start fails (`sandbox_start`), with
+the tools' message; where your user has no subordinate ids, the sidecars run as `caller`, and the run warns once.
+
+- **The gateway.** `main`'s upstreams, the model gateway's socket among them, are the pod's: the holder relays a port
+  of the pod's loopback (18080, or the next that no service declares) to the socket on the host, so a harness in
+  `main` reaches the gateway at `routes["gateway"]`, with no forwarder in `main` that what the agents run could stop.
+  Every service of the pod reaches that port, as they share one loopback, but a model call needs an agent's key,
+  which only the harness holds.
+- **Network per phase.** A stack has the network its task asks for (`egress`, through slirp4netns, or `none`), and
+  grading in `main` switches it to the verifier's. Egress reaches other hosts, the node's own addresses among them,
+  but never the host's loopback. It needs slirp4netns on `PATH`, else the release that `hpc-sandbox fetch-tools`
+  downloads once, which `platoon prepare` fetches where a stack needs egress and the node has none.
+- **Volumes** are directories in the pod's own directory, in the provider's scratch, made with Docker's modes (0755,
+  a `tmpfs` 1777) and filled before any service starts, so the pod's deletion takes them, with what a `subids` sidecar
+  wrote there. A `tmpfs` is such a directory too, not memory. Grading reads a log directory that a `subids` sidecar
+  binds through that sidecar, as its root, so what its own users keep from yours still reaches the tests; a file
+  grading cannot read makes the outcome an `error` (`verifier_setup`; `artifact_collect` for a separate verifier),
+  never a grade without it.
+- **Images.** A sidecar runs its registry image as `platoon prepare` pinned it, and its build context's image as
+  `platoon prepare` built it with the provider's builder: `oci`, or `def` where the runtime is Apptainer, which has no
+  BuildKit (single-stage Dockerfiles only). enroot runs registry images only: build and push a build context's with
+  `platoon harbor images build CONFIG --builder docker --push REGISTRY/NAME`.
+- **What a pod does not give:** an address per service (two services on one port collide, so a fetch refuses two that
+  declare one, and every connection between services comes from `127.0.0.1`: below), GPUs, a sidecar's image `USER` as
+  its own uid (a `caller` sidecar runs as yours), snapshots (so `copy` forks stay refused), capabilities over the
+  stack's network (`NET_ADMIN`, `NET_RAW`, which a fetch refuses), and other users in `main`, which runs as root of a
+  namespace that maps your uid alone: a command there that gives files to another user fails, such as a `tar` that
+  root runs, which gives the files their archive's owners (uv's installer, which hello-mcp's tests run, fails so). An
+  overlay that installs such a tool in the image when it is built avoids it.
+- **One loopback, so one client address.** Every connection between a pod's services comes from `127.0.0.1`, `main`'s
+  too, where under compose `main` connects from an address of its own network. So a sidecar that trusts loopback, or
+  listens on it alone, is open to what the agents run in `main`: the official postgres image, given a
+  `POSTGRES_PASSWORD`, still lets `127.0.0.1` in without it, as a superuser (its `pg_hba.conf` trusts `127.0.0.1` before
+  it asks other addresses for the password), so the agents can read or change a database that the task means to keep
+  from them. platoon neither refuses nor changes such sidecars: no list of the images that trust loopback would be
+  complete, and a refusal would also refuse tasks whose agents are meant to use the database. A task that keeps a
+  sidecar from its agents must not rely on its loopback rules; for postgres,
+  `POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256` makes a connection from `127.0.0.1` need the password too. An
+  address of its own for each service, which closes this, is a follow-up of hpc-sandbox's pods.
+
+A pod's services stop with it, in milliseconds, and a pod dies with the process that started it; a reap by a run's
+labels stops a live process's pods and sweeps those a dead one left, giving back what other users wrote first.
+
+### Task MCP servers
+
+*Since 0.5.0.* The MCP servers a task offers its agents (`[[environment.mcp_servers]]`, such as hello-mcp's sidecar at
+`http://mcp-server:8000/mcp`) reach them two ways.
+
+**Through the tool plane.** Each `sse` or `streamable-http` server whose `http://` URL names a service of the task's
+stack (by its name, its `hostname` or a network alias; port 80 when the URL names none) serves its tools as env tools,
+after `bash`, `view`, `write` and `edit`. Each is named for the server and the tool, joined by `__`, with an underscore
+in place of every character but an ASCII letter, a digit and an underscore, as model providers' tool names and
+CodeAct's functions need: hello-mcp's `mcp-server` serves `get_secret` as `mcp_server__get_secret`. A name that is not
+all ASCII also ends with the start of its SHA-256, which keeps names in other scripts apart, and a server's name that
+starts with a digit gets an underscore before it (`_2fa__get_code`). The session proxies each call to the server, so
+function harnesses, and CLI harnesses that take the environment's tools over MCP (`[mcp]`), get them like any env tool:
+
+- filtered by the agent's access level: a tool is read-only where its `readOnlyHint` says so, so a `read_only` agent
+  sees only those, and a call of a tool the agent does not see never reaches the server. No task tool is terminal, as
+  MCP has no hint for a tool that ends the episode. The access level shapes the tools a harness is given, not what its
+  agent can reach: commands in `main` share the stack's network (on `process`, the host's loopback), so they can call
+  any tool of a server directly, as they can run anything else there;
+- recorded with the agent's tool calls (`misc.tool_calls` of its trajectory);
+- in their turn with the other tools, one at a time (`concurrent_tools` names generic tools only), so none runs while
+  the task is graded; a call that fails, or gets no answer within `tool_timeout_s`, is an error result;
+- with their text cut as the generic tools' output is (30,000 characters), where every block but an image or audio is
+  text (an embedded resource, a link or a block of a type MCP does not have as its JSON); an answer longer than 16 MiB
+  fails the call unread.
+
+platoon's own client speaks both transports (no `mcp` package enters the rollout workers), with the protocol versions
+the gateway serves (2024-11-05 to 2025-11-25), and sends each request with the server's own URL and `Host`, as `main`
+would, following the server's redirects (307 and 308) within its origin alone, on a connection of its own: a server ends
+a connection that idles longer than its keep-alive (hello-mcp's, on uvicorn, after 5 seconds), and a call sent on one as
+it ends would get no answer. It answers no more than 16 of the server's own requests (`ping`) at once. The session lists
+the tools as it opens, through one session with each server, closed with the stack. A server that cannot be reached,
+does not list its tools within 60 seconds, lists more than 16 MiB of them or a page it listed before, or lists a tool
+that would be served under another's name or under one longer than 64 characters, fails the session's start
+(`sidecar_start`), naming it, so the rollout is an `error` that never trains, whatever its harness does; give a server a
+healthcheck that `main` waits for (`condition: service_healthy`), as hello-mcp does, so that it listens once the stack
+has started. A rollout's deadline counts the listing ([Run it](#4-run-it)). A task that is no stack serves none of its
+servers this way.
+
+This host reaches a stack's service through the stack (`Stack.connect`), which no agent can reach or stop:
+
+| Provider | How this host reaches a service's port |
+|---|---|
+| `process`, and the host-network fallback (`stacks: host_network`) | the port of this host that the stack holds for the service |
+| `docker` | a **relay**: a container per port, in the network of the service that listens there, which serves a Unix socket in the project's directory, which only your uid reaches, whatever the stack's networks, also from a rootless daemon, whose networks this host does not reach. It runs platoon's forwarder with the Python 3 of that service's image, else of `main`'s, as root without capabilities, and goes with the stack; a stack whose images have no Python 3 cannot be reached so |
+| `singularity`, `enroot` | the pod's port, which hpc-sandbox 0.5 exposes as a Unix socket in the pod's directory |
+
+A socket whose path is too long for a socket's address is handed out as a link in a private directory of node scratch.
+
+**Directly, from `main`.** A harness in the task's sandbox may reach the servers itself, as Harbor's agents do:
+`{task_mcp_servers}` renders them in a harness spec, as a JSON list of each server's `name`, `transport` and `url`, as
+`main` reaches it (on the `process` provider and the host-network fallback, the port of the host that the stack holds),
+or, for a `stdio` server, its `command` and `args`, which the harness starts in its own sandbox
+([Placeholders](../tutorials/cli-harness.md#placeholders)). A harness that runs locally gets `[]`: it reaches only the
+servers that the plane serves, through the env's tools, and no `stdio` server, server outside the stack, or server of
+a task that is no stack. `stdio` servers are never proxied, since that would take a streaming exec that no provider
+has.
+
+### Stacks on the host network
+
+*Since 0.5.0.* Pods need hpc-sandbox 0.5 and a node that lets unprivileged users nest user namespaces. Where a site's
+nodes give neither, `stacks: host_network` runs a fetched dataset's stacks on the **host-network fallback**: each
+service a single sandbox of the provider (`singularity`, `enroot`, or `process`) on the node's own network, as the
+`process` provider runs its stacks ([above](#stacks-on-the-process-provider)): each port a service declares is a port of
+the node that its stack holds for its life, which the service learns from its listen variables, and every reference to
+a service at a port it declares, in the services' environment values, commands and healthchecks, in `[verifier].env`,
+in the task's MCP servers' URLs and in collect hooks, becomes `127.0.0.1:<that port>`, as does a service's own
+`localhost:<port>`. On the node's network every process of the node reaches a service's port, other rollouts' agents
+among them, and other hosts reach one that listens on more than the loopback. So nothing chooses the fallback by itself,
+and a dataset's overlays say, service by service, how each one runs there safely (`host_network` in a `[[compose]]`
+entry):
+
+```yaml
+    service_kwargs:
+      dataset: ./tasks
+      overlays: [overlays/host-network]
+      provider: singularity
+      stacks: host_network  # each service a single sandbox on the node's network
+```
+
+```toml
+# overlays/host-network/overlay.toml
+[match]
+name = "app-kv-*"
+[[compose]]
+service = "kv"
+host_network = { listen = { 6379 = "KV_PORT" }, token = "KV_TOKEN", bind = "KV_HOST" }
+```
+
+- `listen`: for each port the service declares, the variable that sets the port it listens on, which the fallback sets
+  to the port its stack holds (besides `PLATOON_PORT_<port>`). Every declared TCP port needs one, `main`'s too; a UDP
+  port is refused, since the fallback gives it no port of its own.
+- `token`: the variable through which the service takes the stack's **token**, a secret that each stack draws anew and
+  gives, in every token variable an overlay names, to each of its services, `main` and the tests that run there
+  included, and to nothing else. Every sidecar that declares ports needs one (an init job without ports does not), and
+  must refuse a request without it, which the overlay arranges, often by replacing the service's command
+  (`replace = {command = [...]}` in the same entry, as below). That is the overlay's promise: nothing checks it.
+- `bind`: the variable that sets the address the service listens on, which the fallback sets to `127.0.0.1`. However a
+  service learns it, the fallback checks what listens at each port a service declares, `main`'s too: a listener on
+  another address (`0.0.0.0`, the node's own), where other hosts reach it, or one that another user's process holds
+  (it bound the port first, and would get what the stack sends there, the token included), makes the service
+  unhealthy, so its stack does not start (`sidecar_start`), and a sidecar's probe at grading makes the outcome
+  `invalid`. Nothing tells a process of your own uid from the service, another rollout's agent included, which could
+  take a port in the moment before its service binds it; nor is a port that a service listens at without declaring it
+  looked at.
+
+A token goes to a service through its environment or a file, never on a command line, where every user of the node
+reads it (`ps`, `/proc`): a config the command writes from the variable, or reads from its standard input, as redis
+does below; `REDISCLI_AUTH` for a `redis-cli` healthcheck; a database's password variable. A fetch interpolates the
+compose file before any stack exists, so a command names a rule's variable as `$$NAME` (or `$${NAME:-default}`), which
+reaches the service's shell as `$NAME`; written `$CACHE_TOKEN` or `${CACHE_PORT:-6379}` in a command, an entrypoint, an
+environment value or a healthcheck of a service that the fallback gives it (the token to every service, a port or an
+address to the rule's own), it would be planned blank, or as its default, and the fetch refuses the overlay. An
+environment value is not expanded as the service runs, so a command makes a value that needs one. Another service gets a
+port or an address as compose gets it: `main`'s `http://cache:${CACHE_PORT:-6379}` is `http://cache:6379`, which the
+fallback rewrites.
+
+```toml
+[[compose]]
+service = "cache"
+# Elsewhere the variables are unset: no password, port 6379 on every address of the stack's own network.
+replace = {command = ["sh", "-c", """{ [ -z "$$CACHE_TOKEN" ] || printf 'requirepass %s\\n' "$$CACHE_TOKEN"; \
+printf 'port %s\\nbind %s\\n' "$${CACHE_PORT:-6379}" "$${CACHE_HOST:-0.0.0.0}"; } | redis-server -"""]}
+host_network = { listen = { 6379 = "CACHE_PORT" }, token = "CACHE_TOKEN", bind = "CACHE_HOST" }
+```
+
+The fallback alone sets these variables: on every other stack provider they are unset, so one lock serves them all, and
+a service written to take them, or an overlay's command such as the one above, runs elsewhere as it would without them
+(`tests/envs/fixtures/harbor-host-network` has such a task and its overlay).
+
+**What the fallback refuses**, when a run lists its tasks (exit 78) and when a session opens, as `env_config`:
+
+- a sidecar with ports that no overlay authenticates (no `token`), a declared TCP port without a `listen` rule, and a
+  UDP port; a dataset directory has no overlays, so it skips every stack with a warning that says to fetch it with
+  one. A fetch refuses an overlay whose rules name one variable for two things, or that the compose file interpolates
+  where the fallback sets it (write `$$NAME` in a command);
+- a task that names its services where the fallback cannot rewrite them. A fetch scans each stack for references to
+  its services, a name or an alias with a port or a scheme (`kv:6379`, `http://kv`) or a loopback address at a port a
+  service declares: in the task's files but for the compose file (`instruction.md`, `tests/`, `solution/`,
+  `environment/`), in what nothing rewrites (`main`'s compose command, `[environment.healthcheck]`), and where the
+  fallback rewrites, those it cannot (`http://kv` without a port, a port the service does not declare). It reads text
+  files only (one with a NUL byte in its first 8 KiB is binary), and in them a name with a port but no scheme only at
+  a port the service declares (`kv:6379`, not `kv:1`). The lock records what it found
+  (`compose.unrewritable_references`), and an overlay edits those files (`[[edit]]`) to read the address from a
+  variable that is rewritten;
+- a task MCP server that is a sidecar (`url = "http://tools:8000/mcp"`): an MCP client sends no token, the tool
+  plane's no more than a harness's, since a task's MCP server has no headers yet, so the sidecar would answer every
+  process of the node. One in `main`, at a port `main` declares, is at its rewritten URL, and the tool plane serves its
+  tools ([Task MCP servers](#task-mcp-servers)) through the port its stack holds;
+- a stack without a network in a phase (`no-network`, internal networks only, `network_policy: none`): its services
+  have the node's network, which the fallback cannot take away;
+- a provider whose sandboxes run other users (`singularity` with `fakeroot`; `docker`, which runs stacks as compose
+  projects anyway), since what those users would write in the stack's volumes, directories of yours on the node, your
+  uid could not delete.
+
+The scan does not catch a service named without a port or a scheme (`pg_isready -h postgres`, `DB_HOST=postgres`), nor
+a port written apart from its host (`-p 5432`, `--port 8080`): those reach nothing, or something else, on the node's
+network, which a dataset's oracle check shows; an overlay passes them through variables as above. Each service runs as
+the provider runs a single sandbox's commands, as your own uid (`run_as: caller`), with the provider's options, and, as
+on the `process` provider, without what only a pod or a compose project gives a service (`shm_size`, `ulimits`,
+`cap_add`); a stack's volumes are directories below the fallback's own (`platoon-stacks-<uid>` in node scratch, a
+directory of yours alone: made 0700, and refused when it is a symlink or another user's). A stack's stop deletes its
+directory, and so does the worker supervisor's cleanup for a worker it saw killed; a run killed as a whole leaves them
+in node scratch, which a reap by the run's labels does not look in (a batch job's own scratch goes with the job). The
+fallback runs no pod, so hpc-sandbox 0.4 runs it.
+
+## Users in task sandboxes
+
+*Since 0.5.0.* Harbor runs each phase of a task as the user the task names, as Docker does: the agents' commands (a
+harness, the env tools, the reference solution) as `[agent].user`, else as the image's `USER`, else as root, and the
+tests as `[verifier].user`, else as the image's `USER`, else as root. A rootless sandbox runs every process as you, so
+platoon refuses a task that names a user by default (`agent_user: refuse`), and `ignore` runs it as the sandbox's own
+user, whatever that changes. `honor` runs each phase as Harbor does, in sandboxes that give root and other users:
+
+```yaml
+environments:
+  - name: as-their-users
+    service: harbor
+    service_kwargs:
+      dataset: hf://my-org/my-harbor-dataset@<revision>
+      refuse: {agent_user: false}       # fetch the tasks that name users, or whose Dockerfile ends with USER
+      agent_user: honor                 # each phase as its user, as Harbor runs it
+      provider: singularity
+      provider_options: {allow_network_none: true, rootfs_layout: copy, fakeroot: true}
+```
+
+- **Who runs what.** With `agent_user: honor`, and `verifier_user` unset or `honor`, the agents' commands run as
+  `[agent].user`, else the image's `USER`, else root; the tests run as `[verifier].user`, else the image's `USER`,
+  else root; a `[[verifier.collect]]` hook runs as its own `user`; and platoon's own commands (the sandbox's setup,
+  the kills before grading, reading the reward files) run as root. A user takes any of Docker's `--user` forms: a name
+  the image's `/etc/passwd` lists or a uid, either with a group's name or a gid. An outcome records the users its
+  task names (`users`; `null` for a phase that ran as the image's `USER`, else root). `verifier_user: honor` alone
+  honors `[verifier].user` only, any user ([below](#verifiers-that-run-as-root) for root), and a verifier that names
+  none grades as before.
+- **Where users run.** A sandbox that runs a phase as its user must give root and other users:
+
+  | Provider | Users | How |
+  |---|---|---|
+  | `singularity` | With `fakeroot: true` on the copy layout, with hpc-sandbox 0.4 (0.5 for an image that gives files to users other than root, below) | Root of a user namespace that maps your subordinate ids; platoon switches each command to its user with the image's `setpriv` (util-linux), else its `su`, else a Python's standard library (the image's, or a harness toolchain's), and sets `HOME`, `USER` and `LOGNAME` from the image's `/etc/passwd`. A session whose image has none of them fails to start (`env_config`) |
+  | `docker` | Yes | `docker exec --user`; the sandbox's own commands run as root, whatever the image's `USER` |
+  | `enroot`, `process` | No | Refused: they run every command as your own uid |
+  | stacks | No, for now | Refused when they load, where users run in the stack itself: under `agent_user: honor` every stack, whose agents would run as `main`'s `USER`, and a stack graded in `main` that names a `[verifier].user`, or whose collect hook names a user. Docker's compose projects and the pods honor users in a later release; a separate verifier's sandbox runs its user already |
+
+  `platoon train`, `eval` and `rollout` refuse, when they list their tasks (exit 78), those whose sandboxes cannot
+  give their users, and a session refuses one before its agent runs; a user that the image lacks fails the session's
+  start (`env_config`).
+- **As Docker gives it.** In a sandbox that honors users, platoon's commands and the users' run with Docker's umask
+  (022); `/logs/agent` and `/logs/artifacts` are every user's (777, as Harbor makes them); what platoon uploads for
+  the agents (a harness's files, the reference solution) is theirs, and the files of a deferred `COPY` keep the host's
+  modes, with every user given the read and search access that their group has, as a checkout under Docker's umask
+  gives it (a file of mode 600 stays so), where a deferred `COPY --chown` gives its owner what it copies and the
+  directories it makes, as BuildKit does. A deferred `WORKDIR` gives the directories it makes to the `USER` in effect
+  there (the image's own before a deferred `USER`), as BuildKit does, while a directory the image has keeps its owner;
+  a sandbox whose image defers such a `WORKDIR` starts in `/`, so that its start makes no working directory as root,
+  and its commands run in the working directory. Tests that run as a user other than root get `/tests` as theirs and
+  `/logs/verifier` every user's (777); tests that run as root get both as root's, `/tests` with the host's modes, as
+  Harbor copies it, so that the agent's code they run as another user can neither read a test file the host keeps
+  from it nor write a reward. Harness toolchains are staged readable by every user. The `edit` tool reads a file
+  through the sandbox's shell, as the agents do, so it cannot read a file they may not, not even to count what it
+  holds; it refuses at once what is not a regular file (a FIFO, a device), and gives up on a read after
+  `tool_timeout_s`.
+- **An image's file owners.** Docker gives an image's files the owners its layers give them. hpc-sandbox extracts every
+  image as you, and Singularity's conversion of a registry image records every file as root's, so a user that the image
+  gives a directory (its home, a workdir its Dockerfile `chown`s to it) would find it root's. An image's **owner
+  manifest** lists what its layers give users other than root, and `platoon prepare` records it in the image map: the
+  `oci` builder lists its layer's owners before it unpacks it, and a task's `docker_image` becomes a *pulled* entry, the
+  image pinned by digest with its `USER` and the owners its registry's layers give, which the sessions run. hpc-sandbox
+  0.5 applies a manifest in a `fakeroot` sandbox before anything runs there; with an older one, such as the 0.4.0 that
+  platoon 0.4 installs, a task whose image gives files to users other than root is refused when it is listed, naming
+  0.5. The image map's record also tells the image's `USER`, which a sandbox there cannot read. So a run refuses a task
+  whose sandbox runs a user other than root, or anything as its image's `USER` (the agents' sandbox under `agent_user:
+  honor`, tests whose `[verifier].user` is unset), where the image map records no manifest: a `docker_image` that
+  `platoon prepare` has not recorded (exit 78, naming it), an image that platoon before 0.5, the `def` builder
+  (Apptainer's), or the `oci` builder with a squashfs-tools before 4.4 built (build it again where `unsquashfs` is 4.4
+  or later, `platoon harbor images build CONFIG --key KEY`), a local image file, and a dataset directory's task, which
+  has no image map (serve the directory as a `dataset` to fetch). A sandbox in which only root runs, as the task names
+  it (a root verifier), needs none, as root verifiers ran before. Docker keeps its images' owners itself, and runs an
+  image's `USER` itself.
+- **Forks.** A `copy` fork of a sandbox that honors users is refused on Singularity, whose snapshots keep no owners;
+  on Docker it runs as its users too.
+- **The cost.** `fakeroot` needs the copy layout, a start of 2 s alone and 24-30 s with 64 at once
+  ([above](#the-singularity-providers-root-filesystem)); `rootfs_templates: true` copies a node's template of the
+  image instead of extracting it. So `honor` is a choice per dataset.
+
+### Verifiers that run as root
 
 *Since 0.3.0.* Some Harbor tasks grade as root: `task.toml` says `[verifier] user = "root"`, and the tests
 run the agent's code as another user, `nobody` (65534) as a rule, so that it cannot read the files the grader keeps
@@ -649,15 +1362,16 @@ environments:
       verifier_provider_options: {rootfs_layout: copy, fakeroot: true}           # every separate verifier's sandbox
 ```
 
-On Singularity this needs an hpc-sandbox whose provider takes `fakeroot` (below): 0.4, which the `hpc` extra
-installs. With an older one, such as 0.3.0, a run with this config stops when it lists its tasks, with a message
+On Singularity this needs an hpc-sandbox whose provider takes `fakeroot` (below): 0.4 or later (the `hpc` extra
+installs 0.5.1). With an older one, such as 0.3.0, a run with this config stops when it lists its tasks, with a message
 that says what is missing.
 
 - **What `honor` takes.** A `[verifier].user` of root (`root`, `0`, `0:0` or `root:root`) in a task with a
-  [separate verifier](#a-separate-verifier). Any other user is refused, and so is a root verifier of a task graded in
-  its agents' own sandbox, whose agents would then run as root too: set `verifier_user: ignore` for them, or leave
-  them out (`exclude_tasks`). `agent_user` still decides for `[agent].user`, and without `verifier_user` it decides
-  for both users, as before.
+  [separate verifier](#a-separate-verifier), and since 0.5.0 any other user too. A root verifier of a task graded in
+  its agents' own sandbox is refused, whose agents would then run as root too, unless `agent_user: honor` runs them as
+  their user ([above](#users-in-task-sandboxes)): set `verifier_user: ignore` for the others, or leave them out
+  (`exclude_tasks`). `agent_user` still decides for `[agent].user`, and without `verifier_user` it decides for both
+  users.
 - **A fetched dataset.** The fetch's `refuse.agent_user`, on by default, leaves out every task that sets
   `[agent].user` or `[verifier].user`, before `honor` sees it: set `refuse: {agent_user: false}`, as above, and
   `agent_user: ignore` for the tasks that also set `[agent].user`. With `honor`, a run that lists its tasks warns of the
@@ -689,12 +1403,16 @@ that says what is missing.
   umask, 022, rather than the host's (often 027 on shared machines), so what the tests write as root is readable by
   the users they switch to. What platoon makes there gets Docker's modes (755): `/logs` and its directories, and the
   image's deferred `WORKDIR` directories. A working directory that the image lacks is made when the sandbox starts:
-  hpc-sandbox 0.4 makes it, and its missing parents, with these modes too, as Docker does. A directory the image has
-  keeps its mode, as in Docker: a workdir such as `/root`, which images keep to root (700), keeps the files the tests
-  write there from the users they switch to. The artifacts are made readable by every user (`chmod -R a+rX`), as an
-  agent's files are under Docker's umask, and the outcome's metadata records `verifier_user: root`. Files that platoon
-  uploads otherwise keep their modes from the host: `tests/`, when the verifier's image does not hold it, and the
-  files of an image's deferred `COPY` steps, with the directories that the upload makes for them.
+  hpc-sandbox 0.4 makes it, and its missing parents, with these modes too, as Docker does; where a deferred `WORKDIR`
+  follows a `USER`, platoon makes them after the sandbox starts, and gives them to that user, as BuildKit does. A
+  directory the image has keeps its mode, as in Docker: a workdir such as `/root`, which images keep to root (700),
+  keeps the files the tests write there from the users they switch to. The artifacts are made readable by every user
+  (`chmod -R a+rX`), as an agent's files are under Docker's umask, and the outcome's metadata records `verifier_user:
+  root`. `tests/`, when the verifier's image does not hold it, keeps its modes from the host, as Harbor's copy keeps
+  them, and `/logs/verifier` stays root's (755), so that the agent's code the tests run as another user can neither
+  read a test file the host keeps from it nor write a reward. Since 0.5.0, the files of an image's deferred `COPY`
+  steps keep the host's modes with every user given the read and search access that their group has, as a checkout
+  under Docker's umask gives it (a file of mode 600 stays so).
 - **Images the other users can run.** The users the tests switch to must be able to read and run the image's
   programs. The `oci` builder of platoon before 0.3.0 unpacked the images it built under the host's umask, so that on
   a host whose umask withholds those bits (such as 027) their files keep other users out. Its receipts in the image
@@ -870,8 +1588,10 @@ a NUL byte among its first 8000 bytes, compares by its bytes.
 A task's input files are what its agents' sandbox takes from the task: the files of `environment/` that its
 Dockerfile's `COPY` and `ADD` steps take, whether a build bakes them into the image or a session uploads them
 ([Build task images](#build-task-images)), or the whole `environment/` of a task with a prebuilt image and no
-Dockerfile. A file that no step takes, the `Dockerfile` itself, the tests and the solution are not inputs, and an
-empty file (or one of blank lines) joins nothing. A fetch records each task's input files in the lock
+Dockerfile, and the task's files that a main-only compose file binds into its sandbox, but for what its volumes mask
+([Compose files](#compose-files)). A file that no step takes, the `Dockerfile` and the compose file, `task.toml` and
+`instruction.md`, the tests and the solution are not inputs, bound or not, and an empty file (or one of blank lines)
+joins nothing. A fetch records each task's input files in the lock
 (`input_files`), and a `dataset_dir`'s are hashed when its tasks are listed. A refused task's files join groups too,
 so that a refusal never moves one.
 
@@ -979,11 +1699,28 @@ path). A toolchain is a directory `<root>/<name>/` with a `manifest.json`:
 
 Before a rollout uses a toolchain, platoon copies it to node-local disk, once per node and toolchain version:
 into a temporary directory under a file lock, checked against the tree hash, then renamed into place. Concurrent
-rollouts copy it once, and none sees a partial copy; the next copy to take the lock removes what a killed copy left
-half done. Copies go to `$PLATOON_TOOLCHAIN_CACHE`, else to `platoon-toolchains-<uid>` in node-local scratch: the
-first of `$PLATOON_NODE_SCRATCH`, `$PBS_LOCALDIR`, `$SLURM_TMPDIR` and `$TMPDIR` that is set, else `/tmp`, where the
-Harbor service also keeps its per-node checks. A toolchain holds tens of thousands of files and about 800 MB, so
-where none of these is node-local disk with room for it, set `$PLATOON_NODE_SCRATCH` or `$PLATOON_TOOLCHAIN_CACHE`.
+rollouts, of one run or of several, copy it once, and none sees a partial copy; the next copy to take the lock removes
+what a killed copy left half done. `platoon train` stages the toolchains of its environments' harnesses before its
+first rollout, while it opens the training service and saves at launch, and `platoon eval` while it lists its tasks,
+so that no rollout waits for the copy, and the first ones only for what of it outlasts the trainer's own start-up
+([Rollouts are slow to start](troubleshooting.md#rollouts-are-slow-to-start)): each rollout's own staging then finds
+it current and returns at once. Copies go to `$PLATOON_TOOLCHAIN_CACHE`, else
+to `platoon-toolchains-<uid>` in node-local scratch: the first of `$PLATOON_NODE_SCRATCH`, `$PBS_LOCALDIR`,
+`$SLURM_TMPDIR` and `$TMPDIR` that is set, else `/tmp`, where the Harbor service also keeps its per-node checks. A
+toolchain holds tens of thousands of files and about 800 MB, so where none of these is node-local disk with room for
+it, set `$PLATOON_NODE_SCRATCH` or `$PLATOON_TOOLCHAIN_CACHE`.
+
+A copy in the job's scratch goes with the job, so every start and every resume in a new job copies the toolchain
+again. To keep it across jobs, set `$PLATOON_TOOLCHAIN_CACHE` to a node-local directory that outlives them. The next
+job on the node keeps the copy when its version and files still match: the copy's name carries the manifest's tree
+hash, and the first staging of each job (each boot and scheduler job, `$PBS_JOBID`, `$SLURM_JOB_ID`, `$LSB_JOBID` or
+`$JOB_ID`) hashes the copy again and compares it with the manifest's tree hash, under the lock, which takes seconds
+instead of the copy's minute. A stamp beside the copy (`.<copy>.staged`) records the jobs that checked it, so that
+jobs sharing the node and the copy check it once each. A copy that no longer matches, because a node's cleanup removed
+some of its files, is copied again beside it, and the fresh copy takes its place; the old one is set aside whole
+(`.<copy>.<hex>.stale`), since rollouts of another job may still run from it, and a warning names it. A cache platoon
+cannot write to (read-only, another user's, a full disk) cannot record a check: a kept copy there is used as it is,
+with a warning. Old versions and set-aside copies stay until you delete them, while no job uses them.
 A run never builds a toolchain: `platoon prepare` does, or `platoon toolchain build`, once per site ([OpenHands in
 task sandboxes](#1-build-the-toolchain)). Before any rollout, `platoon train`, `eval` and `rollout` refuse (exit 78) a
 config whose spec's named toolchain is not built under the root the run uses, naming the `platoon prepare` command
@@ -1236,9 +1973,9 @@ id>`, and keeps a file next to its other worker files that says how to reap them
   sandbox from then on, lets its sessions' teardowns run, and then stops whatever sandbox its rollout still holds.
 - **A worker that is killed** (SIGKILL, its hard-timeout alarm, its memory limit), or that ran out of time while
   stopping, leaves its sandboxes behind. Its supervisor reaps them by the worker's label as soon as the worker is
-  gone: hpc-sandbox's janitor stops the sessions whose owner process is gone, Docker removes the labelled containers
-  (and snapshot images), and the `process` provider kills the labelled sandboxes' commands and deletes their
-  directories.
+  gone: hpc-sandbox's janitor stops the sessions whose owner process is gone, Docker removes the labelled stacks (their
+  compose projects, networks and directories), then the labelled containers with their anonymous volumes (and snapshot
+  images), and the `process` provider kills the labelled sandboxes' commands and deletes their directories.
 
 `platoon eval` with `use_subprocesses: true` does the same for its worker processes. Each labels its sandboxes with
 `platoon.worker: eval-<id>` and lists how to reap them in a private file.
@@ -1294,12 +2031,18 @@ dataset skips such a task with a warning; naming it directly (as a task id, in a
 
 | Task | Why |
 |---|---|
-| A multi-container environment: `environment/docker-compose.yaml` (or `.yml`, `compose.yaml`, `compose.yml`) with sidecar services | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. A compose file that only names `main`, with no keys (`services: {main: {}}`), is one container and runs |
-| A separate verifier built from `tests/docker-compose.yaml`, `[[verifier.collect]]` hooks, or artifacts of another compose service | They need multi-container stacks |
-| `[agent].user` or `[verifier].user`, unless the service sets `agent_user: ignore` (or, for `[verifier].user`, `verifier_user: ignore` or `honor`) | Rootless sandboxes run every process as one user |
-| With `verifier_user: honor`: a `[verifier].user` other than root, or a root one of a task graded in its agents' own sandbox (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | platoon runs a verifier as root or as the sandbox's own user, and only in a separate verifier's sandbox, whose agents do not run as root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
-| With `verifier_user: honor`: a root verifier on verifier sandboxes that cannot give root, such as `singularity` without `fakeroot`, `enroot` or `process` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | The tests could not run the agent's code as another user, and would score every attempt 0 |
-| With `verifier_user: honor`: a fetched dataset's root verifier on an image that the `oci` builder of platoon before 0.3.0 built (when the tasks are listed, with exit 78; `platoon prepare` fails too) | On a host whose umask is 027, its files keep out the users the tests switch to. Build the image again (`platoon harbor images build CONFIG --key KEY`) |
+| A multi-container environment (`environment/docker-compose.yaml` with sidecar services) on a provider that runs no stacks (`singularity` and `enroot` with an hpc-sandbox older than 0.5, or on a node that does not nest user namespaces), or with `stacks: refuse` (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. Where a provider runs stacks, they run ([Multi-container tasks](#multi-container-tasks)); a compose file that names only `main` runs as one sandbox on every provider ([Compose files](#compose-files)); the other compose names (`compose.yaml`, ...) are plain files, as in Harbor |
+| A multi-container environment under `stacks: host_network` that the host-network fallback cannot run: a sidecar with ports that no overlay authenticates, a declared TCP port without a listen rule, a UDP port, a reference to a service that the fallback cannot rewrite, a task MCP server that is a sidecar, a phase without a network, or a provider whose sandboxes run other users (when the tasks are listed, exit 78, and when a session opens; a dataset directory skips every stack) | On the node's network every process of the node reaches a service's port, and a name that is not rewritten reaches nothing, or something else: the fallback runs only what a dataset's overlays make safe there ([Stacks on the host network](#stacks-on-the-host-network)) |
+| A stack with a service that a node service serves (an overlay's `external`), whose services depend on one another in a cycle, with a sidecar's read-only bind of a log directory, or with binds of one path of the task that services would share in Docker and platoon would copy apart (when the task loads) | platoon runs no node services yet, compose refuses a cycle, a sidecar does not see `main`'s log directories, and the services must see one another's writes as in Docker |
+| A stack that no rollout could start: a dataset directory's sidecar of a registry image that its compose file gives no command, or that builds from a context; a fetched dataset's sidecar whose built image or pin the image map lacks; a `service_healthy` dependency on a service without a healthcheck (a dataset directory's when the task loads, for the first two; a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, naming `platoon prepare` for what it makes) | A registry image's own command is what `platoon prepare` pins, and a sidecar's build context what it builds, in a fetched dataset's image map, which a dataset directory has none of ([Multi-container tasks](#multi-container-tasks)) |
+| A fetched stack whose services ask for privileges (`refuse: {privileges: false}` kept them) on a provider other than `docker` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | Only Docker gives a service every privilege, or a capability such as `NET_ADMIN` over its stack's network ([Stacks on Docker](#stacks-on-docker)) |
+| A compose file outside the subset platoon runs (when the dataset is fetched, as `compose`; `privileged` and a `cap_add` of `NET_ADMIN` included, unless the fetch keeps them for Docker), or one that gives `main` what platoon cannot apply to it yet, such as `cap_add`, `privileged` or `shm_size` in a main-only file (when the task loads) | platoon runs a compose file as written or not at all ([Compose files](#compose-files)): a dataset's overlay may drop or replace what it refuses |
+| A separate verifier built from `tests/docker-compose.yaml`; `[[verifier.collect]]` hooks or artifacts of a service the task does not start | A verifier that is itself a stack is not supported; the others name nothing that runs |
+| `[agent].user` or `[verifier].user` (or a `[[verifier.collect]]` hook's `user`), unless the service sets `agent_user` (for `[verifier].user`, `verifier_user`) to `ignore` or `honor` | A rootless sandbox runs every process as you, unless it gives root and other users ([Users in task sandboxes](#users-in-task-sandboxes)) |
+| With `honor`: a multi-container stack in which users would run (under `agent_user: honor` every stack; with `verifier_user: honor`, one graded in `main` that names a `[verifier].user`, or whose collect hook names a user), or a root verifier of a task graded in its agents' own sandbox whose agents are not honored (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | A stack's `main` runs no command as a user that the task names yet, as a compose project or as a pod; a root verifier's agents would run as root too ([Verifiers that run as root](#verifiers-that-run-as-root)) |
+| With `honor`: a task whose agents' sandbox, or separate verifier's, runs its users where the provider's options cannot give root and other users, such as `singularity` without `fakeroot` or on fuse-overlay, `enroot` or `process` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | Its commands could not run as their users, and tests that run the agent's code as another user would score every attempt 0 |
+| With `honor` on Singularity: a task whose sandbox runs a user other than root, or anything as its image's `USER`, on an image whose owner manifest the image map lacks (a dataset directory's task, or a local image file, among them), or, with an hpc-sandbox before 0.5, on any image that gives files to users other than root (when the tasks are listed, with exit 78) | Those users would find root's files where Docker gives them their own, and the image's `USER` is known from that record alone: `platoon prepare` records the manifests, and hpc-sandbox 0.5 applies them ([Users in task sandboxes](#users-in-task-sandboxes)) |
+| With `honor`: a fetched dataset's task whose sandbox honors users on an image that the `oci` builder of platoon before 0.3.0 built (when the tasks are listed, with exit 78; `platoon prepare` fails too) | On a host whose umask is 027, its files keep out the users other than root. Build the image again (`platoon harbor images build CONFIG --key KEY`) |
 | `gpus` above 0 on a provider that cannot give a sandbox GPUs (when the session opens) | The tests would fail for want of a GPU and score 0 |
 | `network_mode = "no-network"`, for the agents or a separate verifier, on `singularity` without `allow_network_none: true`, or on `enroot` with `allow_network_none: false` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | hpc-sandbox would refuse every such sandbox, so every rollout of the task would fail at sandbox start and the task would never train. Set `allow_network_none: true` where the site lets users create network namespaces (enroot needs no such permission: drop `allow_network_none: false` from its options), or leave the tasks out (`exclude_tasks`) |
 | Any task, on `singularity` with a `rootfs_layout` that cannot run (an unknown name; any name, `copy` included, with an hpc-sandbox that has no layouts; `fuse-overlay` without `fuse-overlayfs` or `fusermount3` on `PATH`, or with `gpu`, `cgroup_limits` or `fakeroot`), or with `fakeroot` on an hpc-sandbox that does not take it, when the tasks are listed; `verifier_provider_options` are checked the same way for tasks with a separate verifier | Every sandbox start would fail. Fix the option or the `PATH`, or leave `rootfs_layout` out |
@@ -1310,8 +2053,8 @@ The warning names the reason:
 
 ```text
 WARNING | platoon.envs.harbor.dataset | Skipping Harbor task .../tasks/needs-a-database: .../tasks/needs-a-database:
-environment/docker-compose.yaml makes the environment a multi-container stack (sidecar services), which platoon
-cannot run yet (RFC 0010); the task is refused, never started without them
+environment/docker-compose.yaml makes the environment a multi-container stack (sidecar services), and the singularity
+provider runs no multi-container stacks; the task is refused, never started without them
 ```
 
 Some task settings are read but not enforced: an allowlist network runs with the host network, and `storage_mb`
@@ -1322,11 +2065,13 @@ an absolute path, is used as written; any other reference without a scheme gets 
 ## What comes next
 
 [RFC 0010](../rfcs/0010-harbor-registry-and-multi-container-tasks.md) is the design behind this page. What it proposes
-beyond what is described here: fetching datasets from the Harbor registry (`harbor://`) and from git repositories, and
-running multi-container tasks, through `docker compose` where Docker exists and as rootless pods on Singularity,
-Apptainer and enroot. Until then, multi-container tasks stay refused. The [RFC index](../rfcs/README.md) lists every
-proposal and explains how one moves from draft to implemented; comment on the RFC, or open a new one, to shape what gets
-built.
+beyond what is described here: stacks whose services run as the users a task names. Until then, multi-container tasks
+run as `docker compose` projects, as rootless pods on Singularity, Apptainer and enroot, on the node's network where
+pods cannot run (`stacks: host_network`), and on the `process` provider, with their MCP servers served through the tool
+plane ([Multi-container tasks](#multi-container-tasks)), main-only compose files on every
+provider ([Compose files](#compose-files)), and a task's users in single sandboxes ([Users in task
+sandboxes](#users-in-task-sandboxes)). The [RFC index](../rfcs/README.md) lists every proposal and explains how one
+moves from draft to implemented; comment on the RFC, or open a new one, to shape what gets built.
 
 ## Next steps
 

@@ -20,9 +20,37 @@ asked for, and is the trainer waiting on them?*
 ``rollout_client/rollouts_in_flight_configured``
     The ceiling implied by config: ``max_concurrent_rollouts``, the budget of
     rollouts each group takes its size of, or the groups of the largest entry's
-    size that run at once within it, when they hold fewer.
+    size that run at once within it, when they hold fewer; with
+    ``train.permit_release: rollout``, whose rollouts return their permits as
+    they end, the budget itself, so ``concurrency_achieved_fraction`` reads as
+    the permits' busy share.  The trainer warns once per start when
+    ``rollouts_in_flight_max`` exceeds the budget: a workflow returned a
+    permit while its rollout still ran.  Only ``GroupRolloutWorkflow``'s
+    members count as rollouts in flight (and an evaluation workflow's, when it
+    logs in the ``train`` scope).
 ``rollout_client/groups_in_flight_mean`` / ``_max``
     The same at task granularity, so a group-atomic admission gate is visible.
+``rollout_client/startup_gate_waiting_mean``
+    Time-weighted mean of the groups waiting for a worker-startup slot
+    (``worker_launch_concurrent_groups``, process isolation only), each holding
+    the rollout permits it was granted meanwhile; logged once a group has
+    reached the gate.  Above 0 for long, with ``permits_held_mean`` well above
+    ``rollouts_in_flight_mean``, the gate binds: raise the setting, or start
+    workers from the fork server.
+``rollout_client/permits_held_mean``
+    Time-weighted mean of the rollout permits granted to training groups and not
+    yet returned (``train.max_concurrent_rollouts``), logged once the run's
+    permit pool reports.  Held minus ``rollouts_in_flight_mean`` is permit time
+    no rollout used: with ``train.permit_release: group`` mostly finished
+    members waiting for their group's slowest one; with ``rollout`` close to 0.
+``rollout_client/start_limit/starting_mean`` / ``waiting_mean``
+    With ``train.max_starting_rollouts``: time-weighted means of the rollouts
+    holding a start slot and of those waiting for one (holding their permits),
+    logged once a rollout of the scope asked for a slot (evaluation's with each
+    evaluation, under ``eval/``).  Also ``wait_seconds_p50`` / ``_p90`` /
+    ``_max``, the waits of the rollouts that got a slot in the window (0 for
+    one taken at once), and ``releases/<cause>``, the slots given back in the
+    window, by cause (``platoon.train.workflow.start_limit``).
 ``rollout_client/trainer_queue_wait_seconds_total`` / ``_mean`` / ``_max``
     How long the training loop blocked on the rollout result queue this step.
     This is the trainer's own view of "rollout-bound": if it is close to the
@@ -96,10 +124,14 @@ import os
 import resource
 import threading
 import time
+from collections import Counter
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Iterator
+
+from platoon.train.workflow.start_limit import START_RELEASE_CAUSES
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +176,23 @@ class RolloutTimeline:
     last_call_ended_at: float | None = None
     calls: list[tuple[float, float, float, float]] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    # Called once, as the tree's first model call is issued (``call_started``), from the thread that issues it: the
+    # release of the rollout's start slot (platoon.train.workflow.start_limit).
+    on_first_call: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+
+    def call_started(self) -> None:
+        """A model call of the tree is about to sample: the first one calls ``on_first_call``, once, outside the lock.
+        Never raises, and records nothing (``record`` records each call once it has ended)."""
+
+        if self.on_first_call is None:
+            return
+        with self.lock:
+            callback, self.on_first_call = self.on_first_call, None
+        if callback is not None:
+            try:
+                callback()
+            except Exception:  # instrumentation must not break a rollout
+                logger.debug("rollout timeline: the first-call callback failed", exc_info=True)
 
     def record(
         self,
@@ -419,6 +468,15 @@ class _InFlightGauge:
                 self._max = current
             return mean, peak, current
 
+    def set(self, value: int) -> None:
+        """Set the level, for a gauge of something held rather than entered and exited."""
+
+        with self._lock:
+            now = time.monotonic()
+            self._accumulate(now)
+            self._current = max(0, int(value))
+            self._max = max(self._max, self._current)
+
 
 class ClientThroughputMonitor:
     """Per-stats-scope accumulator for the client-side throughput metrics.
@@ -432,6 +490,18 @@ class ClientThroughputMonitor:
         self._lock = threading.Lock()
         self._rollouts = _InFlightGauge()
         self._groups = _InFlightGauge()
+        # The rollout permits training groups hold (set_permits_held, from the run's permit pool) and the groups
+        # waiting for a worker-startup slot (startup_gate_wait): measured over the same window as the rollouts, and
+        # exported once first reported, so neither shows in an evaluation's scope, nor the gate in process.
+        self._permits = _InFlightGauge()
+        self._gate = _InFlightGauge()
+        self._reported: set[str] = set()
+        # The start limit's (train.max_starting_rollouts): the scope's rollouts holding and waiting for a start slot,
+        # the waits of those that got one and the slots given back by cause, exported once a rollout asked for a slot.
+        self._starting = _InFlightGauge()
+        self._start_waiting = _InFlightGauge()
+        self._start_waits: list[float] = []
+        self._start_releases: Counter[str] = Counter()
         self._queue_waits: list[float] = []
         self._queue_immediate = 0
         self._queue_dequeues = 0
@@ -445,15 +515,22 @@ class ClientThroughputMonitor:
         self._worker_peak_rss: list[int] = []
         self._worker_pids: dict[int, int] = {}
         self._configured_concurrency = 0.0
+        # train.max_concurrent_rollouts, which rollouts_in_flight_max must not exceed (warned once per start).
+        self._budget: int | None = None
+        self._warned_budget = False
         self._window_start = time.monotonic()
         self._self_cpu = _self_cpu_seconds()
         self._children_cpu = _children_cpu_seconds()
 
     # -- concurrency -----------------------------------------------------
-    def set_configured_concurrency(self, value: float) -> None:
+    def set_configured_concurrency(self, value: float, *, budget: int | None = None) -> None:
+        """The rollouts that can run at once (``rollouts_in_flight_configured``), as a run starts; with ``budget``
+        (``train.max_concurrent_rollouts``), the export warns once when more rollouts ran at once."""
+
         try:
             with self._lock:
                 self._configured_concurrency = float(value)
+                self._budget, self._warned_budget = budget, False
         except Exception:  # pragma: no cover
             pass
 
@@ -472,6 +549,88 @@ class ClientThroughputMonitor:
             yield
         finally:
             self._groups.exit()
+
+    @contextmanager
+    def startup_gate_wait(self) -> Generator[None, None, None]:
+        """A group waits for a worker-startup slot while the block runs."""
+
+        self._reported.add("startup_gate_waiting_mean")
+        self._gate.enter()
+        try:
+            yield
+        finally:
+            self._gate.exit()
+
+    def set_permits_held(self, value: int) -> None:
+        """The rollout permits granted to training groups and not returned, now (the run's permit pool)."""
+
+        try:
+            self._reported.add("permits_held_mean")
+            self._permits.set(value)
+        except Exception:  # pragma: no cover
+            pass
+
+    # -- the start limit (platoon.train.workflow.start_limit) ---------------------
+    @contextmanager
+    def start_slot_wait(self) -> Generator[None, None, None]:
+        """A rollout waits for a start slot while the block runs."""
+
+        self._reported.add("start_limit")
+        self._start_waiting.enter()
+        try:
+            yield
+        finally:
+            self._start_waiting.exit()
+
+    def start_slot_taken(self, waited: float) -> None:
+        """A rollout took a start slot, after ``waited`` seconds."""
+
+        try:
+            with self._lock:
+                self._reported.add("start_limit")
+                self._start_waits.append(float(waited))
+            self._starting.enter()
+        except Exception:  # pragma: no cover
+            pass
+
+    def start_slot_released(self, cause: str) -> None:
+        """A rollout gave its start slot back, for ``cause`` (``START_RELEASE_CAUSES``)."""
+
+        try:
+            with self._lock:
+                self._start_releases[cause] += 1
+            self._starting.exit()
+        except Exception:  # pragma: no cover
+            pass
+
+    def start_limit_metrics(self, *, reset: bool = True, prefix: str = "rollout_client") -> dict[str, float]:
+        """The start limit's metrics over the window (``<prefix>/start_limit/...``), once a rollout of the scope has
+        asked for a start slot; none before, as without a start limit.  Never raises."""
+
+        if "start_limit" not in self._reported:
+            return {}
+        try:
+            starting = self._starting.sample(reset=reset)[0]
+            waiting = self._start_waiting.sample(reset=reset)[0]
+            with self._lock:
+                waits, releases = sorted(self._start_waits), dict(self._start_releases)
+                if reset:
+                    self._start_waits.clear()
+                    self._start_releases.clear()
+        except Exception:  # pragma: no cover - a metric must not break a step
+            return {}
+        name = f"{prefix.rstrip('/')}/start_limit"
+        metrics = {f"{name}/starting_mean": starting, f"{name}/waiting_mean": waiting}
+        metrics.update({f"{name}/releases/{cause}": float(releases.get(cause, 0)) for cause in START_RELEASE_CAUSES})
+        if waits:
+            metrics.update(
+                {
+                    f"{name}/wait_seconds_p50": _percentile(waits, 0.5),
+                    f"{name}/wait_seconds_p90": _percentile(waits, 0.9),
+                    f"{name}/wait_seconds_max": waits[-1],
+                }
+            )
+        return metrics
 
     # -- trainer queue ---------------------------------------------------
     def record_queue_wait(self, seconds: float, *, immediate: bool) -> None:
@@ -557,6 +716,10 @@ class ClientThroughputMonitor:
         now = time.monotonic()
         rollout_mean, rollout_max, _rollout_now = self._rollouts.sample(reset=reset)
         group_mean, group_max, _group_now = self._groups.sample(reset=reset)
+        held = {
+            "permits_held_mean": self._permits.sample(reset=reset)[0],
+            "startup_gate_waiting_mean": self._gate.sample(reset=reset)[0],
+        }
 
         with self._lock:
             window = max(1e-9, now - self._window_start)
@@ -573,6 +736,9 @@ class ClientThroughputMonitor:
             worker_peaks = list(self._worker_peak_rss)
             worker_pids = list(self._worker_pids)
             configured = self._configured_concurrency
+            over_budget = self._budget is not None and rollout_max > self._budget and not self._warned_budget
+            self._warned_budget = self._warned_budget or over_budget
+            budget = self._budget
             self_cpu_before = self._self_cpu
             children_cpu_before = self._children_cpu
 
@@ -604,6 +770,18 @@ class ClientThroughputMonitor:
         }
         if configured > 0:
             metrics[f"{prefix}/concurrency_achieved_fraction"] = rollout_mean / configured
+        metrics.update({f"{prefix}/{name}": mean for name, mean in held.items() if name in self._reported})
+        metrics.update(self.start_limit_metrics(reset=reset, prefix=prefix))
+        if over_budget:
+            logger.warning(
+                "%d rollouts ran at once, more than train.max_concurrent_rollouts (%d): a workflow returned a "
+                "rollout's permit while the rollout still ran (it ran outside its lease block, or ran more rollouts "
+                "than its entry's group size), so the budget no longer bounds the rollouts running; or an evaluation "
+                "workflow counted its rollouts in the train stats scope. See docs/extending/rollout-leases.md (warned "
+                "once per start)",
+                rollout_max,
+                budget,
+            )
 
         if queue_dequeues:
             metrics[f"{prefix}/trainer_queue_wait_seconds_total"] = float(sum(queue_waits))

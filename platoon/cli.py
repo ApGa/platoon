@@ -1056,7 +1056,7 @@ def _training_tasks(resolved: ResolvedConfig) -> list[str]:
     if resolved.schema is None or getattr(config, "train", None) is None:
         return ["tasks: only a training config's tasks are listed"]
     from platoon.train.auto import AutoDataset, AutoEnvironment, check_mixture_pools
-    from platoon.train.tinker.config_defs import evaluates, training_problems
+    from platoon.train.config_defs import evaluates, training_problems
 
     AutoEnvironment.load(config)
     check_mixture_pools(AutoEnvironment.environments(config))  # before any env server is contacted, as train does
@@ -1139,7 +1139,7 @@ def _schema_for(kind: Kind, data: Mapping[str, Any]) -> type | None:
     if kind == "auto":
         kind = "eval" if "inference" in data else "train" if "train" in data else "none"
     if kind == "train":
-        from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+        from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 
         return PlatoonTinkerRLTrainerConfig
     if kind == "eval":

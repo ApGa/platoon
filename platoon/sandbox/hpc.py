@@ -20,9 +20,14 @@ workdir with a command run in ``/`` and scores an attempt whose agents removed i
 (:mod:`platoon.envs.harbor.session`).
 
 Of its provider's capabilities, an adapter keeps those of platoon's contract
-(:data:`platoon.sandbox.base.CAPABILITIES`), not hpc-sandbox 0.3's ``pods`` (services that share one network, which
-platoon never starts), and adds ``routes`` and ``host_loopback``: it implements the routes, and its sandboxes run on
-this node.
+(:data:`platoon.sandbox.base.CAPABILITIES`), and adds ``routes`` and ``host_loopback``: it implements the routes, and
+its sandboxes run on this node.  It also declares ``stacks`` where hpc-sandbox's ``pods`` can run them: it starts each
+stack as a pod (:mod:`platoon.sandbox.hpc_stacks`), with hpc-sandbox 0.5 and on a node that nests user namespaces.
+
+hpc-sandbox extracts every image as your user, which loses the owners the image gives its files
+(:attr:`HpcProvider.loses_file_owners`).  A spec's ``file_owners``, the image's owner manifest, passes to an
+hpc-sandbox that applies one (0.5 on, in ``fakeroot`` sandboxes); an older one refuses such a spec when it starts
+(:func:`file_owners_refusal`).
 
 A string command runs through ``bash -c``, as :mod:`platoon.sandbox.base` says and the other providers do, not through
 hpc-sandbox's ``/bin/sh -c``: the ``bash`` tool of a Harbor task then takes bash syntax (``[[ ]]``, ``source``,
@@ -30,8 +35,12 @@ hpc-sandbox's ``/bin/sh -c``: the ``bash`` tool of a Harbor task then takes bash
 
 The adapter implements what hpc-sandbox leaves to its caller: routes to Unix-socket upstreams from a sandbox
 without a network (a bind of the socket's directory plus a forwarder on port 18080 of the sandbox's own loopback,
-:mod:`platoon.sandbox.routes`), this process's labels on every sandbox, and reaping by label
-(:meth:`HpcProvider.reap`, hpc-sandbox's janitor: it stops the sessions whose owner process is gone).
+:mod:`platoon.sandbox.routes`), this process's labels on every sandbox and pod, and reaping by label
+(:meth:`HpcProvider.reap`, hpc-sandbox's janitor: it stops the sessions and pods whose owner process is gone).  A start
+that its caller gives up runs to its end all the same, and the sandbox it started is stopped then, as a cleanup of the
+rollout's: cancelled while the runtime makes the container, hpc-sandbox would kill the runtime's command midway, and its
+own rollback can then fail to stop the half-made container (Singularity's instance, whose PID file it has not written
+yet), which would run on.
 
 :mod:`platoon.sandbox.singularity` and :mod:`platoon.sandbox.enroot` name the two providers.
 """
@@ -39,17 +48,21 @@ without a network (a bind of the socket's directory plus a forwarder on port 180
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import importlib
 import logging
 import shutil
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
 from platoon.sandbox import cleanup
 from platoon.sandbox._processes import kill_other_processes, own_processes
 from platoon.sandbox.base import CAPABILITIES, DownloadReport, DroppedLink, ExecResult, SandboxSnapshot, SandboxSpec
+from platoon.sandbox.hpc_stacks import pods_refusal, start_pod_stack
 from platoon.sandbox.routes import SandboxRoutes
+from platoon.sandbox.stacks import STACKS, DrivenStack, StackSpec
+from platoon.utils.stopping import let_finish
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +80,51 @@ def import_hpc_sandbox(provider: str) -> Any:
         ) from exc
 
 
+class Routes(Protocol):
+    """What gives a sandbox its routes: :class:`~platoon.sandbox.routes.SandboxRoutes`, or a pod's
+    (:mod:`platoon.sandbox.hpc_stacks`)."""
+
+    @property
+    def routes(self) -> dict[str, str]: ...
+
+    async def ensure(self, sandbox: Any) -> dict[str, str]: ...
+
+
+# Why an hpc-sandbox without SandboxSpec.file_owners cannot give a sandbox's files the owners its image gives them.
+NO_FILE_OWNERS = (
+    "the installed hpc-sandbox cannot give a sandbox's files the owners its image gives them "
+    "(SandboxSpec.file_owners): it extracts every image as your user, so the users a task names would find root's "
+    "files where Docker gives them their own. Install hpc-sandbox 0.5, whose fakeroot sandboxes apply an image's "
+    "owner manifest"
+)
+
+
+def file_owners_refusal() -> str | None:
+    """Why the installed hpc-sandbox cannot apply an image's owner manifest (``SandboxSpec.file_owners``, 0.5 on);
+    None when it can, or when no hpc-sandbox is installed (building a provider says so)."""
+
+    try:
+        spec = importlib.import_module("hpc_sandbox").SandboxSpec
+        takes = "file_owners" in {field.name for field in dataclasses.fields(spec)}
+    except (ImportError, AttributeError, TypeError):
+        return None
+    return None if takes else NO_FILE_OWNERS
+
+
 class HpcSandbox:
-    """A sandbox of an :class:`HpcProvider`, over the ``hpc_sandbox`` sandbox the provider started.
+    """A sandbox of an :class:`HpcProvider`, over the ``hpc_sandbox`` sandbox the provider started (or a service of
+    one of its pods).
 
     Both runtimes give a sandbox its own PID namespace (Singularity only where the site allows PID namespaces), in
     which hpc-sandbox keeps the container alive with processes of its own before any command runs: Singularity's
     ``sinit``, the instance's keep-alive startscript and its ``sleep``; enroot's keep-alive loop as the namespace's
     init and its ``sleep``.  The adapter lists them when the sandbox starts, before its routes' forwarders, and
     :meth:`kill_processes` kills every other process from inside the sandbox (:mod:`platoon.sandbox._processes`),
-    or refuses to in a sandbox that shares platoon's PID namespace.
+    but those :meth:`keep_processes` keeps and their descendants, or refuses to in a sandbox that shares platoon's PID
+    namespace.
     """
 
-    def __init__(self, provider: HpcProvider, inner: Any, *, routes: SandboxRoutes | None = None) -> None:
+    def __init__(self, provider: HpcProvider, inner: Any, *, routes: Routes | None = None) -> None:
         self.id: str = inner.id
         self._provider = provider
         self._inner = inner
@@ -86,6 +132,7 @@ class HpcSandbox:
         self._routes = routes
         self._token: int | None = None
         self._own_processes: frozenset[str] | None = None
+        self._kept: frozenset[str] = frozenset()  # what kill_processes spares too, with descendants (keep_processes)
 
     @property
     def routes(self) -> dict[str, str]:
@@ -127,8 +174,20 @@ class HpcSandbox:
             dropped_total=report.dropped_total,
         )
 
+    async def record_own_processes(self) -> None:
+        """List what runs in the sandbox now as its own, which :meth:`kill_processes` spares: once it started, before
+        any command runs."""
+
+        self._own_processes = await own_processes(self)
+
+    def keep_processes(self, entries: Iterable[str]) -> None:
+        """Spare the processes ``entries`` ("<pid>:<start time>" in the sandbox) and their descendants from
+        :meth:`kill_processes`."""
+
+        self._kept = self._kept | frozenset(entries)
+
     async def kill_processes(self) -> None:
-        await kill_other_processes(self, self._own_processes)
+        await kill_other_processes(self, self._own_processes, self._kept)
 
     async def snapshot(self) -> SandboxSnapshot:
         snapshot = await self._inner.snapshot()
@@ -161,6 +220,9 @@ class HpcProvider:
     isolates: ClassVar[bool] = True
     # The runtime executables a node needs, any one of them, unless the options name one (``binary``).
     executables: ClassVar[tuple[str, ...]] = ()
+    # It extracts every image as one user: a sandbox's files keep the owners the image gives them only through the
+    # image's owner manifest (SandboxSpec.file_owners).
+    loses_file_owners: ClassVar[bool] = True
 
     @classmethod
     def unavailable(cls, options: Mapping[str, Any]) -> str | None:
@@ -177,14 +239,15 @@ class HpcProvider:
         return None
 
     def __init__(self, **options: Any) -> None:
-        self._hpc_sandbox = import_hpc_sandbox(self.name)
+        self.hpc_sandbox = import_hpc_sandbox(self.name)  # the package it adapts
         self.options = dict(options)  # as hpc-sandbox's provider takes them: what reaping rebuilds it from
-        self.inner = getattr(self._hpc_sandbox, self.inner_class)(**options)
-        # Of the inner provider's capabilities, those of platoon's contract (not hpc-sandbox 0.3's "pods"), and the
-        # adapter's own: both runtimes run a sandbox on this node, in this host's network namespace unless it has none
-        # of its own.
+        self.inner = getattr(self.hpc_sandbox, self.inner_class)(**options)
+        # Of the inner provider's capabilities, those of platoon's contract, and the adapter's own: both runtimes run a
+        # sandbox on this node, in this host's network namespace unless it has none of its own, and stacks as pods
+        # where hpc-sandbox's pods can run them.
         inner = frozenset(self.inner.capabilities) & CAPABILITIES
-        self.capabilities: frozenset[str] = inner | {"routes", "host_loopback"}
+        pods = "pods" in self.inner.capabilities and pods_refusal(self.name, self.inner_class) is None
+        self.capabilities: frozenset[str] = inner | {"routes", "host_loopback"} | ({STACKS} if pods else set())
 
     @classmethod
     def network_none_refusal(cls, options: Mapping[str, Any]) -> str | None:
@@ -208,8 +271,31 @@ class HpcProvider:
 
         return None
 
+    @classmethod
+    def file_owners_refusal(cls, options: Mapping[str, Any]) -> str | None:
+        """Why a provider built with ``options`` could not apply an image's owner manifest
+        (:func:`platoon.sandbox.file_owners_refusal`): an hpc-sandbox before 0.5."""
+
+        return file_owners_refusal()
+
+    @classmethod
+    def stack_refusal(cls, options: Mapping[str, Any]) -> str | None:
+        """Why a provider built with ``options`` would start no stack (:func:`platoon.sandbox.stack_refusal`): an
+        hpc-sandbox without the pods it starts them as, or a node where pods cannot run
+        (:func:`platoon.sandbox.hpc_stacks.pods_refusal`)."""
+
+        return pods_refusal(cls.name, cls.inner_class)
+
     async def start(self, spec: SandboxSpec) -> HpcSandbox:
         return await self._open(spec, lambda inner_spec: self.inner.start(inner_spec))
+
+    async def start_stack(self, spec: StackSpec) -> DrivenStack:
+        """Start a stack as an hpc-sandbox pod (:mod:`platoon.sandbox.hpc_stacks`); ``ValueError`` where pods
+        cannot run it."""
+
+        if STACKS not in self.capabilities:
+            raise ValueError(self.stack_refusal(self.options) or f"the {self.name} provider runs no stacks here")
+        return await start_pod_stack(self, spec)
 
     async def restore(self, snapshot: SandboxSnapshot, spec: SandboxSpec) -> HpcSandbox:
         if snapshot.provider != self.name:
@@ -217,7 +303,7 @@ class HpcProvider:
                 f"The {self.name} provider cannot restore snapshot {snapshot.id}, which the {snapshot.provider!r} "
                 "provider took"
             )
-        inner_snapshot = self._hpc_sandbox.SandboxSnapshot(
+        inner_snapshot = self.hpc_sandbox.SandboxSnapshot(
             id=snapshot.id,
             provider=snapshot.provider,
             path=snapshot.path,
@@ -227,9 +313,9 @@ class HpcProvider:
         return await self._open(spec, lambda inner_spec: self.inner.restore(inner_snapshot, inner_spec))
 
     async def reap(self, labels: Mapping[str, str]) -> int:
-        """Stop this provider's sandboxes whose labels include ``labels``, and sweep the sessions on this node that
-        carry them and whose owner process is gone (hpc-sandbox's janitor); returns how many it stopped or
-        removed.  Sessions another live process holds are left alone."""
+        """Stop this provider's sandboxes and pods whose labels include ``labels``, and sweep the sessions and pods on
+        this node that carry them and whose owner process is gone (hpc-sandbox's janitor); returns how many it
+        stopped or removed.  What another live process holds is left alone."""
 
         if not labels:
             raise ValueError("Reaping needs labels: an empty set would select every abandoned session")
@@ -247,23 +333,36 @@ class HpcProvider:
     async def _open(self, spec: SandboxSpec, start: Any) -> HpcSandbox:
         routes = SandboxRoutes(spec, own_network=True)
         labels = {**spec.labels, **cleanup.labels()}
+        inner_spec = self.inner_spec(spec, routes=routes, labels=labels)
         token = cleanup.register(provider=cleanup.provider_ref(self), options=self.options, labels=labels)
+        # hpc-sandbox's start runs to its end whatever its caller does: cancelled while the runtime makes the
+        # container, it would kill the runtime's command midway, which can leave a container that hpc-sandbox's own
+        # rollback cannot prove is the sandbox's, and so leaves running.  A start given up meanwhile stops what it
+        # started once it is done, a cleanup of the rollout's own (platoon.utils.stopping.let_finish).
+        starting = let_finish(asyncio.ensure_future(start(inner_spec)))
         try:
-            inner = await start(self._spec(spec, routes=routes, labels=labels))
+            inner = await asyncio.shield(starting)
         except BaseException:
-            cleanup.unregister(token)
+            if starting.done() and (starting.cancelled() or starting.exception() is not None):
+                cleanup.unregister(token)  # it failed, having undone what it made
+            else:  # given up while it runs, or in the very step in which it returned the sandbox: stopped once done
+                let_finish(asyncio.ensure_future(_stop_once_started(starting, token)))
             raise
-        sandbox = HpcSandbox(self, inner, routes=routes)
+        sandbox = self.sandbox_for(inner, routes=routes)
         sandbox._token = token
         try:
-            # Before any route's forwarder starts: what runs in the sandbox now keeps it alive.
-            sandbox._own_processes = await own_processes(sandbox)
+            await sandbox.record_own_processes()  # before any route's forwarder starts
             await routes.start(sandbox)
         except BaseException:  # cancelled too: the sandbox must not outlive the start
             await asyncio.shield(sandbox.stop())
             raise
         cleanup.attach(token, sandbox)
         return sandbox
+
+    def sandbox_for(self, inner: Any, *, routes: Routes | None = None) -> HpcSandbox:
+        """``inner``, an ``hpc_sandbox`` sandbox or pod service this provider started, as one of its sandboxes."""
+
+        return HpcSandbox(self, inner, routes=routes)
 
     async def delete_inner_snapshot(self, snapshot: Any) -> None:
         """Delete an ``hpc_sandbox`` snapshot; nothing when the inner provider cannot delete snapshots."""
@@ -272,11 +371,19 @@ class HpcProvider:
         if delete is not None:
             await delete(snapshot)
 
-    def _spec(
+    def inner_spec(
         self, spec: SandboxSpec, *, routes: SandboxRoutes | None = None, labels: Mapping[str, str] | None = None
     ) -> Any:
-        hpc_sandbox = self._hpc_sandbox
+        """``spec`` as an ``hpc_sandbox.SandboxSpec``, with the binds of ``routes`` and ``labels`` (default: its
+        own)."""
+
+        hpc_sandbox = self.hpc_sandbox
         mounts = [*spec.mounts, *(routes.mounts() if routes is not None else ())]
+        owners: dict[str, str] = {}
+        if spec.file_owners is not None:
+            if (refusal := file_owners_refusal()) is not None:
+                raise ValueError(refusal)
+            owners["file_owners"] = spec.file_owners
         return hpc_sandbox.SandboxSpec(
             image=spec.image,
             workdir=spec.workdir,
@@ -286,7 +393,22 @@ class HpcProvider:
             cpus=spec.cpus,
             memory_mb=spec.memory_mb,
             labels=dict(spec.labels if labels is None else labels),
+            **owners,
         )
 
 
-__all__ = ["HpcProvider", "HpcSandbox", "import_hpc_sandbox"]
+async def _stop_once_started(starting: asyncio.Future[Any], token: int) -> None:
+    """Stop the sandbox of a start that its caller gave up, once that start is done, then forget its registration for
+    cleanup (a stopping process reaps it until then)."""
+
+    try:
+        await asyncio.wait([starting])
+        if not starting.cancelled() and starting.exception() is None:
+            await starting.result().stop()
+    except Exception:
+        logger.warning("Cannot stop a sandbox whose start was given up", exc_info=True)
+    finally:
+        cleanup.unregister(token)
+
+
+__all__ = ["NO_FILE_OWNERS", "HpcProvider", "HpcSandbox", "file_owners_refusal", "import_hpc_sandbox"]

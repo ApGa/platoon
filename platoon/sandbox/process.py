@@ -1,12 +1,17 @@
 """The process provider: a host directory stands in for the sandbox filesystem and commands run as host processes.
 
 There is no isolation, so it suits tests and laptops; the image, network,
-resource limits and read-only mounts are not enforced. Sandbox paths under the
+resource limits and read-only mounts are not enforced: a mount is a link to its
+source, so what a command writes through a read-only one (a task's files bound
+at its working directory, say) reaches that source, a fetched dataset's cache
+included. Sandbox paths under the
 mapped roots (``/app``, ``/tests``, ``/logs``, ``/solution``, ``/tmp``, the
 workdir and mount targets) live under a per-sandbox host directory and are
 translated in commands, ``cwd``, env values and file transfers. File contents
 are not translated: a script that must also run here can prefix sandbox paths
-with ``$PLATOON_SANDBOX_ROOT``, which real sandboxes leave unset.
+with ``$PLATOON_SANDBOX_ROOT``, which real sandboxes leave unset.  A spec whose
+working directory is ``/`` runs in the sandbox's own ``/tmp``, since no path
+maps to the host's root.
 
 A spec with ``network: none`` still runs on the host's network, but its
 Unix-socket upstreams get routes as in an isolated sandbox: a forwarder on a
@@ -18,7 +23,12 @@ records its labels, its owner and its commands' process groups, so
 Every command runs in a process group of its own, which the sandbox kills when
 it stops or :meth:`ProcessSandbox.kill_processes` is called; a process that
 left its group (``setsid``) is found by the ``PLATOON_SANDBOX_ROOT`` in its
-environment, and one that also dropped that variable escapes both.
+environment, and one that also dropped that variable escapes both.  The
+processes :meth:`ProcessSandbox.keep_processes` keeps (a task's init) are
+spared with their descendants and their groups, until the sandbox stops.
+
+The provider also runs stacks, each service a sandbox of its own on the host's network, with ports that each stack holds
+for its life (:meth:`ProcessProvider.start_stack`, :mod:`platoon.sandbox.process_stacks`).
 """
 
 from __future__ import annotations
@@ -38,11 +48,13 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 from platoon.sandbox import cleanup
-from platoon.sandbox._exec import kill_process_group, run_command
+from platoon.sandbox._exec import _has_members, kill_process_group, run_command
 from platoon.sandbox.base import ExecResult, SandboxSnapshot, SandboxSpec
+from platoon.sandbox.process_stacks import private_root, reap_stack_directories, start_process_stack
 from platoon.sandbox.routes import SandboxRoutes
+from platoon.sandbox.stacks import DrivenStack, StackSpec
 from platoon.utils.scratch import node_scratch
-from platoon.utils.stopping import process_start_time, signal_process_group
+from platoon.utils.stopping import let_finish, process_start_time, signal_process_group
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +66,9 @@ GROUPS_FILE = "process-groups"
 # How many times kill_processes looks for processes that left their group, and how long it waits between looks.
 _KILL_PASSES = 50
 _KILL_PAUSE_S = 0.02
+# How long a reap waits for the processes it SIGKILLed to exit, which give back their memory, files and ports first.
+_EXIT_WAIT_S = 10.0
+_GONE = (b"Z", b"X", b"x")  # a zombie or a dead process holds nothing any more
 # A mapped root starts a path when no path character precedes it, and it ends at "/" or a non-path character.
 _PATH_START = r"(?<![\w.~/})-])"
 _PATH_END = r"(?![\w.-])"
@@ -96,25 +111,32 @@ def _is_within(path: str, directory: str) -> bool:
     return path == directory or path.startswith(directory + "/")
 
 
-def _kill_marked(entry: bytes) -> list[int]:
-    """SIGKILL every process of this user whose environment holds ``entry`` (``NAME=value``), looking again until
-    none is left; the ones still there after the last look."""
+def _kill_marked(entry: bytes, spare: frozenset[str] = frozenset(), killed: dict[int, int] | None = None) -> list[int]:
+    """SIGKILL every process of this user whose environment holds ``entry`` (``NAME=value``), but the ``spare`` ones
+    ("<pid>:<start time>") and their descendants, looking again until none is left; the ones still there after the
+    last look.  ``killed`` collects those it signals (pid -> start time).
+
+    The environment of a process that has begun to exit can no longer be read, so no later look finds it, although it
+    still gives back what it held until it has exited (:func:`_wait_exited`)."""
 
     for _ in range(_KILL_PASSES):
-        marked = _marked(entry)
+        marked = _marked(entry, spare)
         if not marked:
             return []
         for pid in marked:
+            if killed is not None and pid not in killed and (start := process_start_time(pid)) is not None:
+                killed[pid] = start
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
         time.sleep(_KILL_PAUSE_S)
-    return _marked(entry)
+    return _marked(entry, spare)
 
 
-def _marked(entry: bytes) -> list[int]:
-    """The processes of this user but this one whose environment holds ``entry`` (a dead one's reads as empty)."""
+def _marked(entry: bytes, spare: frozenset[str] = frozenset()) -> list[int]:
+    """The processes of this user but this one whose environment holds ``entry`` (a dead one's reads as empty), but
+    the ``spare`` ones and their descendants."""
 
     pids = []
     for name in os.listdir("/proc"):
@@ -126,7 +148,78 @@ def _marked(entry: bytes) -> list[int]:
                     pids.append(int(name))
         except OSError:  # gone, or another user's
             continue
-    return pids
+    return [pid for pid in pids if not (spare and _descends(pid, spare))]
+
+
+def _descends(pid: int, roots: frozenset[str]) -> bool:
+    """Whether the process ``pid``, or one of its ancestors, is one of ``roots`` ("<pid>:<start time>")."""
+
+    while pid > 1:
+        stat = _stat(pid)
+        if stat is None:
+            return False
+        parent, start = stat
+        if f"{pid}:{start}" in roots:
+            return True
+        pid = parent
+    return False
+
+
+def _stat(pid: int) -> tuple[int, int] | None:
+    """The parent pid and start time of process ``pid``, None when it is gone."""
+
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            fields = handle.read().rsplit(b") ", 1)[1].split()
+        return int(fields[1]), int(fields[19])
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _wait_exited(groups: Mapping[int, int | None], pids: Mapping[int, int], timeout_s: float) -> list[int]:
+    """Wait, at most ``timeout_s``, until no process of the process ``groups`` (pgid -> its leader's start time, None
+    when unknown) and none of ``pids`` (pid -> start time) runs any more; the ones that still run then.
+
+    A SIGKILLed process runs on in the kernel while it gives back its memory, which takes a while when it holds much,
+    and then its files and ports; only then is it a zombie, or gone."""
+
+    deadline = time.monotonic() + timeout_s
+    while running := _running(groups, pids):
+        if time.monotonic() >= deadline:
+            return running
+        time.sleep(_KILL_PAUSE_S)
+    return []
+
+
+def _running(groups: Mapping[int, int | None], pids: Mapping[int, int]) -> list[int]:
+    """The processes that run (not a zombie) and are one of ``pids`` or in one of ``groups``: those of
+    :func:`_wait_exited`."""
+
+    groups = {group: start for group, start in groups.items() if _has_members(group)}
+    if not groups and not pids:  # every group is gone, the usual case: no look through /proc
+        return []
+    table: dict[int, tuple[bytes, int, int]] = {}  # pid -> state, process group, start time
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                fields = handle.read().rsplit(b") ", 1)[1].split()
+            table[int(name)] = (fields[0], int(fields[2]), int(fields[19]))
+        except (OSError, IndexError, ValueError):  # gone
+            continue
+
+    def signalled(group: int) -> bool:
+        # A process group's id is the pid of its leader, which no new process gets while the group has a member: a
+        # leader that started at another time leads another group, and the one signalled is gone.
+        leader = table.get(group)
+        return leader is None or groups[group] is None or leader[2] == groups[group]
+
+    return sorted(
+        pid
+        for pid, (state, group, start) in table.items()
+        if state not in _GONE and (pids.get(pid) == start or (group in groups and signalled(group)))
+    )
 
 
 def _root_marker(root: Path) -> bytes:
@@ -153,6 +246,8 @@ class ProcessSandbox:
         self._base_dir = base_dir
         self._paths = PathMap(self.root, (*DEFAULT_MAPPED_ROOTS, spec.workdir, *(m.target for m in spec.mounts)))
         self._process_groups: set[int] = set()
+        self._kept: frozenset[str] = frozenset()  # processes kill_processes spares, with their descendants
+        self._kept_groups: set[int] = set()  # their process groups, which only stop kills
         self._stopped = False
         self._routes: SandboxRoutes | None = None
         self._token: int | None = None
@@ -179,19 +274,23 @@ class ProcessSandbox:
         """Lay out a sandbox below ``base_dir``, starting from a snapshot directory when given."""
 
         sandbox = cls(base_dir, spec)
+        private_root(base_dir.parent)
         if source is not None:
             shutil.copytree(source, sandbox.root, symlinks=True)
         else:
             sandbox.root.mkdir(parents=True)
         record = {"labels": spec.labels, "owner_pid": os.getpid(), "owner_start_time": process_start_time(os.getpid())}
         (base_dir / RECORD_FILE).write_text(json.dumps(record), encoding="utf-8")
-        for directory in (spec.workdir, "/tmp"):
-            sandbox.host_path(directory).mkdir(parents=True, exist_ok=True)
-        for mount in spec.mounts:
+        for mount in spec.mounts:  # before the workdir, which may be a mount's target (a stack's volume)
             link = sandbox.host_path(mount.target)
             if not link.exists():
                 link.parent.mkdir(parents=True, exist_ok=True)
                 link.symlink_to(Path(mount.source).resolve())
+        for directory in (spec.workdir, "/tmp"):
+            if not any(
+                _is_within(posixpath.normpath(directory), mount.target) for mount in spec.mounts if mount.read_only
+            ):
+                sandbox.host_path(directory).mkdir(parents=True, exist_ok=True)  # never into a read-only mount's source
         return sandbox
 
     def _environment(self, env: dict[str, str] | None) -> dict[str, str]:
@@ -245,14 +344,31 @@ class ProcessSandbox:
         self._check_running()
         await asyncio.to_thread(_copy, self.host_path(src), Path(dst))
 
+    def keep_processes(self, entries: Iterable[str]) -> None:
+        """Spare the processes ``entries`` ("<pid>:<start time>", host pids) and their descendants from
+        :meth:`kill_processes`, and their process groups too, until the sandbox stops."""
+
+        self._check_running()
+        entries = tuple(entries)
+        self._kept = self._kept | frozenset(entries)
+        for entry in entries:
+            try:
+                group = os.getpgid(int(entry.split(":", 1)[0]))
+            except (OSError, ValueError):
+                continue
+            if group in self._process_groups:
+                self._process_groups.discard(group)
+                self._kept_groups.add(group)
+
     async def kill_processes(self) -> None:
         """SIGKILL the process group of every command, and every process left of them that carries this sandbox's
-        ``PLATOON_SANDBOX_ROOT`` (one that moved to a group of its own); the sandbox's files stay.  Raises
-        RuntimeError when such a process is still there after the last look."""
+        ``PLATOON_SANDBOX_ROOT`` (one that moved to a group of its own), but the kept processes
+        (:meth:`keep_processes`); the sandbox's files stay.  Raises RuntimeError when such a process is still there
+        after the last look."""
 
         self._check_running()
         self._kill_groups()
-        if left := await asyncio.to_thread(_kill_marked, _root_marker(self.root)):
+        if left := await asyncio.to_thread(_kill_marked, _root_marker(self.root), self._kept):
             pids = " ".join(map(str, left))
             raise RuntimeError(
                 f"Could not kill the processes left in sandbox {self.id}: still alive after SIGKILL: {pids}"
@@ -269,13 +385,16 @@ class ProcessSandbox:
         if self._stopped:
             return
         self._stopped = True
-        self._kill_groups()
+        self._kill_groups(kept=True)
         await asyncio.to_thread(self._remove)  # one thread: it finishes even when the caller stops waiting
         cleanup.unregister(self._token)
 
-    def _kill_groups(self) -> None:
+    def _kill_groups(self, *, kept: bool = False) -> None:
         groups = list(self._process_groups)
         self._process_groups.clear()
+        if kept:
+            groups += self._kept_groups
+            self._kept_groups.clear()
         for pgid in groups:
             kill_process_group(pgid)
 
@@ -285,10 +404,10 @@ class ProcessSandbox:
 
 
 class ProcessProvider:
-    """Sandboxes as host directories below ``root``; snapshots are directory copies."""
+    """Sandboxes as host directories below ``root``; snapshots are directory copies; stacks of such sandboxes."""
 
     name = "process"
-    capabilities = frozenset({"snapshot", "routes", "host_loopback"})
+    capabilities = frozenset({"snapshot", "routes", "host_loopback", "stacks"})
     # Commands run on the host as this user: a site profile may not choose it (platoon.site), and platoon train
     # refuses it for a Harbor entry unless the run config names it.
     isolates = False
@@ -307,6 +426,11 @@ class ProcessProvider:
     async def start(self, spec: SandboxSpec) -> ProcessSandbox:
         return await self._open(spec)
 
+    async def start_stack(self, spec: StackSpec) -> DrivenStack:
+        """Start a stack, each of its services a sandbox of this provider (:mod:`platoon.sandbox.process_stacks`)."""
+
+        return await start_process_stack(self, spec)
+
     async def restore(self, snapshot: SandboxSnapshot, spec: SandboxSpec) -> ProcessSandbox:
         if snapshot.provider != self.name:
             raise ValueError(f"Cannot restore a {snapshot.provider!r} snapshot with the process provider")
@@ -314,14 +438,25 @@ class ProcessProvider:
 
     async def reap(self, labels: Mapping[str, str]) -> int:
         """End every sandbox below ``root`` whose labels include ``labels`` and whose owner is this process or gone:
-        SIGKILL the process groups its commands left, and delete its directory.  Returns how many."""
+        SIGKILL the process groups its commands left, and delete its directory, and the directories of such stacks
+        (their volumes).  Returns how many, once the processes it killed have exited, or after at most 10 seconds of
+        waiting for them (a warning names those still running)."""
 
         if not labels:
             raise ValueError("Reaping needs labels: an empty set would select every sandbox")
         return await asyncio.to_thread(self._reap, dict(labels))
 
     def _reap(self, labels: dict[str, str]) -> int:
+        if not os.path.lexists(self.root):
+            return 0
+        try:
+            private_root(self.root)
+        except RuntimeError as exc:
+            logger.warning("Not reaping the process sandboxes there: %s", exc)
+            return 0
         reaped = 0
+        groups: dict[int, int | None] = {}  # the process groups it kills: pgid -> its leader's start time
+        killed: dict[int, int] = {}  # and the processes that had left them: pid -> start time
         for base_dir in sorted(self.root.glob("process-*")):
             try:
                 record = json.loads((base_dir / RECORD_FILE).read_text(encoding="utf-8"))
@@ -333,36 +468,65 @@ class ProcessProvider:
             if isinstance(owner, int) and owner != os.getpid() and _alive(owner, record.get("owner_start_time")):
                 continue  # another live process holds it
             for pgid, start_time in _recorded_groups(base_dir / GROUPS_FILE):
-                signal_process_group(pgid, start_time, signal.SIGKILL)
-            _kill_marked(_root_marker(base_dir / "fs"))  # and those that left their group
+                if signal_process_group(pgid, start_time, signal.SIGKILL):
+                    groups[pgid] = start_time
+            _kill_marked(_root_marker(base_dir / "fs"), killed=killed)  # and those that left their group
             shutil.rmtree(base_dir, ignore_errors=True)
             reaped += 1
+        reaped += reap_stack_directories(self.root, labels)  # what the stacks of those sandboxes held: their volumes
+        # What runs next, such as the run that reaps before it starts, needs what they held.
+        if running := _wait_exited(groups, killed, _EXIT_WAIT_S):
+            logger.warning(
+                "Processes of the sandboxes labelled %s still run %gs after SIGKILL: %s",
+                labels,
+                _EXIT_WAIT_S,
+                " ".join(map(str, running)),
+            )
         if reaped:
             logger.info("Reaped %d process sandbox(es) labelled %s", reaped, labels)
         return reaped
 
     async def _open(self, spec: SandboxSpec, source: Path | None = None) -> ProcessSandbox:
+        if posixpath.normpath(spec.workdir) == "/":  # no path maps to the host's root
+            spec = dataclasses.replace(spec, workdir="/tmp")
         routes = SandboxRoutes(spec, own_network=False)
         labels = {**spec.labels, **cleanup.labels()}
         options = {"root": str(self.root)}
         token = cleanup.register(provider=cleanup.provider_ref(self), options=options, labels=labels)
+        base_dir = self._new_dir()
+        creating: asyncio.Future[ProcessSandbox] | None = None
         try:
             sandbox_spec = dataclasses.replace(spec, mounts=[*spec.mounts, *routes.mounts()], labels=labels)
-            sandbox = await asyncio.to_thread(ProcessSandbox.create, self._new_dir(), sandbox_spec, source)
+            # The thread runs to its end whatever its caller does: a stopping process spares it.
+            creating = let_finish(
+                asyncio.ensure_future(asyncio.to_thread(ProcessSandbox.create, base_dir, sandbox_spec, source))
+            )
+            sandbox = await asyncio.shield(creating)
         except BaseException:
             cleanup.unregister(token)
+            if creating is not None:  # a start given up while its directory is made: delete it once it is made
+                let_finish(asyncio.ensure_future(_remove_when_made(creating, base_dir)))
             raise
         sandbox._routes, sandbox._token = routes, token
         try:
             await routes.start(sandbox)
         except BaseException:
-            await asyncio.shield(sandbox.stop())
+            await asyncio.shield(let_finish(asyncio.ensure_future(sandbox.stop())))  # spared by a stopping process
             raise
         cleanup.attach(token, sandbox)
         return sandbox
 
     def _new_dir(self) -> Path:
         return self.root / f"process-{uuid.uuid4().hex[:12]}"
+
+
+async def _remove_when_made(creating: asyncio.Future[ProcessSandbox], base_dir: Path) -> None:
+    """Delete the directory of a sandbox whose start was given up, once the thread that makes it is done."""
+
+    await asyncio.wait([creating])
+    if not creating.cancelled():
+        creating.exception()  # what it raised, its caller had
+    await asyncio.to_thread(shutil.rmtree, base_dir, True)
 
 
 def _alive(pid: int, start_time: object) -> bool:

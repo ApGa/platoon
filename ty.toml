@@ -4,6 +4,7 @@
 [src]
 exclude = [
     "**/tui.py",
+    "tests/**/fixtures/**",  # task directories: data, some of them copies of other projects' files
 ]
 
 [rules]

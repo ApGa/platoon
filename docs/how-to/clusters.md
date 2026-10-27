@@ -189,11 +189,44 @@ tasks](sandboxes-and-harbor.md#sandbox-providers).
 
 Harbor tasks whose verifier runs as root ([Verifiers that run as
 root](sandboxes-and-harbor.md#verifiers-that-run-as-root), since 0.3.0) need Singularity's `--fakeroot` for
-their verifiers, which works where the site gives your user subordinate ids. Check on a compute node that
+their verifiers, and so do the sandboxes of tasks whose users are honored ([Users in task
+sandboxes](sandboxes-and-harbor.md#users-in-task-sandboxes), since 0.5.0), which also need hpc-sandbox 0.5 for an image
+that gives files to users other than root, and util-linux's `nsenter` on the node. Both work where the site gives
+your user subordinate ids. Check on a compute node that
 `getsubids $USER` lists a range, and that `singularity exec --fakeroot IMAGE cat /proc/self/uid_map` shows a range
 that reaches uid 65534 (a line `1 <first subordinate id> 65536`, say), or that
 `singularity exec --fakeroot IMAGE setpriv --reuid=65534 --regid=65534 --clear-groups id -u` prints 65534. `id -u`
 alone prints 0 in a namespace that maps no other user too. enroot cannot run them.
+
+Harbor tasks with sidecar services ([Multi-container
+tasks](sandboxes-and-harbor.md#stacks-as-pods-on-singularity-apptainer-and-enroot), since 0.5.0) run as hpc-sandbox
+pods, which need, on the compute nodes:
+
+| What | For | Check |
+|---|---|---|
+| hpc-sandbox 0.5.1, the `hpc` extra's | every stack: its pods' run modes, host aliases and exposed ports (0.5); sidecars that switch users starting where the run's directory or the task's files are on storage that only one of your groups opens, and reaching their binds under a umask such as 027, and a `main` that outlives an agent's `kill -9 -1` (0.5.1) | `python -c 'import hpc_sandbox; print(hpc_sandbox.__version__)'` |
+| unprivileged user namespaces that nest: the pod's (with a network namespace), each service's inside it, and the runtime's own | every stack | `unshare --user --map-root-user --net unshare --user --map-root-user unshare --user --map-root-user true` |
+| util-linux's `nsenter` (and `prlimit` for services that set `ulimits`) | every stack | `hpc-sandbox doctor` |
+| slirp4netns, on `PATH` or fetched once with `hpc-sandbox fetch-tools` (`platoon prepare` fetches it where a stack needs it) | stacks with egress | `hpc-sandbox doctor`'s `pods: egress` line |
+| a range of subordinate ids for your user, with shadow-utils' `newuidmap` and `newgidmap` | sidecars that switch users, such as the official database images (Singularity and Apptainer only) | `hpc-sandbox doctor`'s `pods: subordinate ids` line, or `getsubids $USER` |
+
+Without subordinate ids, sidecars run as your own uid, which most database images accept, as they accept `docker run
+--user`. enroot runs every sidecar so, since it maps one id into a container. With them, each rollout worker maps them
+once, at its first stack, which can take more than a minute where `/etc/subuid` lists many users. A fetch locks stacks
+as runnable, and a run refuses them where pods cannot run, when it lists its tasks, naming what is missing: leave them
+out (`exclude_tasks`), or fetch them refused with `refuse: {sidecars: true}`. Pods on Apptainer and enroot are
+experimental. Where nodes do not nest user namespaces, or hpc-sandbox 0.5 is not installed, `stacks: host_network` runs
+the stacks that a dataset's overlays make safe on the node's own network, each service a single sandbox, with any
+hpc-sandbox ([Stacks on the host network](sandboxes-and-harbor.md#stacks-on-the-host-network)): their sidecars are then
+reachable from the node, so each listens on the loopback and takes its stack's token, through its environment, never its
+command line, which every user of the node can read. The message that refuses stacks under `stacks: auto` names the
+fallback where it could run them.
+
+Such sidecars may read the task's files as a user of their own (the official postgres image runs its init scripts as
+`postgres`). Under a umask that keeps other users out, such as 027, a fetched dataset's files are 0640, so a
+sidecar's read-only binds of them bind a copy of the stack's own that every user reads, made at each stack's start.
+Fetch and prepare under `umask 022` (`(umask 022 && platoon prepare CONFIG)`) to let those binds take the cache itself,
+at the cost of a cache that every user who can reach its directory reads.
 
 Pull the images in the job, before the run, with the run's runtime and image cache, and name the record of what was
 pulled in `PLATOON_IMAGE_PULLS`:
@@ -304,6 +337,7 @@ restart it reaps the sandboxes the failed start left ([Long runs](train-and-eval
 - [ ] The site profile names the cache and the runs on shared storage and the sandbox runtime, and `platoon train`
   prints the one the job uses.
 - [ ] Container images are cached on shared storage; sandbox scratch is on node-local disk.
+- [ ] For multi-container tasks, `hpc-sandbox doctor` on a compute node shows what their pods need (step 5).
 - [ ] `platoon config validate` passes on the exact config the job runs.
 - [ ] `checkpoint.recovery_every` is set, with `checkpoint.keep_recovery` for a long run, and the next job is chained
   with `afterany`.

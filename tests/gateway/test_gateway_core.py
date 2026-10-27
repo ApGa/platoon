@@ -385,6 +385,47 @@ def test_agent_timeline_receives_phase_timings(gateway, sampler):
     assert timing.started_at <= timing.parse_started_at <= timing.ended_at
 
 
+def test_the_timeline_is_told_as_each_call_is_issued_before_it_samples_and_its_first_call_fires_once(gateway, sampler):
+    """The start limit's in-process signal (``train.max_starting_rollouts``): the gateway tells the agent's timeline as
+    it issues a call, before it samples, and ``RolloutTimeline`` calls its ``on_first_call`` once for the whole tree,
+    root and subagent alike."""
+
+    from platoon.train.tinker.rollout_metrics import RolloutTimeline
+
+    sampler.script = [Completion("one", delay=0.05), Completion("two")]
+    fired: list[int] = []
+    timeline = RolloutTimeline(on_first_call=lambda: fired.append(len(sampler.calls)))
+    root = open_root(gateway, timeline=timeline)
+
+    async def run():
+        first = asyncio.ensure_future(gateway.chat(root, ChatRequest.from_params([USER], {})))
+        await asyncio.sleep(0.01)
+        assert fired == [0] and not first.done()  # told before it sampled, and it still samples
+        await first
+        await gateway.chat(gateway.open_subagent(root, role="helper"), ChatRequest.from_params([USER], {}))
+
+    asyncio.run(run())
+    assert fired == [0] and timeline.summary().model_calls == 2
+
+
+def test_a_failing_first_call_callback_breaks_no_call_and_a_timeline_without_the_hook_is_fine(gateway, sampler):
+    from platoon.train.tinker.rollout_metrics import RolloutTimeline
+
+    def fail() -> None:
+        raise RuntimeError("a callback that fails")
+
+    class Plain:
+        """A call timeline with ``record`` only."""
+
+        def record(self, **timings: float) -> None:
+            self.timings = timings
+
+    sampler.script = [Completion("one"), Completion("two")]
+    assert chat(gateway, open_root(gateway, timeline=RolloutTimeline(on_first_call=fail)), [USER]).content == "one"
+    plain = Plain()
+    assert chat(gateway, open_root(gateway, timeline=plain), [USER]).content == "two" and plain.timings
+
+
 # --------------------------------------------------------------------------- the sampler is followed, never pinned
 
 
@@ -399,7 +440,7 @@ class _VersionedClient:
 
 
 def test_following_sampling_client_is_read_at_every_call(renderer, tokenizer, tmp_path):
-    from platoon.train.tinker.workers.binding import FollowingSamplingClient, publish_binding
+    from platoon.train.workers.binding import FollowingSamplingClient, publish_binding
 
     path = str(tmp_path / "binding.pkl")
     publish_binding(_VersionedClient(3), 3, path)

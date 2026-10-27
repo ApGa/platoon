@@ -1,0 +1,458 @@
+{
+ "description": "A limit of two running groups on the slow entry at max_staleness 1, where draws hold their label's slots",
+ "request_settings": [
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": null,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "platoon.train.auto:mixture_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
+   "startup_budget_seconds": 300.0,
+   "task": {
+    "fork_strategy": "subtask",
+    "goal": null,
+    "max_steps": null,
+    "misc": {
+     "platoon_environment": {
+      "agents": {
+       "budget": "linear",
+       "child_access": "full",
+       "child_grading": "none",
+       "child_max_steps": 15,
+       "child_timeout_s": null,
+       "fork": null,
+       "max_depth": null,
+       "verifier": {"access": "read_only", "enabled": true, "max_steps": 20}
+      },
+      "builtins": "default",
+      "eval_rollout": "<fakes>:unused_rollout",
+      "harness": null,
+      "harness_options": {},
+      "name": "quick",
+      "on_context_overflow": "grade",
+      "on_harness_exit": {"crash": "exclude", "timeout": "exclude"},
+      "placement": "auto",
+      "program": "single",
+      "resolve_task": false,
+      "reward_processor": null,
+      "rollout": "<fakes>:unused_rollout",
+      "service": null,
+      "service_kwargs": {}
+     }
+    }
+   }
+  },
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": null,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "platoon.train.auto:mixture_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
+   "startup_budget_seconds": 300.0,
+   "task": {
+    "fork_strategy": "subtask",
+    "goal": null,
+    "max_steps": null,
+    "misc": {
+     "platoon_environment": {
+      "agents": {
+       "budget": "linear",
+       "child_access": "full",
+       "child_grading": "none",
+       "child_max_steps": 15,
+       "child_timeout_s": null,
+       "fork": null,
+       "max_depth": null,
+       "verifier": {"access": "read_only", "enabled": true, "max_steps": 20}
+      },
+      "builtins": "default",
+      "eval_rollout": "<fakes>:unused_rollout",
+      "harness": null,
+      "harness_options": {},
+      "name": "slow",
+      "on_context_overflow": "grade",
+      "on_harness_exit": {"crash": "exclude", "timeout": "exclude"},
+      "placement": "auto",
+      "program": "single",
+      "resolve_task": false,
+      "reward_processor": null,
+      "rollout": "<fakes>:unused_rollout",
+      "service": null,
+      "service_kwargs": {}
+     }
+    }
+   }
+  }
+ ],
+ "scenario": "capped-k1",
+ "starts": [
+  {
+   "events": [
+    {"batch": 0, "checkpoint": null, "event": "start", "loaded": null, "start": 1, "state_lost": null},
+    {"event": "draw", "position": 0, "reason": "order", "sampler": "uniform@quick", "seq": 0, "start": 1, "task_id": "quick::t4", "version": 0},
+    {"event": "draw", "position": 1, "reason": "order", "sampler": "uniform@slow", "seq": 1, "start": 1, "task_id": "slow::t0", "version": 0},
+    {"event": "draw", "position": 2, "reason": "order", "sampler": "uniform@quick", "seq": 2, "start": 1, "task_id": "quick::t1", "version": 0},
+    {"event": "draw", "position": 3, "reason": "order", "sampler": "uniform@slow", "seq": 3, "start": 1, "task_id": "slow::t5", "version": 0},
+    {"event": "draw", "position": 4, "reason": "order", "sampler": "uniform@quick", "seq": 4, "start": 1, "task_id": "quick::t5", "version": 0},
+    {"event": "draw", "position": 5, "reason": "order", "sampler": "uniform@slow", "seq": 5, "start": 1, "task_id": "slow::t3", "version": 0},
+    {"event": "draw", "position": 6, "reason": "order", "sampler": "uniform@quick", "seq": 6, "start": 1, "task_id": "quick::t2", "version": 0},
+    {"event": "settle", "passes": 2, "seq": 0, "start": 1, "task_id": "quick::t4", "valid": 2, "verdict": "uniform", "version": 0},
+    {"event": "settle", "passes": 1, "seq": 2, "start": 1, "task_id": "quick::t1", "valid": 1, "verdict": "uniform", "version": 0},
+    {"event": "settle", "passes": 0, "seq": 4, "start": 1, "task_id": "quick::t5", "valid": 1, "verdict": "uniform", "version": 0},
+    {"event": "settle", "passes": 1, "seq": 6, "start": 1, "task_id": "quick::t2", "valid": 2, "verdict": "trained", "version": 0},
+    {"event": "fate", "fate": "consumed", "seq": 0, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 2, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 4, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 6, "start": 1},
+    {"event": "draw", "position": 7, "reason": "order", "sampler": "uniform@slow", "seq": 7, "start": 1, "task_id": "slow::t7", "version": 1},
+    {"event": "draw", "position": 8, "reason": "order", "sampler": "uniform@quick", "seq": 8, "start": 1, "task_id": "quick::t0", "version": 1},
+    {"event": "draw", "position": 9, "reason": "order", "sampler": "uniform@slow", "seq": 9, "start": 1, "task_id": "slow::t1", "version": 1},
+    {"event": "draw", "position": 10, "reason": "order", "sampler": "uniform@quick", "seq": 10, "start": 1, "task_id": "quick::t3", "version": 1},
+    {"event": "draw", "position": 11, "reason": "order", "sampler": "uniform@slow", "seq": 11, "start": 1, "task_id": "slow::t2", "version": 1},
+    {"event": "draw", "position": 12, "reason": "order", "sampler": "uniform@quick", "seq": 12, "start": 1, "task_id": "quick::t7", "version": 1},
+    {"event": "draw", "position": 13, "reason": "order", "sampler": "uniform@slow", "seq": 13, "start": 1, "task_id": "slow::t6", "version": 1},
+    {"event": "draw", "position": 14, "reason": "order", "sampler": "uniform@quick", "seq": 14, "start": 1, "task_id": "quick::t6", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 10, "start": 1, "task_id": "quick::t3", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 12, "start": 1, "task_id": "quick::t7", "valid": 1, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 2, "seq": 8, "start": 1, "task_id": "quick::t0", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 1, "seq": 14, "start": 1, "task_id": "quick::t6", "valid": 1, "verdict": "uniform", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 10, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 12, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 8, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 14, "start": 1},
+    {"event": "draw", "position": 15, "reason": "order", "sampler": "uniform@slow", "seq": 15, "start": 1, "task_id": "slow::t4", "version": 1},
+    {"event": "draw", "position": 16, "reason": "order", "sampler": "uniform@quick", "seq": 16, "start": 1, "task_id": "quick::t1", "version": 1},
+    {"event": "draw", "position": 17, "reason": "order", "sampler": "uniform@slow", "seq": 17, "start": 1, "task_id": "slow::t2", "version": 1},
+    {"event": "draw", "position": 18, "reason": "order", "sampler": "uniform@quick", "seq": 18, "start": 1, "task_id": "quick::t6", "version": 1},
+    {"event": "draw", "position": 19, "reason": "order", "sampler": "uniform@slow", "seq": 19, "start": 1, "task_id": "slow::t7", "version": 1},
+    {"event": "draw", "position": 20, "reason": "order", "sampler": "uniform@quick", "seq": 20, "start": 1, "task_id": "quick::t5", "version": 1},
+    {"event": "draw", "position": 21, "reason": "order", "sampler": "uniform@slow", "seq": 21, "start": 1, "task_id": "slow::t0", "version": 1},
+    {"event": "draw", "position": 22, "reason": "order", "sampler": "uniform@quick", "seq": 22, "start": 1, "task_id": "quick::t0", "version": 1},
+    {"event": "settle", "passes": 2, "seq": 16, "start": 1, "task_id": "quick::t1", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 1, "seq": 1, "start": 1, "task_id": "slow::t0", "valid": 2, "verdict": "trained", "version": 0},
+    {"event": "settle", "passes": 0, "seq": 3, "start": 1, "task_id": "slow::t5", "valid": 2, "verdict": "uniform", "version": 0},
+    {"event": "settle", "passes": 0, "seq": 20, "start": 1, "task_id": "quick::t5", "valid": 1, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 2, "seq": 22, "start": 1, "task_id": "quick::t0", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 1, "seq": 18, "start": 1, "task_id": "quick::t6", "valid": 1, "verdict": "uniform", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 16, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 1, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 20, "start": 1},
+    {"event": "draw", "position": 23, "reason": "order", "sampler": "uniform@slow", "seq": 23, "start": 1, "task_id": "slow::t4", "version": 2},
+    {"event": "draw", "position": 24, "reason": "order", "sampler": "uniform@quick", "seq": 24, "start": 1, "task_id": "quick::t7", "version": 2},
+    {"event": "draw", "position": 25, "reason": "order", "sampler": "uniform@slow", "seq": 25, "start": 1, "task_id": "slow::t3", "version": 2},
+    {"event": "draw", "position": 26, "reason": "order", "sampler": "uniform@quick", "seq": 26, "start": 1, "task_id": "quick::t2", "version": 2},
+    {"event": "settle", "passes": 0, "seq": 24, "start": 1, "task_id": "quick::t7", "valid": 2, "verdict": "uniform", "version": 2},
+    {"event": "settle", "passes": 2, "seq": 26, "start": 1, "task_id": "quick::t2", "valid": 2, "verdict": "uniform", "version": 2},
+    {"event": "fate", "fate": "consumed", "seq": 22, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 18, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 24, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 26, "start": 1},
+    {"event": "draw", "position": 27, "reason": "order", "sampler": "uniform@slow", "seq": 27, "start": 1, "task_id": "slow::t1", "version": 2},
+    {"event": "draw", "position": 28, "reason": "order", "sampler": "uniform@quick", "seq": 28, "start": 1, "task_id": "quick::t4", "version": 2},
+    {"event": "draw", "position": 29, "reason": "order", "sampler": "uniform@slow", "seq": 29, "start": 1, "task_id": "slow::t5", "version": 2},
+    {"event": "draw", "position": 30, "reason": "order", "sampler": "uniform@quick", "seq": 30, "start": 1, "task_id": "quick::t3", "version": 2},
+    {"event": "settle", "passes": 1, "seq": 28, "start": 1, "task_id": "quick::t4", "valid": 2, "verdict": "trained", "version": 2},
+    {"event": "settle", "passes": 1, "seq": 30, "start": 1, "task_id": "quick::t3", "valid": 1, "verdict": "uniform", "version": 2},
+    {"event": "settle", "passes": 0, "seq": 5, "start": 1, "task_id": "slow::t3", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 7, "start": 1, "task_id": "slow::t7", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 28, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 30, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 5, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 7, "start": 1}
+   ],
+   "files": [
+    "checkpoints.jsonl",
+    "identity.json",
+    "tasks/dispatch-s1-final.json",
+    "tasks/dispatch-s1-recovery-000000.json",
+    "tasks/events.jsonl",
+    "tasks/state-s1-final.json",
+    "tasks/state-s1-recovery-000000.json"
+   ],
+   "messages": [
+    "INFO Loading config from <tmp>/train.yaml",
+    "INFO Sampling timeout: 600 s (train.sample_timeout_seconds)",
+    "INFO training tasks: 16, drawn in epochs of 16 (4 batches of 4), 5 steps planned",
+    "INFO environments[quick]: 8 tasks, weight tasks, 50.0% of the slots: each task drawn about 1.2 times over the run's 5 steps",
+    "INFO environments[slow]: 8 tasks, weight tasks, 50.0% of the slots: each task drawn about 1.2 times over the run's 5 steps",
+    "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
+    "INFO Created new training client for test/model with rank 32",
+    "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
+    "INFO Starting training from batch 0 to 5",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
+    "INFO Saving weights only after completing batch 0 (steps_completed=1, save_every=None, recovery_every=None)",
+    "INFO Step 1/5 | Epoch 0 | Batch time: <t>s | Datums: 6",
+    "WARNING All datums had zero advantage for microbatch 0 (minibatch 0): its objective is zero, so it takes no forward/backward",
+    "WARNING Minibatch 0 of batch 1 takes no optimizer update: none of its microbatches had a nonzero objective",
+    "INFO Batch 1 (step 2) takes no optimizer update: its objective is zero (every advantage is exactly zero: say every group's rollouts scored alike), and a step whose objective is zero never steps the optimizer, whatever filter_zero_advantage_datums says; the policy stays at version 1",
+    "INFO Step 2/5 | Epoch 0 | Batch time: <t>s | Datums: 6",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 2",
+    "INFO Saving weights only after completing batch 2 (steps_completed=3, save_every=None, recovery_every=None)",
+    "INFO Step 3/5 | Epoch 0 | Batch time: <t>s | Datums: 7",
+    "WARNING All datums had zero advantage for microbatch 0 (minibatch 0): its objective is zero, so it takes no forward/backward",
+    "WARNING Minibatch 0 of batch 3 takes no optimizer update: none of its microbatches had a nonzero objective",
+    "INFO Batch 3 (step 4) takes no optimizer update: its objective is zero (every advantage is exactly zero: say every group's rollouts scored alike), and a step whose objective is zero never steps the optimizer, whatever filter_zero_advantage_datums says; the policy stays at version 2",
+    "INFO Step 4/5 | Epoch 1 | Batch time: <t>s | Datums: 7",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 4",
+    "INFO Saving weights only after completing batch 4 (steps_completed=5, save_every=None, recovery_every=None)",
+    "INFO Step 5/5 | Epoch 1 | Batch time: <t>s | Datums: 7",
+    "INFO Saving permanent checkpoint final at step 5...",
+    "INFO Training complete successfully!",
+    "INFO Training complete. Total time: <t>s"
+   ],
+   "outcome": "completed",
+   "requests": {
+    "train": [
+     ["quick::t4", 0, 0, 0, 0],
+     ["quick::t4", 1, 0, 0, 0],
+     ["slow::t0", 0, 0, 1, 0],
+     ["slow::t0", 1, 0, 1, 0],
+     ["quick::t1", 0, 0, 0, 0],
+     ["quick::t1", 1, 0, 0, 0],
+     ["slow::t5", 0, 0, 1, 0],
+     ["slow::t5", 1, 0, 1, 0],
+     ["quick::t5", 0, 0, 0, 0],
+     ["quick::t5", 1, 0, 0, 0],
+     ["quick::t2", 0, 0, 0, 0],
+     ["quick::t2", 1, 0, 0, 0],
+     ["quick::t0", 0, 1, 0, 1],
+     ["quick::t0", 1, 1, 0, 1],
+     ["quick::t3", 0, 1, 0, 1],
+     ["quick::t3", 1, 1, 0, 1],
+     ["quick::t7", 0, 1, 0, 1],
+     ["quick::t7", 1, 1, 0, 1],
+     ["quick::t6", 0, 1, 0, 1],
+     ["quick::t6", 1, 1, 0, 1],
+     ["quick::t1", 0, 1, 0, 1],
+     ["quick::t1", 1, 1, 0, 1],
+     ["quick::t6", 0, 1, 0, 1],
+     ["quick::t6", 1, 1, 0, 1],
+     ["quick::t5", 0, 1, 0, 1],
+     ["quick::t5", 1, 1, 0, 1],
+     ["quick::t0", 0, 1, 0, 1],
+     ["quick::t0", 1, 1, 0, 1],
+     ["slow::t3", 0, 1, 1, 1],
+     ["slow::t3", 1, 1, 1, 1],
+     ["slow::t7", 0, 1, 1, 1],
+     ["slow::t7", 1, 1, 1, 1],
+     ["quick::t7", 0, 2, 0, 2],
+     ["quick::t7", 1, 2, 0, 2],
+     ["quick::t2", 0, 2, 0, 2],
+     ["quick::t2", 1, 2, 0, 2],
+     ["quick::t4", 0, 2, 0, 2],
+     ["quick::t4", 1, 2, 0, 2],
+     ["quick::t3", 0, 2, 0, 2],
+     ["quick::t3", 1, 2, 0, 2]
+    ]
+   },
+   "saves": [
+    {
+     "batch": 0,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000000.json",
+      "format": 2,
+      "sha256": "7711e634cdf4843ffbb12abcec9a169074a19d2e9038fff07d56ee3e5402826d",
+      "start": 1
+     },
+     "name": "recovery-000000",
+     "optimizer_steps": 0,
+     "policy_version": 0,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000000",
+     "state_path": "tinker://run-1/weights/recovery-000000",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000000.json",
+      "format": 1,
+      "sha256": "ea975beecf5cc4051bfb9c135ffd594f6ae2d421ea926f582d42fdbff42d2525",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 5,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-final.json",
+      "format": 2,
+      "sha256": "719e6be493768d38c74566d8920df7f6d2a8ed20f3a87fab6b2cf913c61b5485",
+      "start": 1
+     },
+     "name": "final",
+     "optimizer_steps": 3,
+     "policy_version": 3,
+     "sampler_path": "tinker://run-1/sampler_weights/final",
+     "state_path": "tinker://run-1/weights/final",
+     "tasks": {
+      "file": "tasks/state-s1-final.json",
+      "format": 1,
+      "sha256": "1a7142e2a1ec4e2e3a142fca6f039edfa0fcc3d9b95cd04ab623c7bad7e59570",
+      "start": 1
+     },
+     "wandb_run_id": null
+    }
+   ],
+   "tinker": [
+    ["create_lora_training_client", "test/model", 32],
+    ["save_state", "recovery-000000"],
+    ["save_weights_for_sampler", "recovery-000000"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000000"],
+    ["set_version", 0],
+    ["publish", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    ["publish_binding", "train", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.035714287, 0.035714287], "logprobs": [-0.5, -0.875, -0.125], "target_tokens": [796, 14, 444], "tokens": [1000, 796, 14]},
+       {"advantages": [0.0, -0.035714287, -0.035714287, -0.035714287], "logprobs": [-0.625, 0.0, -0.75, -0.6875], "target_tokens": [986, 421, 183, 709], "tokens": [16, 986, 421, 183]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 1, "sampler:run-1/weights-only-1"],
+    ["publish_binding", "train", 1, "sampler:run-1/weights-only-1"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.05], "logprobs": [-0.4375, -0.5], "target_tokens": [22, 322], "tokens": [596, 22]},
+       {"advantages": [0.0, -0.05], "logprobs": [-0.5, -0.6875], "target_tokens": [492, 882], "tokens": [598, 492]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 2, "sampler:run-1/weights-only-2"],
+    ["publish_binding", "train", 2, "sampler:run-1/weights-only-2"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, -0.029411765, -0.029411765], "logprobs": [-0.25, -0.375, -0.875], "target_tokens": [322, 348, 941], "tokens": [578, 322, 348]},
+       {"advantages": [0.0, 0.029411765, 0.029411765, 0.029411765], "logprobs": [-0.5625, -0.4375, -0.875, -0.375], "target_tokens": [408, 981, 105, 16], "tokens": [10, 408, 981, 105]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 3, "sampler:run-1/weights-only-3"],
+    ["publish_binding", "train", 3, "sampler:run-1/weights-only-3"],
+    ["save_state", "final"],
+    ["save_weights_for_sampler", "final"]
+   ]
+  }
+ ]
+}

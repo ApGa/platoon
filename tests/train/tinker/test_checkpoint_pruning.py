@@ -26,14 +26,14 @@ from tinker_service_fakes import FakeTinkerService, make_pruning_trainer, status
 from trainer_fakes import Workflow, trainer_config
 
 from platoon import cli
-from platoon.train.tinker import checkpoint_pruning
-from platoon.train.tinker.checkpoint_pruning import (
+from platoon.train.checkpoints import pruning as checkpoint_pruning
+from platoon.train.checkpoints.pruning import (
     DELETED_CHECKPOINTS_NAME,
     RecoveryCheckpointPruner,
     plan_deletions,
     read_deleted_paths,
 )
-from platoon.train.tinker.config_defs import CheckpointConfig, PlatoonTinkerRLTrainerConfig, training_problems
+from platoon.train.config_defs import CheckpointConfig, PlatoonTinkerRLTrainerConfig, training_problems
 from platoon.utils.config import ConfigError
 
 
@@ -223,7 +223,7 @@ def test_the_command_line_refuses_an_unkeepable_promise_with_exit_78(tmp_path, m
         )
     )
     trained = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", trained.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", trained.append)
 
     with pytest.raises(SystemExit) as exited:
         cli.main(["config", "validate", "--no-resolve", str(path)])

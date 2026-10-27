@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from platoon.envs.harbor.images import (
     ImageEntry,
     ImageMap,
     ImageMapError,
+    SessionImage,
     apply_image_files,
     deferred_effects,
     docker_image_reference,
@@ -102,6 +105,21 @@ def test_session_image_from_the_map_and_refusal_without_it(tmp_path: Path):
         session_image(task_dir, plan=plan, image_map=None, default_image="docker://default")
 
 
+@pytest.mark.parametrize(
+    ("planned", "user"), [("${NB_UID}", "1000"), ("${MISSING}", None), ("app", "app"), (None, "built")]
+)
+def test_a_planned_user_expands_against_the_images_environment(tmp_path: Path, planned: str | None, user: str | None):
+    """A suffix's ``USER ${NB_UID}``, whose variable the base image's ENV sets, is that user, as a build makes it; one
+    that expands to nothing is root's (None); without one, the built image's own."""
+
+    entry = ImageEntry(image="/images/a.sif", env={"NB_UID": "1000"}, user="built")
+    plan = {"kind": "shared", "key": KEY, "deferred": [], **({"config": {"user": planned}} if planned else {})}
+
+    image = session_image(_task(tmp_path), plan=plan, image_map=ImageMap({KEY: entry}))
+
+    assert image.user == user
+
+
 def test_prebuilt_and_default_images(tmp_path: Path):
     task_dir = _task(tmp_path)
     prebuilt = session_image(
@@ -118,6 +136,138 @@ def test_prebuilt_and_default_images(tmp_path: Path):
     assert docker_image_reference("images/task.sqsh") == "images/task.sqsh"
     assert docker_image_reference("oras://r/x:1") == "oras://r/x:1"
     assert docker_image_reference("ubuntu:24.04") == "docker://ubuntu:24.04"
+
+
+def test_a_copys_owner_expands_like_its_destination(tmp_path: Path):
+    _, _, files = deferred_effects(
+        [["ARG", "USERNAME", "agent"], ["COPY", "--chown=${USERNAME}:staff", "input/", "/app/inputs/"]],
+        env={},
+        workdir=None,
+        context=_task(tmp_path / "task") / "environment",
+    )
+
+    assert files == (FileOp("copy", "/app/inputs", source="input", into=True, owner="agent:staff"),)
+
+
+def test_a_workdir_names_the_user_in_effect_there(tmp_path: Path):
+    """The directories a WORKDIR makes are, as BuildKit makes them, the USER's in effect there: the built image's own
+    before any deferred USER, then each deferred USER's, expanded as a build expands it (an empty one is root)."""
+
+    _, workdir, files = deferred_effects(
+        [
+            ["WORKDIR", "/app"],
+            ["ARG", "NAME", "agent"],
+            ["USER", "${NAME}:staff"],
+            ["WORKDIR", "work"],
+            ["USER", "${NB_UID}"],
+            ["WORKDIR", "/data"],
+            ["USER", "${UNSET}"],
+            ["WORKDIR", "/root/x"],
+        ],
+        env={"NB_UID": "1000"},
+        workdir=None,
+        context=_task(tmp_path / "task") / "environment",
+        user="built",
+    )
+
+    assert workdir == "/root/x"
+    assert files == (
+        FileOp("mkdir", "/app", owner="built"),
+        FileOp("mkdir", "/app/work", owner="agent:staff"),
+        FileOp("mkdir", "/data", owner="1000"),
+        FileOp("mkdir", "/root/x"),
+    )
+
+
+def test_a_workdir_before_any_deferred_user_is_the_built_images_users(tmp_path: Path):
+    image_map = ImageMap({KEY: ImageEntry(image="/images/a.sif", user="jovyan")})  # USER set in the base or prefix
+
+    image = session_image(_task(tmp_path), plan={"key": KEY, "deferred": [["WORKDIR", "/work"]]}, image_map=image_map)
+
+    assert image.files == (FileOp("mkdir", "/work", owner="jovyan"),)
+
+
+@pytest.mark.asyncio
+async def test_a_workdirs_user_gets_the_directories_it_makes_where_users_are_honored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Where a sandbox honors users, the directories a deferred WORKDIR makes are the USER's in effect there, as
+    BuildKit makes them, while those that were there keep their own; elsewhere they are the sandbox's own user's."""
+
+    task_dir = _task(tmp_path / "task")
+    sandbox = await ProcessProvider(root=tmp_path / "sandboxes").start(SandboxSpec(image="local", workdir="/app"))
+    owner = f"{os.getuid()}:{os.getgid()}"  # the only owner this test may give
+    given: list[list[str]] = []
+    real = sandbox.exec
+
+    async def exec(cmd, **options):
+        if isinstance(cmd, list) and "chown" in cmd:
+            given.append(cmd[cmd.index("chown") :])
+        return await real(cmd, **options)
+
+    image = session_image(
+        task_dir,
+        plan={"key": KEY, "deferred": [["USER", owner], ["WORKDIR", "/app"], ["WORKDIR", "made/deep"]]},
+        image_map=ImageMap({KEY: ImageEntry(image="local")}),
+    )
+    monkeypatch.setattr(sandbox, "exec", exec)
+    try:
+        await apply_image_files(sandbox, image, workdir="/app", owners=True)
+        assert given == [["chown", "-h", owner, "--", "/app/made", "/app/made/deep"]]  # /app was there
+        assert sandbox.host_path("/app/made/deep").is_dir()
+        given.clear()
+        unhonored = replace(image, files=(FileOp("mkdir", "/app/other", owner=owner),))
+        await apply_image_files(sandbox, unhonored, workdir="/app")
+        assert given == [] and sandbox.host_path("/app/other").is_dir()
+    finally:
+        await sandbox.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_copys_owner_applies_where_users_are_honored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Where a sandbox honors users, a deferred copy's --chown gives its owner what it copies and the directories it
+    makes, while a destination that was there keeps its own, as BuildKit does; elsewhere every file is the sandbox's
+    own user's."""
+
+    task_dir = _task(tmp_path / "task")
+    sandbox = await ProcessProvider(root=tmp_path / "sandboxes").start(SandboxSpec(image="local", workdir="/app"))
+    owner = f"{os.getuid()}:{os.getgid()}"  # the only owner this test may give
+    given: list[list[str]] = []
+    real = sandbox.exec
+
+    async def exec(cmd, **options):
+        if isinstance(cmd, list) and "chown" in cmd:
+            given.append(cmd[cmd.index("chown") :])
+        return await real(cmd, **options)
+
+    def copying(destination: str) -> SessionImage:
+        return session_image(
+            task_dir,
+            plan={"key": KEY, "deferred": [["COPY", f"--chown={owner}", "input/", destination]]},
+            image_map=ImageMap({KEY: ImageEntry(image="local")}),
+        )
+
+    monkeypatch.setattr(sandbox, "exec", exec)
+    try:
+        await apply_image_files(sandbox, copying("/app/inputs/"), workdir="/app")
+        assert given == []
+        await apply_image_files(sandbox, copying("/app/inputs/"), workdir="/app", owners=True)
+        await apply_image_files(sandbox, copying("/app/made/inputs/"), workdir="/app", owners=True)
+        copied = ["data.csv", "sub", "sub/more.csv"]
+        assert given == [
+            ["chown", "-h", owner, "--", *(f"/app/inputs/{name}" for name in copied)],  # /app/inputs was there
+            [
+                "chown",
+                "-h",
+                owner,
+                "--",
+                "/app/made",
+                "/app/made/inputs",
+                *(f"/app/made/inputs/{name}" for name in copied),
+            ],
+        ]
+    finally:
+        await sandbox.stop()
 
 
 @pytest.mark.asyncio

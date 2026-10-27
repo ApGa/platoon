@@ -84,7 +84,7 @@ does not use. platoon shuffles the training tasks with seed 42.
 
 ## Requirements
 
-- platoon 0.3, with the `tinker` and `ors` extras, and the TextCraft extension `platoon-textcraft` 0.2. From a
+- platoon 0.4, with the `tinker` and `ors` extras, and the TextCraft extension `platoon-textcraft` 0.3. From a
   checkout: `uv sync --package platoon-textcraft --extra platoon`.
 - A Tinker-compatible training service that serves `Qwen/Qwen3-4B-Instruct-2507`: hosted Tinker
   (`TINKER_API_KEY`), or a self-hosted server such as [miles-tinker](https://github.com/neulab/miles-tinker)

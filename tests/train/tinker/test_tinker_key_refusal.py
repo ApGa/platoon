@@ -19,8 +19,9 @@ import tinker
 from trainer_fakes import Workflow, make_trainer, trainer_config
 
 from platoon.eval.config_defs import TinkerKeyRefusedError
-from platoon.train.tinker import proxy, rl
+from platoon.train.tinker import proxy
 from platoon.train.tinker.key_refusal import key_refusal, key_refusals
+from platoon.train.trainer import rl as rl_module
 
 KEY = "tml-mine-0123456789"
 SESSION = "https://tinker.example/services/tinker-prod/api/v1/create_session"
@@ -137,7 +138,7 @@ def test_the_trainer_ends_a_refused_session_or_training_client_with_the_refusal(
     def refuse_session(**kwargs):
         raise _answer(401, {"detail": "Invalid API key"}, tinker.AuthenticationError)
 
-    monkeypatch.setattr(rl.tinker, "ServiceClient", refuse_session)
+    monkeypatch.setattr(rl_module.tinker, "ServiceClient", refuse_session)
     with pytest.raises(TinkerKeyRefusedError, match=r"refused TINKER_API_KEY \(HTTP 401: Invalid API key\)"):
         asyncio.run(trainer.train(train_workflow=Workflow()))
     assert saves == []  # refused before training began

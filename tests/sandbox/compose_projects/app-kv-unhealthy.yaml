@@ -1,0 +1,55 @@
+outcome: 'sidecar_start: the service kv never turned healthy: its healthcheck failed 3 times: exit 1: connection refused; its log ends: the output of <project>-kv
+
+  the errors of <project>-kv'
+project:
+  name: <project>
+  services:
+    main:
+      image: python:3.12-slim
+      container_name: <project>-main
+      entrypoint: [sleep, infinity]
+      working_dir: /app
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-kv-unhealthy, platoon.task: platoon/app-kv-unhealthy, platoon.stack: <project>, platoon.service: main}
+      environment: {KV_URL: 'http://kv:6379'}
+      networks:
+        internal: {}
+      cpus: 1
+      mem_limit: 512m
+    kv:
+      image: python:3.12-slim
+      container_name: <project>-kv
+      entrypoint: [python3, /srv/kv/kv.py]
+      working_dir: /
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-kv-unhealthy, platoon.task: platoon/app-kv-unhealthy, platoon.stack: <project>, platoon.service: kv}
+      volumes:
+      - {type: bind, source: <tmp>/dataset/app-kv-unhealthy/environment/kv, target: /srv/kv, read_only: true}
+      - {type: bind, source: <tmp>/stacks/<project>/volumes/kv-data, target: /var/lib/kv, read_only: false}
+      - {type: bind, source: <tmp>/stacks/<project>/volumes/platoon%3Alogs-verifier, target: /logs/verifier, read_only: false}
+      networks:
+        internal: {}
+  networks:
+    internal:
+      name: <project>-internal
+      internal: true
+      driver_opts: {com.docker.network.bridge.inhibit_ipv4: 'true'}
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-kv-unhealthy, platoon.task: platoon/app-kv-unhealthy, platoon.stack: <project>}
+commands:
+  <project>:
+  - [compose, version]
+  - [version, --format, '{{.Server.Version}}']
+  - [network, create, --driver=bridge, --label=platoon.env=harbor, --label=platoon.rollout_id=rollout-app-kv-unhealthy, --label=platoon.task=platoon/app-kv-unhealthy, --label=platoon.stack=<project>, <project>-egress]
+  - [ps, --all, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, ls, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, rm, <project>-egress, <project>-internal]
+  kv:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, kv]
+  - [network, connect, <project>-egress, <project>-kv]
+  - [start, <project>-kv]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-kv, python3, /srv/kv/health.py, 'http://kv:6379/never-written']
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-kv]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-kv, python3, /srv/kv/health.py, 'http://kv:6379/never-written']
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-kv]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-kv, python3, /srv/kv/health.py, 'http://kv:6379/never-written']
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-kv]
+  - [logs, --tail, '200', <project>-kv]
+  - [rm, --force, --volumes, <project>-kv]

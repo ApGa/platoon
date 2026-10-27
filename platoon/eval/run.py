@@ -1,6 +1,6 @@
 """``platoon eval``: evaluate a policy on the environments a config selects.
 
-The evaluation counterpart of :mod:`platoon.train.tinker.train`: the config's
+The evaluation counterpart of :mod:`platoon.train.launch`: the config's
 ``environments`` select the tasks and their rollout (``harness_rollout`` for an
 environment with a service and a harness), the ``inference`` section names the
 policy (a Tinker model with its renderer and optional checkpoint, or a hosted
@@ -67,6 +67,7 @@ from platoon.train.auto import (
 )
 from platoon.train.components import HARNESS_ROLLOUT, EnvironmentConfig, normalize_environment_configs
 from platoon.train.exclusion import TaskExclusion, record_exclusions
+from platoon.train.startup import RolloutStartup
 from platoon.utils.config import ConfigError, load_config, update_run_lock
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ async def arun_eval(args: list[str] | None = None) -> dict[str, Any]:
                 "inference.renderer_name is not set, so no policy is served; set inference.renderer_name, or "
                 "inference.hosted for a hosted model"
             )
+    startup = None
     if config.stage != "report":
         check_mixture_pools(AutoEnvironment.environments(config))  # a report contacts no env server
         check_environment_routes(AutoEnvironment.environments(config))  # before any task is listed
@@ -145,6 +147,9 @@ async def arun_eval(args: list[str] | None = None) -> dict[str, Any]:
 
     dataset: list[Any] = []
     if config.stage != "report":
+        # The toolchains the harnesses run from are staged on this node while the tasks are listed, ahead of the
+        # first rollout (platoon.train.startup).
+        startup = await RolloutStartup.begin(AutoEnvironment.environments(config))
         exclusions: list[TaskExclusion] = []
         dataset = list(AutoDataset.from_config(config, config.split, exclusions=exclusions))
         record_exclusions(output_dir, exclusions)  # the lock.json platoon eval wrote there
@@ -163,6 +168,8 @@ async def arun_eval(args: list[str] | None = None) -> dict[str, Any]:
     for line in entry_settings.evaluation_unapplied(config):
         logger.warning("%s", line)
     runner = EvalRunner(workflow=workflow, output_dir=output_dir)
+    if startup is not None:
+        await startup.ready()
     return await runner.arun(
         dataset=dataset,
         resume=config.inference.resume,

@@ -1,0 +1,74 @@
+outcome: opened and closed
+project:
+  name: <project>
+  services:
+    main:
+      image: python:3.12-slim
+      container_name: <project>-main
+      entrypoint: [sleep, infinity]
+      working_dir: /app
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-kv-seeded, platoon.task: platoon/app-kv-seeded, platoon.stack: <project>, platoon.service: main}
+      environment: {KV_URL: 'http://kv:6379'}
+      networks:
+        internal: {}
+      cpus: 1
+      mem_limit: 512m
+    seed:
+      image: python:3.12-slim
+      container_name: <project>-seed
+      entrypoint: [python3, /srv/kv/seed.py, greeting, hello from the seed]
+      working_dir: /
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-kv-seeded, platoon.task: platoon/app-kv-seeded, platoon.stack: <project>, platoon.service: seed}
+      environment: {KV_URL: 'http://kv:6379'}
+      volumes:
+      - {type: bind, source: <tmp>/dataset/app-kv-seeded/environment/kv, target: /srv/kv, read_only: true}
+      networks:
+        internal: {}
+    kv:
+      image: python:3.12-slim
+      container_name: <project>-kv
+      entrypoint: [python3, /srv/kv/kv.py]
+      working_dir: /
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-kv-seeded, platoon.task: platoon/app-kv-seeded, platoon.stack: <project>, platoon.service: kv}
+      volumes:
+      - {type: bind, source: <tmp>/dataset/app-kv-seeded/environment/kv, target: /srv/kv, read_only: true}
+      - {type: bind, source: <tmp>/stacks/<project>/volumes/kv-data, target: /var/lib/kv, read_only: false}
+      - {type: bind, source: <tmp>/stacks/<project>/volumes/platoon%3Alogs-verifier, target: /logs/verifier, read_only: false}
+      networks:
+        internal: {}
+  networks:
+    internal:
+      name: <project>-internal
+      internal: true
+      driver_opts: {com.docker.network.bridge.inhibit_ipv4: 'true'}
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-app-kv-seeded, platoon.task: platoon/app-kv-seeded, platoon.stack: <project>}
+commands:
+  <project>:
+  - [compose, version]
+  - [version, --format, '{{.Server.Version}}']
+  - [network, create, --driver=bridge, --label=platoon.env=harbor, --label=platoon.rollout_id=rollout-app-kv-seeded, --label=platoon.task=platoon/app-kv-seeded, --label=platoon.stack=<project>, <project>-egress]
+  - [ps, --all, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, ls, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, rm, <project>-egress, <project>-internal]
+  kv:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, kv]
+  - [network, connect, <project>-egress, <project>-kv]
+  - [start, <project>-kv]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-kv, python3, /srv/kv/health.py, 'http://kv:6379/']
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-kv]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-kv, python3, /srv/kv/health.py, 'http://kv:6379/']
+  - [rm, --force, --volumes, <project>-kv]
+  seed:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, seed]
+  - [network, connect, <project>-egress, <project>-seed]
+  - [start, <project>-seed]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-seed]
+  - [rm, --force, --volumes, <project>-seed]
+  main:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, main]
+  - [network, connect, <project>-egress, <project>-main]
+  - [start, <project>-main]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, --user, '0', <project>-main, /bin/sh, -c, <script>, platoon-list]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /logs/agent, /logs/verifier, /logs/artifacts, /app]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-main]
+  - [rm, --force, --volumes, <project>-main]

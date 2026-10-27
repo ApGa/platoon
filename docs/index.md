@@ -113,10 +113,13 @@ platoon train my_run.yaml
 [publishing an extension package](extending/publish-a-package.md), and guides to
 [environment services](extending/environment-services.md), [reward processors and finalizers](extending/rewards.md),
 [judges and verifiers](extending/judges-and-verifiers.md), [sandbox providers](extending/sandbox-providers.md),
-[renderers and tool-call parsers](extending/renderers.md) and
-[hooks, telemetry and metrics](extending/hooks-and-metrics.md).
+[renderers and tool-call parsers](extending/renderers.md),
+[hooks, telemetry and metrics](extending/hooks-and-metrics.md) and, experimental,
+[task samplers](extending/task-samplers.md), [group admission rules](extending/group-admission.md) and
+[rollout leases](extending/rollout-leases.md).
 
-**Reference**: [CLI](reference/cli.md), [config](reference/config.md), [Python API](reference/api.md).
+**Reference**: [CLI](reference/cli.md), [config](reference/config.md), [Python API](reference/api.md),
+[experimental API](reference/experimental.md).
 
 **Background**: [Architecture](architecture.md) explains the design; the [RFCs](rfcs/README.md) propose what
 comes next.

@@ -16,6 +16,7 @@ import asyncio
 import logging
 import math
 import random
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
@@ -26,7 +27,6 @@ from platoon.task import Task
 from platoon.train.components import (
     ENVIRONMENT_COLUMN,
     HARNESS_ROLLOUT,
-    TASK_SAMPLERS,
     EnvironmentConfig,
     EnvironmentRoute,
     WeightedOrder,
@@ -41,11 +41,14 @@ from platoon.train.components import (
 from platoon.train.labels import column_keys, label_text
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Mapping, Sequence
 
+    from platoon.train.dataset_order import EpochOrder
     from platoon.train.exclusion import TaskExclusion
+    from platoon.train.sampler_runtime import TaskSampling
+    from platoon.train.samplers import SamplingChoices
     from platoon.train.sampling import SamplingPlan
-    from platoon.train.tinker.dataset_order import EpochOrder
+    from platoon.train.task_stats import EntryInfo
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +200,10 @@ class TrainingTasks:
     # How the run draws the tasks: each environment's share and how often each task is drawn over the planned steps
     # (platoon.train.sampling); None when the listing's size is not known.
     plan: SamplingPlan | None = None
+    # The task samplers the trainer draws through (platoon.train.sampler_runtime), which draw the rows ``order`` gives
+    # (or the dataloader's shuffle of ``dataset``) position for position; None for a listing that is not a dataset,
+    # which the trainer then draws as its dataloader orders it.
+    sampling: TaskSampling | None = None
 
 
 class AutoDataset:
@@ -209,9 +216,10 @@ class AutoDataset:
     epoch the whole batches they fill, its last partial batch starting the next epoch, unless ``train.task_sampler``
     is ``weighted``: then they take the mixture's path, as a mixture of one (task ids stay unlabeled).  Under
     ``train.task_sampler: uniform`` every training task of every entry is drawn in those seeded shuffled passes, with
-    no entry's share (:class:`~platoon.train.tinker.dataset_order.PoolPasses`), in epochs of as many tasks as there
+    no entry's share (:class:`~platoon.train.dataset_order.PoolPasses`), in epochs of as many tasks as there
     are, filled to whole batches.  Evaluation, and any split of an evaluation config, visits every selected task once,
-    in config order.
+    in config order.  The trainer draws these orders through task samplers (:class:`TrainingTasks`' ``sampling``),
+    which draw the same rows position for position.
 
     Each environment's ``exclude_tasks`` leave its list first (:func:`_load_split`), so the order and the batches
     are drawn from the tasks that remain.
@@ -244,17 +252,19 @@ class AutoDataset:
         epochs, and the whole run follows from the environments' seeds.  An environment's share is its ``weight``
         over the mixture's, ``weight: tasks`` counting the tasks it lists here (:func:`mixture_weights`).  Under
         ``train.task_sampler: uniform`` the tasks of every environment take shuffled passes over all of them instead
-        (:class:`~platoon.train.tinker.dataset_order.PoolPasses`), in epochs of the same size, and an environment's
+        (:class:`~platoon.train.dataset_order.PoolPasses`), in epochs of the same size, and an environment's
         share is its tasks'.  What each environment's ``exclude_tasks`` left out is appended to ``exclusions`` when
         given."""
 
+        from platoon.train.samplers import single_environment_order
         from platoon.train.sampling import sampling_plan
 
         environments = AutoEnvironment.environments(config)
         train = getattr(config, "train", None)
         batch_size = getattr(train, "batch_size", None)
         sampler = _task_sampler(config)
-        if len(environments) == 1 and sampler == "auto":
+        choices = _sampler_choices(config)
+        if len(environments) == 1 and sampler == "auto" and single_environment_order(config):
             dataset = _load_split(config, environments[0], "train", exclusions)
             dataset = _dataset_from_rows(_rows(dataset)) if isinstance(dataset, list) else dataset
             count = len(dataset) if hasattr(dataset, "__len__") else 0
@@ -263,9 +273,14 @@ class AutoDataset:
             if epoch_size:
                 label = environments[0].label
                 plan = sampling_plan(environments, {label: count}, {label: 1.0}, train=train, epoch_size=epoch_size)
-            return TrainingTasks(dataset=dataset, tasks=dataset, plan=plan)
+            return TrainingTasks(
+                dataset=dataset,
+                tasks=dataset,
+                plan=plan,
+                sampling=_listing_sampling(config, environments[0], dataset, epoch_size),
+            )
 
-        from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
+        from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
 
         listed = _listed_rows(config, environments, "train", exclusions)
         # Every row has every column, as a dataset's rows do, whichever epoch draws it.
@@ -278,7 +293,7 @@ class AutoDataset:
         if batch_size:
             size = math.ceil(size / batch_size) * batch_size  # each epoch is whole batches, its last one filled
         if sampler == "uniform":  # every task equally often, in shuffled passes: an entry's share is its tasks'
-            from platoon.train.tinker.dataset_order import PoolPasses
+            from platoon.train.dataset_order import PoolPasses
 
             rows = [row for entry_rows in pools.values() for row in entry_rows]
             passes = PoolPasses(rows, epoch_size=size)
@@ -288,21 +303,192 @@ class AutoDataset:
                 tasks=rows,
                 order=passes,
                 plan=sampling_plan(environments, counts, weights, train=train, epoch_size=size),
+                sampling=_pool_sampling(config, environments, pools, weights, size, uniform=True),
             )
         weights = mixture_weights(environments, counts)
+        # A run sampler other than weighted (auto) draws its own way: its weighted order, every entry weighted by its
+        # tasks, gives only the epochs the trainer counts and a nominal first epoch (``dataset``).
+        weighted = sampler in ("auto", "weighted")
         order = WeightedOrder(
             pools,
-            weights,
+            weights if weighted else {label: float(count) for label, count in counts.items()},
             seeds={environment.label: environment.seed for environment in environments},
             epoch_size=size,
         )
         first = _dataset_from_rows([{**row, PRESERVE_DATASET_ORDER_COLUMN: True} for row in order.epoch(0)])
+        sampling = _pool_sampling(config, environments, pools, weights, size, uniform=False, choices=choices)
+        _warn_repeated_ids(sampling)
         return TrainingTasks(
             dataset=first,
             tasks=[row for rows in pools.values() for row in rows],
             order=order,
-            plan=sampling_plan(environments, counts, weights, train=train, epoch_size=size),
+            plan=sampling_plan(
+                environments, counts, weights, train=train, epoch_size=size, samplers=_plan_samplers(choices)
+            ),
+            sampling=sampling,
         )
+
+
+def _entry_infos(
+    config: Any,
+    environments: Sequence[EnvironmentConfig],
+    task_ids: Mapping[str, Sequence[str]],
+    weights: Mapping[str, float],
+) -> dict[str, EntryInfo]:
+    """What the task samplers know of each entry with training tasks, by label, in config order: its group size and
+    success threshold, its weight as a number, its seed, its index among the entries with tasks, and its tasks."""
+
+    from platoon.train import entry_settings
+    from platoon.train.task_stats import EntryInfo
+
+    try:
+        settings = entry_settings.run_settings(config)
+    except Exception:  # a stand-in config: the run's group size, else 1, which the built-in samplers do not read
+        settings = {}
+    run_size = getattr(getattr(getattr(config, "train", None), "workflow_config", None), "group_size", None)
+    infos: dict[str, EntryInfo] = {}
+    for environment in environments:
+        label = environment.label
+        ids = tuple(task_ids.get(label, ()))
+        if not ids:
+            continue
+        own = getattr(settings.get(label), "train", None)
+        size = getattr(own, "group_size", None) or run_size or 1
+        infos[label] = EntryInfo(
+            group_size=int(size),
+            success_threshold=float(getattr(environment, "success_threshold", 1.0)),
+            name=label,
+            weight=float(weights[label]),
+            seed=environment.seed,
+            index=len(infos),
+            task_ids=ids,
+        )
+    return infos
+
+
+def _listing_sampling(
+    config: Any, environment: EnvironmentConfig, dataset: Any, epoch_size: int
+) -> TaskSampling | None:
+    """How ``auto`` draws a single environment's listing ``dataset`` (``epoch_size`` rows an epoch): the listing as it
+    is when every row is marked to keep its order (``_ListingOrder``), else the shuffled passes the dataloader draws
+    (run-level ``uniform``), over the dataset's rows; None for a listing that is not a dataset, or whose order marks
+    the dataloader refuses, which the trainer then draws as its dataloader orders it."""
+
+    from datasets import Dataset
+
+    from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
+    from platoon.train.labels import label_column
+    from platoon.train.sampler_runtime import TaskPool, TaskSampling
+    from platoon.train.samplers import SamplerChoice, UniformSampler, _ListingOrder
+
+    if not isinstance(dataset, Dataset) or not len(dataset) or not epoch_size:
+        return None
+    # Every row is the environment's, whatever an environment column of its own says (an exported mixture's rows).
+    column, labels, owner = label_column(config), (environment.label,), [environment.label] * len(dataset)
+    if PRESERVE_DATASET_ORDER_COLUMN in dataset.column_names:
+        if any(value is not True for value in dataset[PRESERVE_DATASET_ORDER_COLUMN]):
+            return None  # the dataloader refuses such a listing, with the reason
+        rows = dataset.remove_columns(PRESERVE_DATASET_ORDER_COLUMN).to_list()
+        pool = TaskPool.from_rows(rows, entries=labels, column=column, row_entries=owner)
+        run = SamplerChoice("auto", _ListingOrder)
+    else:
+        pool = TaskPool.from_dataset(dataset, entries=labels, column=column, row_entries=owner)
+        run = SamplerChoice("auto", UniformSampler)
+    infos = _entry_infos(config, [environment], {environment.label: pool.task_ids}, {environment.label: 1.0})
+    return TaskSampling(pool=pool, run=run, entries={}, infos=infos, epoch_size=epoch_size)
+
+
+def _pool_sampling(
+    config: Any,
+    environments: Sequence[EnvironmentConfig],
+    pools: Mapping[str, Sequence[dict[str, Any]]],
+    weights: Mapping[str, float],
+    epoch_size: int,
+    *,
+    uniform: bool,
+    choices: SamplingChoices | None = None,
+) -> TaskSampling:
+    """How the mixture's path draws the entries' ``pools`` (every row with every column, by label, in config order):
+    ``uniform`` over every task, from the dataset ``PoolPasses`` shuffles; else the run's sampler that ``choices``
+    names over every row (``auto`` for a mixture is ``weighted``, handing each slot to an entry by its weight), with
+    the sampler of each entry it hands slots to (``uniform`` by default: the entry's seeded passes)."""
+
+    from platoon.train.labels import label_column
+    from platoon.train.sampler_runtime import TaskPool, TaskSampling
+    from platoon.train.samplers import SamplerChoice, UniformSampler, WeightedSampler
+
+    column, labels = label_column(config), tuple(environment.label for environment in environments)
+    rows = [row for entry_rows in pools.values() for row in entry_rows]
+    # Each row is the entry's that listed it, as platoon 0.3.0's orders grouped them, whatever a single environment's
+    # rows say in an environment column of their own (an exported mixture's rows); a mixture's rows name their own.
+    owners = [label for label, entry_rows in pools.items() for _row in entry_rows]
+    ids = {label: [str(row.get("task_id")) for row in entry_rows] for label, entry_rows in pools.items()}
+    infos = _entry_infos(config, environments, ids, weights)
+    if uniform:
+        pool = TaskPool.from_dataset(_dataset_from_rows(rows), entries=labels, column=column, row_entries=owners)
+        run, entries = SamplerChoice("uniform", UniformSampler), {}
+    else:
+        pool = TaskPool.from_rows(rows, entries=labels, column=column, row_entries=owners)
+        if choices is None:
+            run = SamplerChoice(_task_sampler(config), WeightedSampler)
+            entries = {label: SamplerChoice("uniform", UniformSampler) for label in infos}
+        else:
+            run = choices.run
+            entries = {label: choice for label, choice in choices.entries.items() if label in infos}
+    return TaskSampling(pool=pool, run=run, entries=entries, infos=infos, epoch_size=epoch_size)
+
+
+def _sampler_choices(config: Any) -> SamplingChoices:
+    """The task samplers ``config`` chooses (:func:`platoon.train.samplers.choose_samplers`), the entries' packages
+    imported first, as a run imports them; a :class:`~platoon.utils.config.ConfigError` for a sampler that does not
+    resolve, or options or a config it refuses."""
+
+    from platoon.train.samplers import choose_samplers
+
+    import_environment_packages(AutoEnvironment.packages(config))
+    return choose_samplers(config)
+
+
+def _plan_samplers(choices: SamplingChoices) -> dict[str | None, tuple[str, bool]]:
+    """The samplers the plan names: the run's (key None) unless it is ``auto`` or ``weighted``, and each entry's
+    other than ``uniform``, as ``(name, adaptive)``."""
+
+    found: dict[str | None, tuple[str, bool]] = {}
+    if choices.run.name not in ("auto", "weighted"):
+        found[None] = (choices.run.name, choices.run.adaptive)
+    for label, choice in choices.entries.items():
+        if choice.name != "uniform":
+            found[label] = (choice.name, choice.adaptive)
+    return found
+
+
+def _warn_repeated_ids(sampling: TaskSampling) -> None:
+    """Warn of an entry whose task ids repeat under a sampler that draws by task id (one that is not core's static
+    order): it draws only the first row of a repeated id, and the statistics count the rows as one task."""
+
+    from platoon.train.samplers import UniformSampler, WeightedSampler
+
+    def by_id(choice: Any) -> bool:
+        return choice.adaptive or choice.cls not in (UniformSampler, WeightedSampler)
+
+    pool = sampling.pool
+    choosers = {label: choice for label, choice in sampling.entries.items() if by_id(choice)}
+    if by_id(sampling.run):
+        choosers = {label: sampling.run for label in sampling.infos}
+    for label, choice in choosers.items():
+        counts = Counter(pool.task_id(index) for index in pool.entry_indices(label))
+        repeated = [(task, count) for task, count in counts.items() if count > 1]
+        if repeated:
+            shown = ", ".join(f"{task} {count} times" for task, count in repeated[:3])
+            more = f", and {len(repeated) - 3} more" if len(repeated) > 3 else ""
+            logger.warning(
+                "environments[%s]: task ids repeat (%s%s): %s draws by task id, so only the first row of a repeated "
+                "id runs, and the statistics count them as one task",
+                label,
+                shown,
+                more,
+                choice.name,
+            )
 
 
 def _trains(config: Any) -> bool:
@@ -343,13 +529,11 @@ def _listed_rows(
 
 
 def _task_sampler(config: Any) -> str:
-    """``train.task_sampler``: ``weighted`` orders a single environment's training tasks as a mixture's, and
-    ``uniform`` draws every training task in shuffled passes."""
+    """``train.task_sampler`` as the config names it (``auto`` when unset): ``weighted`` orders a single environment's
+    training tasks as a mixture's, ``uniform`` draws every training task in shuffled passes, and any other sampler
+    takes the mixture's path too (resolved by :func:`_sampler_choices`)."""
 
-    sampler = getattr(getattr(config, "train", None), "task_sampler", None) or "auto"
-    if sampler not in TASK_SAMPLERS:
-        raise ValueError(f"train.task_sampler must be one of {TASK_SAMPLERS}, got {sampler!r}")
-    return sampler
+    return str(getattr(getattr(config, "train", None), "task_sampler", None) or "auto")
 
 
 def _dataset_from_rows(rows: list[dict[str, Any]]) -> Any:
@@ -731,6 +915,28 @@ def check_harness_toolchains(environments: Sequence[EnvironmentConfig]) -> None:
         raise NotPrepared(list(dict.fromkeys(unbuilt)))
 
 
+def harness_toolchains(environments: Sequence[EnvironmentConfig]) -> list[str]:
+    """The named toolchains the environments' TOML harness specs run from, each once, in config order: what a run
+    stages on its node before its first rollout (:func:`platoon.harness.toolchains.prestage`).  Training and
+    evaluation run the same harnesses (``eval_overrides`` changes their options only), so this covers both."""
+
+    from platoon.harness.registry import get_harness
+    from platoon.harness.spec import HarnessSpec
+    from platoon.harness.toolchains import is_named
+
+    names: list[str] = []
+    for environment in environments:
+        for ref in environment.harness_refs():
+            try:
+                harness = get_harness(ref)
+            except (ValueError, OSError, ImportError, AttributeError):
+                continue  # refused where the route is built, with its own error
+            toolchain = harness.install.toolchain if isinstance(harness, HarnessSpec) else None
+            if toolchain is not None and is_named(toolchain):
+                names.append(toolchain)
+    return list(dict.fromkeys(names))
+
+
 # Services whose sessions have no task sandbox, so a harness spec acts on their envs only through MCP tools.
 _SANDBOXLESS_SERVICES = ("table", "python://", "ors+http://", "ors+https://")
 
@@ -869,7 +1075,7 @@ def _ors_environment_class(environment: EnvironmentConfig) -> type | None:
 
 
 def _component_ref(kind: str, spec: str) -> str:
-    from platoon.train.tinker.workers.protocol import validated_ref
+    from platoon.train.workers.protocol import validated_ref
 
     return validated_ref(resolve_component(kind, spec), what=f"{kind} {spec!r}")
 
@@ -911,7 +1117,7 @@ def _route(task: Task) -> EnvironmentRoute:
 def _resolve_ref(ref: str | None, task: Task) -> Any:
     if ref is None:
         raise ValueError(f"Environment of task {task.id!r} has no rollout configured")
-    from platoon.train.tinker.workers.protocol import resolve_ref
+    from platoon.train.workers.protocol import resolve_ref
 
     return resolve_ref(ref)
 
@@ -927,7 +1133,7 @@ class AutoRewardProcessor:
         if environments[0].reward_processor is not None:
             return resolve_component("reward_processor", environments[0].reward_processor)
         # The workflow recognizes this object and names no reference for rollout workers.
-        from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR
+        from platoon.train.workers.run import DEFAULT_REWARD_PROCESSOR
 
         return DEFAULT_REWARD_PROCESSOR
 
@@ -940,7 +1146,7 @@ def mixture_reward_processor(trajectory: dict[str, Any]) -> tuple[float, dict[st
         raise ValueError("Trajectory carries no environment route; its task was not loaded with AutoTaskLoader")
     if route.reward_processor is None:
         return trajectory["reward"], {}
-    from platoon.train.tinker.workers.protocol import resolve_ref
+    from platoon.train.workers.protocol import resolve_ref
 
     return resolve_ref(route.reward_processor)(trajectory)
 

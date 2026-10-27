@@ -10,8 +10,12 @@ import pytest
 import tinker
 import torch
 
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker.batch_transforms import has_zero_objective
+from platoon.train.checkpoints import resume as resume_module
+from platoon.train.dispatch import setup as dispatch_setup
+from platoon.train.evaluation import loop as loop_module
+from platoon.train.step.batch_transforms import has_zero_objective
+from platoon.train.trainer import loops as loops_module
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.stats_tracker import StatsTracker
 
 
@@ -70,10 +74,12 @@ def run_batches(
     trainer.batch_transforms = []
     trainer._save_checkpoint_and_get_sampling_client = AsyncMock(return_value=object())
     trainer.shutdown_loops = AsyncMock()
-    monkeypatch.setattr(rl_module, "client_monitor", lambda scope: Mock())
-    monkeypatch.setattr(rl_module, "client_step_metrics", lambda scope: {})
-    monkeypatch.setattr(rl_module, "_ptc_cell_guard_stats", lambda scope: {})
-    monkeypatch.setattr(rl_module, "compute_training_metrics", lambda **kwargs: {})
+    monkeypatch.setattr(dispatch_setup, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loop_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_monitor", lambda scope: Mock())
+    monkeypatch.setattr(loops_module, "client_step_metrics", lambda scope: {})
+    monkeypatch.setattr(loops_module, "_ptc_cell_guard_stats", lambda scope: {})
+    monkeypatch.setattr(loops_module, "compute_training_metrics", lambda **kwargs: {})
     fb_future = SimpleNamespace(result_async=AsyncMock(return_value=object()))
     optim_future = SimpleNamespace(result_async=AsyncMock(return_value=SimpleNamespace(metrics={})))
     client = SimpleNamespace(
@@ -181,11 +187,11 @@ def test_group_staleness_uses_oldest_datum_regardless_of_order(monkeypatch, vers
 
 def test_resume_policy_counters_are_independent_with_legacy_fallback():
     record = SimpleNamespace(batch=21, extra={"policy_version": 3, "optimizer_steps": 5})
-    assert rl_module._resume_policy_counters(record, 2) == (3, 5)
-    assert rl_module._resume_policy_counters(SimpleNamespace(batch=21, extra={}), 2) == (21, 42)
-    assert rl_module._resume_policy_counters(None, 2) == (0, 0)
+    assert resume_module._resume_policy_counters(record, 2) == (3, 5)
+    assert resume_module._resume_policy_counters(SimpleNamespace(batch=21, extra={}), 2) == (21, 42)
+    assert resume_module._resume_policy_counters(None, 2) == (0, 0)
     with pytest.raises(ValueError):
-        rl_module._resume_policy_counters(SimpleNamespace(batch=21, extra={"policy_version": -1}), 2)
+        resume_module._resume_policy_counters(SimpleNamespace(batch=21, extra={"policy_version": -1}), 2)
 
 
 def test_recovery_checkpoint_persists_actual_counters(tmp_path):
@@ -224,4 +230,4 @@ def test_recovery_checkpoint_persists_actual_counters(tmp_path):
     assert saved.batch == 21
     assert saved.state_path == state_path
     assert saved.extra == {"wandb_run_id": "run", "policy_version": 3, "optimizer_steps": 5}
-    assert rl_module._resume_policy_counters(saved, 1) == (3, 5)
+    assert resume_module._resume_policy_counters(saved, 1) == (3, 5)

@@ -1,0 +1,17 @@
+# Written for platoon: a main-only compose file whose command, main's init, serves what the tests fetch, so that
+# the tests pass only while it runs (the kill before grading must spare it).
+services:
+  main:
+    environment:
+      GREETING: hello from compose
+      SECRET_FILE: /opt/data/secret.txt
+    volumes:
+      - ./data:/opt/data:ro
+    command: ["python3", "/opt/data/serve.py"]
+    healthcheck:
+      # $$ is a literal $ for the shell: compose itself would expand ${...}.
+      test: ["CMD-SHELL", "test -s \"$${PLATOON_SANDBOX_ROOT:-}/tmp/greeting.port\""]
+      interval: 100ms
+      timeout: 5s
+      retries: 100
+    stdin_open: true

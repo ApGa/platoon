@@ -258,7 +258,7 @@ async def test_the_docker_provider_reaps_containers_by_label(tmp_path, monkeypat
         "import json, os, sys\n"
         "args = sys.argv[1:]\n"
         "open(os.environ['FAKE_DOCKER_LOG'], 'a').write(json.dumps(args) + '\\n')\n"
-        "if args[0] == 'ps':\n"
+        "if args[0] == 'ps' and '--quiet' in args and '--filter=label=platoon.stack' not in args:\n"
         "    print('c1\\nc2')\n"
         "if args[0] == 'images':\n"
         "    print('i1')\n"
@@ -268,12 +268,24 @@ async def test_the_docker_provider_reaps_containers_by_label(tmp_path, monkeypat
     monkeypatch.setenv("FAKE_DOCKER_LOG", str(log))
     monkeypatch.setenv("PATH", f"{binary.parent}:{Path(sys.executable).parent}:/usr/bin:/bin")
 
-    assert await get_provider("docker").reap({WORKER: "req-2"}) == 2
+    provider = get_provider("docker", stack_root=tmp_path / "stacks")
+    assert await provider.reap({WORKER: "req-2"}) == 2
 
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert calls == [
+        # The stacks first (none here: platoon.sandbox.compose, tests/sandbox/test_sandbox_compose.py), then the rest.
+        [
+            "ps",
+            "--all",
+            f"--filter=label={WORKER}=req-2",
+            "--filter=label=platoon.stack",
+            "--format",
+            '{{.Label "platoon.stack"}}',
+        ],
+        ["ps", "--all", "--quiet", f"--filter=label={WORKER}=req-2", "--filter=label=platoon.stack"],
+        ["network", "ls", "--quiet", f"--filter=label={WORKER}=req-2", "--filter=label=platoon.stack"],
         ["ps", "--all", "--quiet", f"--filter=label={WORKER}=req-2"],
-        ["rm", "--force", "c1", "c2"],
+        ["rm", "--force", "--volumes", "c1", "c2"],
         ["images", "--quiet", "--filter=reference=platoon-snapshot", f"--filter=label={WORKER}=req-2"],
         ["rmi", "--force", "i1"],
     ]

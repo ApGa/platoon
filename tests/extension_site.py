@@ -59,7 +59,7 @@ class Site:
         version: str = "0.1.0",
         *,
         entry_points: Mapping[str, Mapping[str, str]] = {},
-        requires: Sequence[str] = ("platoon>=0.3,<0.4",),
+        requires: Sequence[str] = ("platoon>=0.4,<0.5",),
         extras: Sequence[str] = (),
         direct_url: str | None = None,
     ) -> Path:

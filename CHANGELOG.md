@@ -2,12 +2,646 @@
 
 What each release of platoon changes. Platoon's version is below 1.0: a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
-release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
+release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
-## 0.3.1 (unreleased)
+## 0.5.0 (unreleased)
+
+### New features
+
+- **Harbor datasets from the Harbor Hub, git repositories and adapters.** A Harbor environment's `dataset` may name a
+  package of the Harbor Hub (`harbor://org/name@ref`, a dataset or a single task, at a revision, a `sha256:` digest
+  or a tag), a dataset of Harbor's legacy registry (`harbor://name@version`, from Harbor's `registry.json`, or the
+  file or URL `registry` names), or a directory of a git repository (`git+<url>@<commit>#<path>`), and `adapter:
+  {repo, commit, path, command, args, env, sparse}` in its place generates the tasks with an upstream adapter at a
+  pinned commit, as Frontier-CS's and Harbor's own adapters do. The Hub's packages come through the Harbor CLI at
+  platoon's pin (`harbor==0.24.0`, which platoon runs with `uvx` and never imports; `PLATOON_HARBOR_CLI` names
+  another), resolved to their digest and downloaded by it, and each task's files must hash to the digest the Hub gives
+  it; a registry's tasks and a git directory come through shallow, blobless fetches that check out only the selected
+  tasks, and an adapter runs on a checkout of its repository at the commit (whole, or as `sparse` says), its output
+  fetched as a local directory. Everything else is as for any fetched dataset: selection, overlays, Harbor's content
+  hash, the stack plans of compose files and the stacks they run as (below), the lock, which now also records how the
+  source resolved (`source`), and rollout workers that read only the lock and the cache. A Hub revision or digest, a
+  full git commit, an adapter's commit and a version in a registry file are pinned, so that `platoon train` and
+  `platoon eval` fetch them themselves; a tag, a branch, a registry task at `HEAD` and Harbor's own registry move,
+  and `platoon harbor fetch CONFIG --update` resolves them into the lock ([Fetch a dataset by
+  name](docs/how-to/sandboxes-and-harbor.md#fetch-a-dataset-by-name)). A symbolic link that leaves its task fails the
+  fetch, so that no file of the fetching host reaches the cache, and a URL with credentials is refused; `registry` and
+  a local `adapter.repo` are relative to the config file, as every input path is.
+- **Harbor compose files are planned when a dataset is fetched, and those that name only `main` run.** A task's
+  `environment/docker-compose.yaml` is read as Harbor layers it, with compose's interpolation and Harbor's variables in
+  platoon's meaning (`CONTEXT_DIR`, the log directories' `HOST_*_PATH`, `CPUS`, `MEMORY`), into a stack plan that the
+  lock records with each task (`compose`, under the lock's `compose_rule`), and its kind in `flags.stack`: `single`,
+  `trivial`, the new `main_only`, or `sidecars`. A file that names only `main` and gives it settings runs as the task's
+  one sandbox on every provider: its environment, working directory, resources and binds (the task's own files,
+  read-only from the cache, a writable bind as a copy; volumes below a bind keep what they mask out of the sandbox), its
+  healthcheck, and its command, started as `main`'s init, which the kill before grading spares with what it started;
+  an init that is gone by grading makes the attempt an `error` (`main_exited`), and a `copy` fork of such a task is
+  refused. A file outside the subset platoon runs, security-relevant keys such as `privileged` or a `cap_add` of
+  `NET_ADMIN` included, is refused at fetch, naming the service and key (`compose: <service>.<key>: ...`). A dataset's
+  overlay may edit compose services (`[[compose]]`: set, replace or unset their keys, or mark one external) and list
+  the host variables a compose file may name (`compose_host_env`), which sessions resolve when they open, so that no
+  host value enters a lock; a read-only bind may name the path a listed variable names, and no other host path.
+  Stacks with services besides `main` stay refused until platoon runs them (RFC 0010)
+  ([Compose files](docs/how-to/sandboxes-and-harbor.md#compose-files)).
+- **Sandboxes can keep a task's processes through `kill_processes`.** `Sandbox.keep_processes(entries)`, optional, spares
+  processes a session started for the task before any agent ran, with their descendants; the built-in providers have
+  it ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
+- **Harbor tasks that are multi-container stacks run.** A task whose compose file names services besides `main` (a
+  database, a judge, an MCP server) runs as a stack on a sandbox provider with the new `stacks` capability: `main` is
+  the sandbox a main-only file would give the task, and each sidecar a sandbox of its own, with its image, command
+  (compose's over its image's), environment, healthcheck, volumes (named ones shared
+  by the services that name them), binds (writable ones as one copy of the task's files that every service binding it
+  shares, which the stack owns), ports and names. The services start in dependency order, under compose's three
+  conditions (`service_started`, `service_healthy`, and `service_completed_successfully` for init jobs, each bounded
+  by `sandbox_start_budget_s`), and the session opens once all of them are up, as `docker compose up --wait` does, and
+  a last probe finds them so; a sidecar that fails, exits or never turns healthy fails the session's start
+  (`sidecar_start`, an `error`), and nothing of the stack is left, also when the start is cancelled. Grading runs the
+  task's `[[verifier.collect]]` hooks in their services and probes every sidecar before and after the tests (before
+  and after the artifacts are collected, for a separate verifier, which also receives the artifacts that
+  `artifacts[].service` names from a sidecar's own files): a sidecar that is down makes the outcome `invalid`
+  (`sidecar_unhealthy`, with its name, state and log), whatever the reward files say, unless the environment sets
+  `on_sidecar_down: grade`. What a sidecar writes in a log directory it binds (`${HOST_VERIFIER_LOGS_PATH}`) reaches the
+  tests after grading made that directory afresh, so the agents can neither erase nor forge it. `shared` forks share the
+  stack and `copy` forks are refused; a rollout's deadlines count the services' starts and health waits (their images'
+  healthchecks too) along their dependencies' longest path; outcomes record each service's run mode and the state
+  that the grade's probes found (`services`). On the `process` provider, which isolates nothing, each declared port is
+  a port outside the kernel's ephemeral range that the stack holds for its life, which a service learns from
+  `PLATOON_PORT_<port>`, and a reference to a service at a port it declares (`scheme://<service>:<port>`,
+  `<service>:<port>`) in environment values, commands, healthchecks, collect hooks, `[verifier].env` and the task's MCP
+  servers' URLs reaches it, as does a service's own `localhost:<port>`. `stacks: refuse` refuses every stack, and so
+  does a provider without the capability (`singularity` and `enroot` where pods cannot run, below); a fetch locks stacks
+  as runnable unless its `refuse` sets `sidecars: true` (Changes).
+  Stacks that no rollout could start (a dataset directory's registry sidecar that its compose file gives no command, or
+  that builds from a context, neither of which a directory's missing image map can give) are skipped by a dataset
+  directory and stop a run when a fetched dataset's tasks are listed
+  ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
+- **A Harbor environment can run every sandbox without a network.** `network_policy: none` gives every sandbox and
+  stack of the environment no network, in every phase, for datasets whose answers the web holds; `task`, the default,
+  gives each phase the network its task asks for, and a stack graded in its own `main` gets the verifier's
+  ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
+- **Write a provider that runs stacks.** `platoon.sandbox.stacks` defines the stack spec (`StackSpec`, `ServiceSpec`,
+  `Healthcheck`, `Dependency`, `Volume`), the running `Stack` (`main`, `services`, `health()`, `logs()`,
+  `set_network()`, `connect()`, `rewrite()`, `stop()`), `StackProvider.start_stack()` and the `stacks` capability, and a
+  generic driver, `drive_stack`, that starts a stack's services in dependency order over a backend that starts one at a
+  time, rolls back on a failure or a cancellation, and probes them
+  ([Write a sandbox provider](docs/extending/sandbox-providers.md#run-multi-container-stacks)).
+- **Harbor stacks run on Docker, each a `docker compose` project of its own.** The `docker` provider has the `stacks`
+  capability: it writes each stack's project file from the stack's spec, as JSON (which compose reads as YAML, so no
+  value changes its type), into a directory below its new `stack_root` option, which must be a directory of the
+  user's own, with no `:` in its path, and each service is a container that compose creates once the service's
+  dependencies hold, running its command (compose's over its image's) as its image's user, which platoon starts in
+  order, health-checks and probes as on every provider. The services share an `internal` network of the project's,
+  which gives the host no address, so that the host's own services are out of their reach too, and on which each
+  answers to its name and aliases; a bridge network is connected for the phases with egress and disconnected for
+  those without; `main` reaches the model gateway through a route, as a container without a network does. Volumes are
+  directories of the project, filled before any service starts. A start that fails or is given up waits for the
+  docker commands it ran, which the daemon carries out whatever becomes of their CLI, and teardown removes the
+  containers and networks that carry the stack's label, with the containers' anonymous volumes, then the directory,
+  what services wrote there as other users through a container of `main`'s image; a reap by label removes a killed
+  worker's stacks, and a stack whose teardown failed stays registered for that. Stacks need the CLI's compose plugin,
+  which the provider checks when a run lists its tasks, warning of a daemon older than 25.0.5, whose internal
+  networks let DNS queries out ([Stacks on Docker](docs/how-to/sandboxes-and-harbor.md#stacks-on-docker)).
+- **`platoon prepare` builds the images of stacks' sidecars.** A sidecar that builds from a context of the task
+  (`build:`, planned whole) is built by `platoon prepare` and `platoon harbor images build` with the provider's
+  builder, with its build arguments (the `docker` builder's `--build-arg`; the others refuse an image that has any),
+  and recorded in the image map, so that no rollout builds one; `platoon harbor images plan` lists it, with the role
+  `service`. A run whose sidecars' images the map lacks stops when it lists its tasks, naming the `platoon prepare`
+  command, as for the tasks' own images ([Build task images](docs/how-to/sandboxes-and-harbor.md#build-task-images)).
+- **Privileges for the stacks of datasets you trust, on Docker alone.** A fetch with `refuse: {privileges: false}` keeps
+  the compose services that ask for `privileged`, or for a `cap_add` that a rootless service's root does not hold
+  (`NET_ADMIN`; `DAC_READ_SEARCH`, with which a root that is the host's, as on a rootful Docker, reads any of the
+  host's files; ...), which a fetch refuses by default, and plans them as the stack's privileges; such a stack runs
+  only on a provider with the new `privileged` capability, `docker`, and every other refuses it when a run lists its
+  tasks. `platoon.sandbox.privilege_refusal` says why a provider would not give them
+  ([Stacks on Docker](docs/how-to/sandboxes-and-harbor.md#stacks-on-docker)).
+- **Harbor stacks run as rootless pods on Singularity, and on Apptainer and enroot (experimental).** With hpc-sandbox
+  0.5, the `singularity` and `enroot` providers declare the `stacks` capability and start each stack as an hpc-sandbox
+  pod: one user and network namespace of its own, whose services share one loopback, so each reaches the others by name
+  at the ports it declares, as in compose, and no stack reaches another's. `main` runs as root (your uid, as a single
+  sandbox does); a sidecar whose image runs as root runs as root with your subordinate ids, so that the official
+  database images' own switch to their user works as in Docker, where the runtime gives that mode (not enroot) and your
+  user has them, else as your own uid, as does a sidecar whose image runs as another user. `main`'s upstreams are the
+  pod's, which its holder relays, so the gateway's route in `main` is out of the agents' reach; a stack's network
+  switches for the whole pod per phase (slirp4netns for egress); its volumes are directories in the pod's own directory,
+  with Docker's modes, which the pod's deletion takes, with what a sidecar wrote there as another user. A log directory
+  that a sidecar with your subordinate ids binds reaches the tests through that sidecar, which reads what its own users
+  keep from yours, and a file grading cannot read makes the outcome an `error`. A sidecar's read-only binds of task
+  files that not every user may read (a dataset fetched under a umask such as 027) bind a copy that every user reads, as
+  a Docker host's checkout is, since a sidecar may read them as a user of its own; the stack's other copies get those
+  modes too. Every connection between a pod's services comes from `127.0.0.1`, so a sidecar that trusts loopback (the
+  official postgres image does, for `127.0.0.1`) is open to `main`'s agents, where compose gives `main` an address of
+  its own: the docs say so and how a task closes it. Outcomes record each service's run mode (`services`). Stacks are
+  refused when the tasks are listed, naming what is missing, with an hpc-sandbox older than 0.5 or on a node that does
+  not nest unprivileged user namespaces
+  ([Stacks as pods](docs/how-to/sandboxes-and-harbor.md#stacks-as-pods-on-singularity-apptainer-and-enroot)).
+- **Harbor stacks on the host network, where pods cannot run (`stacks: host_network`).** On a site whose nodes do not
+  nest unprivileged user namespaces, or without hpc-sandbox 0.5, the host-network fallback runs a fetched dataset's
+  stacks with each service a single sandbox of the provider (`singularity`, `enroot`, `process`) on the node's own
+  network, as the `process` provider runs its stacks: each declared port is a port of the node that the stack holds for
+  its life, which the service learns from its listen variables, and the references to the services (above) reach them.
+  Since every process of the node reaches a service there, a dataset's overlays say how each one runs safely
+  (`host_network = {listen, token, bind}` in a `[[compose]]` entry): the variables that set the port it listens on,
+  carry a token that each stack draws anew and gives to its own services alone (through their environment: a fetch
+  refuses a rule's variable that the compose file interpolates where the fallback sets it, `$$NAME` passing it on), and
+  bind it to `127.0.0.1`. The fallback checks what listens at each port a service declares, `main`'s too: a listener
+  beyond the loopback, or one that another user's process holds, makes the service unhealthy. Its stacks' directories
+  are in a root of your uid's alone (0700; a symlink or another user's directory there is refused). A fetch scans each
+  stack's text files and plan for the references to its services that the fallback could not rewrite
+  (`compose.unrewritable_references` in the lock: a service named with a port in `instruction.md`, say), which an
+  overlay's `[[edit]]` passes through a variable instead. Refused, when the tasks are listed (exit 78) and when a
+  session opens: a sidecar with ports that no overlay authenticates, a declared TCP port without a listen rule, a UDP
+  port, such a reference, a task MCP server that is a sidecar (an MCP client sends no token), a stack without a network
+  in a phase, and a provider whose sandboxes run other users (`docker`, `fakeroot`); a dataset directory skips every
+  stack, saying to fetch it with an overlay. Nothing chooses the fallback by itself (the refusal of stacks under
+  `stacks: auto` names it where it could run them), and it needs no pods, so hpc-sandbox 0.4 runs it.
+  `platoon.sandbox.host_network_stacks.HostNetworkStackProvider` runs it over any provider whose sandboxes share the
+  host's network as your own uid
+  ([Stacks on the host network](docs/how-to/sandboxes-and-harbor.md#stacks-on-the-host-network)).
+- **`platoon prepare` makes what stacks need.** Besides the sidecars' images (above), it **pins** the registry images
+  that sidecars run, on every provider but `process`: the digest each registry serves, with the configuration it gives
+  the image for this host's platform (`ENTRYPOINT`, `CMD`, `ENV`, `WORKDIR`, `USER`, `HEALTHCHECK`, ...), which a
+  sidecar runs with, since platoon gives every runtime a sidecar's whole command and a pod's runtimes apply none of an
+  image's configuration; and, where stacks run as pods with egress, fetches slirp4netns (`hpc-sandbox fetch-tools`)
+  when the node has none. A run whose sidecars' images or pins the image map lacks stops when its tasks are listed
+  (exit 78), naming `platoon prepare`. `platoon harbor images pin` pins them too, `platoon harbor images plan` lists
+  them, and `platoon harbor images verify` checks them
+  ([Build task images](docs/how-to/sandboxes-and-harbor.md#build-task-images)).
+- **Harbor tasks run as the users they name (`agent_user: honor`).** As Harbor runs them, the agents' commands (a
+  harness in the task sandbox, the env tools, `platoon-oracle`) run as `[agent].user`, else the image's `USER`, else
+  root; the tests as `[verifier].user`, else the image's `USER`, else root; a `[[verifier.collect]]` hook as its own
+  `user`; and platoon's own commands as root, in sandboxes that give root and other users: Docker's (`docker exec
+  --user`), and Singularity's with `fakeroot: true` on the copy layout, where platoon switches each command to its user
+  with the image's `setpriv`, `su` or Python, with the user's `HOME`, `USER` and `LOGNAME` from the image's
+  `/etc/passwd`. Any of Docker's `--user` forms names a user. A session's `sandbox` is the agents' view of the sandbox,
+  while grading and the kills keep root's; their commands run with Docker's umask, `/logs/agent` and `/logs/artifacts`
+  are every user's (777, as Harbor makes them), and so is `/logs/verifier`, with `/tests` the tests' own, where the
+  tests run as a user other than root (tests that run as root get both as root's, `/tests` with the host's modes, as
+  Harbor copies it); what platoon uploads for the agents is theirs, a deferred `COPY --chown` gives its owner what it
+  copies and a deferred `WORKDIR` the directories it makes to the `USER` in effect there, as BuildKit does (such a
+  sandbox starts in `/`, and its commands run in the working directory), and the outcome records the task's users
+  (`users`). A `USER` that ends a Dockerfile is the
+  agents' user (a fetch still refuses it unless `refuse: {agent_user: false}`), expanded against the image's
+  environment where it names it (`USER ${NB_UID}`). Refused, when the tasks are listed (exit 78) and when a session
+  opens: users on `enroot`, `process` and Singularity without `fakeroot` or on the fuse-overlay layout, multi-container
+  stacks in which users would run (every stack under `agent_user: honor`, compose projects and pods alike: stacks that
+  honor users follow), a user the image lacks, an image with no way to switch to one; a `copy` fork on Singularity,
+  whose snapshots keep no owners.
+  `verifier_user: honor` alone honors `[verifier].user`, now any user, and a root verifier graded in its agents' own
+  sandbox runs where the agents run as their user
+  ([Users in task sandboxes](docs/how-to/sandboxes-and-harbor.md#users-in-task-sandboxes)).
+- **Images keep their file owners where users are honored.** hpc-sandbox extracts every image as you, so a user that an
+  image gives a directory would find it root's. `platoon prepare` records each image's owner manifest, the paths its
+  layers give users other than root: the `oci` builder lists its OCI-SIF layer's owners before it unpacks it
+  (`<key>.owners` beside the image, `file_owners` in the map; `unsquashfs -lln` needs squashfs-tools 4.4, and with an
+  older one the build records none and says so), and a task's `docker_image` becomes a *pulled* entry of the image map,
+  the image its registry serves pinned by digest, with its `USER` and the owners its layers' tar headers give (whiteouts
+  applied), which the sandboxes that honor users run. The record also tells such a sandbox its image's `USER`, which it
+  cannot read itself. `SandboxSpec.file_owners` hands a manifest to hpc-sandbox 0.5, whose `fakeroot` sandboxes apply it
+  before anything runs; with an older one, such as the 0.4.0 of platoon 0.4, a task whose image gives files to
+  users other than root is refused when it is listed, naming 0.5. A task whose sandbox runs a user other than root, or
+  anything as its image's `USER` (the agents' under `agent_user: honor`), is refused where the image has no record:
+  built by platoon before 0.5, the `def` builder (Apptainer's) or the `oci` builder with a squashfs-tools before 4.4
+  (`platoon prepare` names the build), a `docker_image` that `platoon prepare` has not recorded, a local image file, or
+  a dataset directory's, which has no image map. A sandbox in which only root runs needs none. Docker keeps its images'
+  owners itself ([Users in task sandboxes](docs/how-to/sandboxes-and-harbor.md#users-in-task-sandboxes)).
+- **Sandboxes can run a command as another user.** `Sandbox.exec_as(user, cmd, ...)`, optional, runs one as a user of
+  the image (the docker provider's); a provider whose sandboxes lose their images' file owners says so
+  (`loses_file_owners`) and whether it can apply a manifest (`file_owners_refusal(options)`;
+  `platoon.sandbox.loses_file_owners`, `file_owners_refusal`)
+  ([Write a sandbox provider](docs/extending/sandbox-providers.md)).
+- **A Harbor stack's MCP servers are env tools.** Each `sse` or `streamable-http` server of a task's
+  `[[environment.mcp_servers]]` whose `http://` URL names a service of its stack (`http://mcp-server:8000/mcp`) serves
+  its tools through the tool plane, as the session's env tools, each named for the server and the tool in ASCII letters,
+  digits and underscores (`mcp_server__get_secret`): read-only where the tool's `readOnlyHint` says so, filtered by the
+  agent's access level, recorded with the agent's tool calls, called in their turn with the generic tools within
+  `tool_timeout_s`, and their text cut as the generic tools' output is. platoon's own MCP client speaks both transports,
+  streamable HTTP and the legacy SSE transport, Harbor's default for task servers, with the protocol versions the
+  gateway serves, reads no answer or listing longer than 16 MiB, follows a server's redirects within its origin alone,
+  sends each request on a connection of its own (one that a server's keep-alive ends as a call arrives would lose it),
+  and brings no `mcp` package into the rollout workers. The session lists the tools as it opens: a server that cannot be
+  reached or does not list its tools fails its start (`sidecar_start`), naming it, rather than run the rollout without
+  them ([Task MCP servers](docs/how-to/sandboxes-and-harbor.md#task-mcp-servers)).
+- **This host reaches a stack's services on every stack provider.** `Stack.connect(service, port)` gives the docker
+  provider's stacks a relay: a container in the network of the service that listens there, running platoon's forwarder
+  with the Python 3 of that service's image, else of `main`'s, which serves a Unix socket in the project's directory,
+  whatever the stack's networks, also from a rootless daemon; a pod's port is the socket that hpc-sandbox 0.5 exposes;
+  the `process` provider's is the port of the host that the stack holds. A socket path too long for an address is
+  handed out as a link in node scratch (`platoon.sandbox.stacks.SocketLinks`)
+  ([Write a sandbox provider](docs/extending/sandbox-providers.md#run-multi-container-stacks)).
+- **Harness specs get a task's own MCP servers.** `{task_mcp_servers}` renders the MCP servers a task offers its agents,
+  as a JSON list of each one's `name`, `transport` and `url` as the task's sandbox reaches it (or a `stdio` server's
+  `command` and `args`), for a harness in the task's sandbox that reaches them itself, as Harbor's agents do; a harness
+  that runs locally gets `[]`, and reaches only the servers that the env's tools serve. A session gives them as
+  `task_mcp_servers`, an optional attribute ([Placeholders](docs/tutorials/cli-harness.md#placeholders)).
+
+- **One lifecycle for every trainer, and the trainer API (experimental).** Each start of training goes through
+  `platoon.train.trainer.run.TrainerRun`, in the order a start always ran: the trainer's checks, the signal
+  handlers, the policies' service clients and the start point, their training clients, the trainer's preparation,
+  the launch save, the trainer's readying, its steps, the save at exit and its closing; a trainer's part of each phase
+  is a hook of `platoon.experimental.TrainerBase` (`check`, `prepare`, `started`, `ready`, `run_steps`, `close`),
+  and `PlatoonTinkerRLTrainer` is one. `platoon.experimental` exports `Trainer`, `TrainerBase`, `TrainerSetup`,
+  `TrainerNeeds`, `TaskSources`, `Workflows`, `StepPlan`, `PolicySpec`, `MAIN`,
+  `CheckpointParticipant` (a part of the run's state that every full checkpoint holds, after the run's counters, in
+  the order the parts registered) and `Objective`, and `platoon.testing.check_trainer` checks a trainer: it trains a
+  run of two steps on a fake Tinker service, stops one at a step boundary and resumes it. The config's `trainer:`
+  selects the trainer; this release has one, `rl`, the default (`sft` and `interleaved` are reserved). Nothing a run
+  does changes.
+
+- **Any trainer draws the run's rollouts, and the workflow contract (experimental).** A trainer whose
+  `needs()` say it rolls out gets the start's draws from its run, `run.rollouts()`
+  (`platoon.train.dispatch.source.RolloutSource`): the run's task order and samplers, the group admission rules, the
+  per-task statistics, the dispatcher with its rollout permits and exact resume, and the groups they settle into
+  (`take`, which ends on the run's shutdown request, `committed` and `step_started`), which take part in every full
+  checkpoint; the run builds its workflows from its setup.
+  `platoon.experimental` exports the workflow contract: `RolloutWorkflow`, `WorkflowCapabilities`, `capabilities_of`,
+  `WorkflowSetup`, `RolloutOutput`, `OutputReport`, `report_of` and `rows_by_policy`. `platoon train` builds the run's
+  workflow class from a `WorkflowSetup`, with its `from_setup` when it has one (`GroupRolloutWorkflow` does), else with
+  `GroupRolloutWorkflow`'s keyword arguments, as before. Nothing a run does changes.
+
+### Changes
+
+- A `process` sandbox whose working directory is `/` runs in its own `/tmp`, since no path maps to the host's root; the
+  provider refused such a spec.
+- The `process` provider's root (`platoon-sandboxes-<uid>` in node scratch) is a directory of your uid's alone, as the
+  `docker` provider's `stack_root` is: made 0700, and refused, with nothing made there or reaped from it, when it is a
+  symlink or another user's directory, which another user of a node's shared scratch could have put there.
+- A `singularity` or `enroot` sandbox whose start is given up (a rollout cancelled while its sandbox starts) is stopped
+  once its start is done, which then runs to its end: cancelled while Singularity made its instance, hpc-sandbox's own
+  rollback could fail and leave the instance running until the worker exited.
+- Harbor reads only `environment/docker-compose.yaml`, and so does platoon now: a task whose compose file is named
+  `compose.yaml`, `compose.yml` or `docker-compose.yml` runs as one container without it, as in Harbor, where platoon
+  refused it (or ran it, when it only named `main`), and the fetch warns of it (`flags.unread_compose`); a task with a
+  prebuilt image, no Dockerfile and such a file gets its `environment/` uploaded, as Harbor does.
+- A lock records each task's stack plan. A dataset pinned to a commit whose lock platoon 0.4.0 wrote keeps answering
+  its config where the lock refused no task as a stack (`stack`), and also, with its main-only tasks refused as 0.4.0
+  refused them, where the config sets `refuse: {sidecars: true}`: fetch it again to run them (`platoon harbor fetch
+  CONFIG --repair`). Where it refused stacks and the config sets no `refuse.sidecars`, the dataset is fetched again
+  (below). A lock whose plans follow another compose rule (`compose_rule`) is not read: fetch the dataset again.
+- **A fetch locks multi-container tasks as runnable stacks** (`refuse.sidecars` defaults to `false`), where platoon 0.4
+  refused them by default (`stack`), and with `sidecars: false` locked them refused (`task_config`). Where the
+  provider runs no stacks, a run stops when it lists its tasks, naming them: leave them out (`exclude_tasks`), or set
+  `refuse: {sidecars: true}`, which refuses them as before, as `stack: the compose file adds sidecar services (refuse:
+  {sidecars: false} fetches it as a stack)`. A lock written for an entry that sets no `refuse.sidecars` and that
+  refused stacks no longer answers it: `platoon prepare`, `platoon train` and `platoon eval` fetch a pinned dataset
+  again (its cached tasks are reused), and a rollout worker that finds no lock names the old one; a lock that refused
+  none still answers. A dataset directory's multi-container tasks are listed where the provider runs stacks, and
+  skipped with a warning, as before, where it runs none.
+- The `hpc` extra requires hpc-sandbox 0.5.1 (`hpc-sandbox>=0.5.1,<0.6`), where platoon 0.4 took 0.4 (`>=0.4.0,<0.5`):
+  0.5 has the pods that stacks run as and applies owner manifests, and 0.5.1 fixes pods for clusters: a sidecar that
+  switches users starts where the run's directory or the task's files are on storage that only one of your groups opens,
+  and reaches its binds under a umask such as 027, and a pod's `main` outlives an agent's `kill -9 -1`, which with 0.5.0
+  ended it and made the attempt an `error`. With an older hpc-sandbox, which an environment that installs platoon
+  without the extra may keep, stacks, and the tasks whose sandboxes need an owner manifest, are still refused when the
+  tasks are listed, naming 0.5 ([The hpc extra](docs/getting-started/install.md#the-hpc-extra)).
+- The `def` builder's images record their base image's configuration (`ENTRYPOINT`, `CMD`, `USER`, `HEALTHCHECK`,
+  `EXPOSE`, ...), from its registry, under what the Dockerfile sets, since a definition file keeps none of it (a
+  sidecar's image, whose command may be its base's, fails to build without it); and the `singularity` provider's
+  images are built with `def` where its runtime is Apptainer, which has no BuildKit for `oci`.
+- `[[verifier.collect]]` hooks, which platoon refused, run: in `main` for a single-container task, in their service for
+  a stack, `main`'s first, best effort (`collect_failed` in the outcome). A hook that names a `user` is refused unless
+  the users policy ignores it: `verifier_user: ignore`, or, where `verifier_user` is unset, `agent_user: ignore`.
+- The capabilities a provider may declare (`platoon.sandbox.base.CAPABILITIES`) include `stacks`, which the `process`
+  provider declares: a provider that copies another's capabilities, as the provider guide's wrapper did, declares
+  `stacks` only with a `start_stack` of its own. The `process` provider links its mounts before it makes the working
+  directory, so that a working directory that is a mount's target is that mount, and never makes it inside a read-only
+  mount: a read-only bind of a task's files at the working directory, which it dropped, applies, and since the
+  provider enforces no read-only mount, what is written there reaches the task's files.
+- Image map entries record an image's `HEALTHCHECK`, `EXPOSE` ports, `VOLUME`s and `STOPSIGNAL` too, and a
+  Dockerfile's build plan what its deferred suffix sets in the image's configuration (`config`: `CMD`, `ENTRYPOINT`,
+  `HEALTHCHECK`, ...), which a main-only task's init and healthcheck use. The build keys of task images do not change.
+- The `docker` provider removes a sandbox's anonymous volumes with it (`docker rm --volumes`), which those of an
+  image's `VOLUME`s outlived, also when it reaps; its `reap` removes the labelled stacks first, and counts them with
+  the containers. Its sandboxes are reaped through a record that names its `stack_root` too.
+- `platoon.sandbox.stack_refusal` asks a built provider's class too (its `stack_refusal(options)`, with the provider's
+  `options`), as it asks a provider named by its name.
+- A dataset directory's stack whose sidecar builds from a context is refused saying that a fetched dataset's image map
+  can hold that image (serve the directory as a dataset to fetch). `examples/harbor-local`'s `needs-a-database` is
+  still refused on Docker, which runs stacks now, for its `postgres:16` sidecar, which runs its image's own command,
+  which only a fetched dataset's image map records (`platoon prepare` pins it).
+- A deferred `COPY` keeps its `--chown` in a lock's build plan (`["COPY", "--chown=<owner>", source, ...,
+  destination]`), and a deferred `USER` its place among the deferred steps (`["USER", user]`), which a platoon before
+  0.5 does not read: fetch such a dataset again with it. A lock fetched before keeps its copies, and the directories
+  that a `WORKDIR` after a `USER` makes, root's where users are honored, and a run that honors users warns of it.
+- A root verifier's sandbox (`verifier_user: honor`) gives every user the read and search access to the files of an
+  image's deferred `COPY` steps that their group has, as a checkout under Docker's umask gives it, where it kept the
+  host's modes (a file of mode 600 stays so); `tests/` keeps the host's modes there, and `/logs/verifier` stays
+  root's, as before.
+- The docker provider runs its own commands in a container, a compose service's too, as root (`docker exec --user
+  0`), whatever the image's `USER`: the kills before grading, the listing of the container's processes, the
+  directories an upload makes and the look at what a download copies. Commands keep running as the container's user.
+- The `edit` tool reads a file through the sandbox's shell, as the sandbox's commands run, rather than with a download,
+  which runs as the sandbox's root; a file larger than a command's output holds (8 MiB on `docker` and `process`, 16
+  MiB on hpc-sandbox, in base64) is an error rather than an edit, and so is one that is not a regular file (a FIFO, a
+  device), at once, and a read that takes longer than `tool_timeout_s`.
+- Staged harness toolchains are readable by every user, their directories and programs runnable by them, so that the
+  users a sandbox switches to run them.
+- The refusals of tasks that name users read `... and the environment refuses tasks that name users; the task is
+  refused unless it sets agent_user: honor, ... or ignore, ...` when a task loads, and `agent_user: the task sets
+  [agent].user or [verifier].user (refuse: {agent_user: false} fetches it, ...)` in a lock. `HarborEnvironmentService
+  .root_images_closed()` is `closed_images()`, which covers every sandbox that honors users.
+- **The training code lives in packages named after the stages of a run.** `platoon/train/tinker/` held the trainer,
+  its config, the rollout workflows and the rollout workers; they are now packages of `platoon.train`: `trainer` (one
+  start of training: the trainer, the training loop, signals and the watchdog), `policy` (the model training samples
+  and steps: its spec, its state, its training client, its own saves and its learner, through which a step updates
+  it), `objectives` (what its rows train under: the loss, the loss inputs only the trainer reads and the training
+  metrics), `step` (one training step: its metrics, the staleness warning, the batch transforms), `dispatch` (what
+  starts the training groups: the dispatcher, the rollout permits, running and settling a group), `workflow` (one group
+  of rollouts: `GroupRolloutWorkflow` and its parts), `credit` (a group's baselines and error-token filter), `workers`
+  (process-per-rollout), `checkpoints` (what a full checkpoint saves, and resuming) and `evaluation` (evaluation during
+  training); the config schema is `platoon.train.config_defs`, and `platoon train`'s start `platoon.train.launch`.
+  Nothing a run does changes: the same datums train in the same order, and the metrics, config keys, messages,
+  checkpoints and the files a resume reads are as before. `platoon.train.tinker` keeps the policy client (`proxy`), its
+  renderers, `key_refusal` and `rollout_metrics`, until a later release moves them, and the shims of the old paths
+  (below).
+- **The trainer reads the model it trains from its config once, as it is built.** Its policy (`platoon.train.policy`)
+  takes the model, the renderer, `tinker_base_url`, `train.lora_rank`, `train.optimizer`, `train.loss_fn`,
+  `train.loss_fn_config` and `checkpoint.load_checkpoint_path` from the config when `PlatoonTinkerRLTrainer` is made,
+  where it registered its model gateway before: setting one of them in the config after that and before `train()` no
+  longer reaches its training client, its updates and their `optim/lr` metric, or its recovery pruner.
+  `TrainLoopSharedState` holds the run's policies (`policies`), and `model_info`, `service_client`, `training_client`,
+  `sampling_client`, `optimizer_params` and `optimizer_steps` are properties of the policy it trains, so
+  `dataclasses.fields()` lists `policies` in their place. It is made with keyword arguments only, and still takes
+  those six instead of `policies`, but not beside it: given both, it raises `TypeError`, and so does
+  `dataclasses.replace()` of it. A `copy.copy()` of it shares the original's policies.
+- `TrainLoopSharedState` holds the run's step clock (`clock`), and `train_step` and `sampling_client_updated_event`
+  are properties of it, so `dataclasses.fields()` lists `clock` in their place; it still takes those two instead of
+  `clock`, but not beside it. `PlatoonTinkerRLTrainer` saves its launch, interrupted and final checkpoints through the
+  run's checkpoints, whose lines (`Saving recovery checkpoint ... at launch`, `Saving permanent checkpoint ...`,
+  `Training complete successfully!`) come from `platoon.train.trainer.run`, and its `run_log_path`, `async with` and
+  `_await_with_heartbeat` are `TrainerBase`'s, whose lines (`This run labels its sandboxes ...`) come from
+  `platoon.train.trainer.api`.
+- The rl trainer's draws are a rollout source too, which the run opens, starts and closes as it does any trainer's:
+  `PlatoonTinkerRLTrainer` keeps `_recorder`, `_dispatcher` and `_admissions` as properties of its source, its steps
+  commit their groups and move the horizon on through the source, and the source's steps of opening, saving and taking
+  up the draws go through the trainer's methods of their names (`_begin_task_records`, `_training_tasks`,
+  `_new_dispatcher`, `_task_records_started`, `_checkpoint_state`, `_restore_dispatch`; `_dispatch` starts them).
+  Those call the source's parts, in `platoon.train.dispatch.source`, `.setup`, `.runner` and
+  `platoon.train.checkpoints.saving`, `.resume`, which take the source in place of the trainer, and call what they need
+  as module functions, no longer through the trainer: replacing its `_samplers`, `_run_group` or
+  `_await_rollout_with_heartbeat` changes no training group (`_run_group` still runs an evaluation's groups), and the
+  trainer has no `_run_training_group`, `_settle_under_rule`, `_read_kept_groups`, `_saved_samplings` or
+  `_resume_position` any more. The lines of the per-task statistics' start (`This start keeps no per-task statistics
+  ...`) come from `platoon.train.dispatch.source`.
+- **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
+  format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
+  `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),
+  `platoon.train.trainer.rl` (a start's), `platoon.train.workflow.members` (a group's stragglers) or
+  `platoon.train.workflow.telemetry` (a rollout worker's). A filter or a level set on `platoon.train.tinker` no longer
+  reaches them: set it on `platoon.train`.
+- `import platoon.train.tinker` no longer imports the trainer, and with it datasets and transformers: it loads about
+  half the modules it did. It still loads tinker, torch and tinker_cookbook: its init applies the rollout worker
+  invariants first, from `platoon.train.workers.env`, and the init of `platoon.train.workers` imports the protocol.
+  `platoon.train` exports the trainer, its config classes, the batch transforms, `GroupRolloutWorkflow` and
+  `current_entry` lazily, and neither it nor `platoon.train.config_defs` loads tinker or torch.
+- Rollout workers run `python -m platoon.train.workers.entrypoint`. Their fork server preloads the modules it did
+  (the trainer's among them), so a forked worker starts as it did. A worker started by exec no longer imports the
+  trainer before its rollout, nor datasets, pandas and requests with it, which a forked worker holds from its server:
+  under `worker_python_env_isolation`, a rollout's Python overlay can now replace those in an exec'd worker, not in a
+  forked one.
 
 ### Fixes
 
+- The `process` sandbox provider's `reap(labels)`, which a run calls before it starts and as it exits, and
+  `platoon sandbox reap` with it, returns only once the processes it killed have exited, or after 10 seconds, with a
+  warning that names those still running. It returned once it had sent them SIGKILL, while they could still be giving
+  back their memory, files and ports.
+
+### Deprecations
+
+- **The module paths under `platoon.train.tinker` that moved.** Each still imports, and each name read through it
+  warns once with a `PlatoonDeprecationWarning` that names its new module, until platoon 0.6.0 removes them. A name
+  read through an old path is the moved object itself, so `isinstance` checks, pickles and the `module:Class` a config
+  names keep working. Importing an old module imports the trainer, as it did before (`platoon.train.tinker` itself no
+  longer does: above), so that no module of the trainer is first imported while a patch made through an old path is
+  active. A module that was split still has the names it imported, `from <old path> import *` binds what the new
+  module exports (a split module's public names that moved), the submodules that an old package's init imported are
+  its attributes, and a name set or deleted through an old path, as `monkeypatch` and `mock.patch` do, is set or
+  deleted where the moved code reads it, and undoing the patch puts back what was there, also for a `mock.patch` made
+  with `create=True` or nested in another patch, by unittest.mock or by the `mock` package. A method of
+  `PlatoonTinkerRLTrainer` or `GroupRolloutWorkflow` that moved is a module function that its class keeps under its
+  name: patch the class or an instance, as before, not the module function. What stays different through an old
+  path: a patch through `platoon.train.tinker.rl` also reaches the moved code of `.permits` and `.censoring`, and one
+  through either of them reaches rl's, as they share new modules. Patching an old module's namespace
+  (`mock.patch.dict(vars(module))`, `monkeypatch.setitem(vars(module), ...)`) does not reach the moved code: patch the
+  attribute instead. An old module's `__all__` is computed when it is read, not held in the module. Where each went:
+  - `platoon.train.tinker`'s names (`PlatoonTinkerRLTrainer`, `Watchdog`, the config classes, the batch transforms):
+    `platoon.train`;
+  - `platoon.train.tinker.rl`: by stage, `PlatoonTinkerRLTrainer` and `Watchdog` to `platoon.train` (they live in
+    `platoon.train.trainer.rl` and `.signals`), the loops' exceptions to `platoon.train.trainer.signals`,
+    `TrainLoopSharedState` to `platoon.train.trainer.state`, `PlatoonTinkerDataloader` to `platoon.train.dataloader`,
+    `compute_training_metrics` to `platoon.train.objectives.policy_gradient`, and the rest to `platoon.train.trainer`,
+    `.policy`, `.step`, `.dispatch`, `.checkpoints` and `.evaluation`;
+  - `platoon.train.tinker.config_defs`, `.dataset_order`, `.task_records`: `platoon.train.config_defs`,
+    `.dataset_order`, `.task_records`; `platoon.train.tinker.train`: `platoon.train.launch`;
+  - `platoon.train.tinker.batch_transforms`, `.staleness`, `.censoring`: `platoon.train.step.batch_transforms`,
+    `.staleness`, `.metrics`;
+  - `platoon.train.tinker.dispatcher`, `.permits`: `platoon.train.dispatch.dispatcher` (the dispatcher's state file,
+    `save_state`, `read_state` and `plan_resume` among it, to `platoon.train.checkpoints.dispatch_state`) and
+    `platoon.train.dispatch.permits`;
+  - `platoon.train.tinker.kept_groups`, `.checkpoint_pruning`, `.evaluation_record`:
+    `platoon.train.checkpoints.kept_groups`, `platoon.train.checkpoints.pruning`, `platoon.train.evaluation.record`;
+  - `platoon.train.tinker.workflows` and `.workflows.group_rollout_workflow`: `platoon.train.workflow`
+    (`GroupRolloutWorkflow`, `RolloutWorkflow`, `current_entry`, `group_baselines`) and its modules, and the group's
+    credit to `platoon.train.credit.group` (`group_baselines` lives there);
+    `platoon.train.tinker.workflows.base`: `platoon.train.workflow.protocol`; `platoon.train.tinker.start_limit`:
+    `platoon.train.workflow.start_limit`;
+  - `platoon.train.tinker.workers` and its modules, and `platoon.train.tinker.worker_env`: `platoon.train.workers`,
+    its modules, and `platoon.train.workers.env`;
+  - `python -m platoon.train.tinker.workers.entrypoint` and `python -m platoon.train.tinker.train` still run, with the
+    warning: run `python -m platoon.train.workers.entrypoint` and `python -m platoon.train.launch`.
+
+  After upgrading under a run that is training, restart it, so that its rollout workers run the code it does.
+
+## 0.4.0 (2026-10-25)
+
+### New features
+
+- **Task samplers you choose per environment, and an adaptive one (experimental).** Each environment entry may set
+  `task_sampler` and `task_sampler_options`: under `train.task_sampler: weighted` (a mixture's default), the run hands
+  each slot to an entry by weight, as before, and the entry's sampler chooses which of its tasks fills it. `uniform`,
+  the default, draws the entry's tasks in the seeded passes it always has; `pass_rate` chooses the task whose next
+  group is most likely to mix passes and failures, so that more groups train, from the per-task statistics: Thompson
+  sampling on each task's pass rate, with a fifth of the draws going to the tasks drawn least recently and at most
+  three draws of a task per pool-sized window. `train.task_sampler: pass_rate` chooses over every task of the run
+  instead. Each step logs what it drew and why, the informative share it predicted and the one it got, how
+  concentrated its draws are, and how long it took to decide (`train/sampler/...`). It is experimental: it becomes the
+  recommendation only after a GPU comparison with `uniform` shows more informative groups at an unchanged held-out
+  pass@1
+  ([Choose tasks by their pass rates](docs/how-to/train-and-eval.md#choose-tasks-by-their-pass-rates-experimental)).
+- **Write your own task sampler (experimental).** A sampler is a small class, registered with
+  `@task_sampler(name, options=...)` from an entry's `package`, or named as `module:Class`, at the run level or an
+  entry's, with typed options (`train.task_sampler_options`, or the entry's `task_sampler_options`) checked against its
+  schema before the run starts (core's samplers' already when the config loads) and recorded in `lock.json`. A sampler
+  that reads no statistics draws when the order reaches it, as the built-ins always have; one that reads them decides
+  when its group can start, among the tasks whose label has room, reproducibly from its seed and its decision count.
+  The API and the per-task statistics types it reads are in the new `platoon.experimental` module, and
+  `platoon.testing.check_task_sampler` checks a sampler against the contract
+  ([Write a task sampler](docs/extending/task-samplers.md)).
+- **Train only on the groups that carry signal, with refill (experimental).** `train.group_admission: informative` (or
+  an environment's own `group_admission`) decides when each training group settles whether it counts toward the batch: a
+  group whose workflow says it trains nothing (its rollouts scored alike, or it carried no datums) is rejected, and one
+  whose rollouts scored alike frees its place at once, so that another group starts while the trainer works (one without
+  datums, which can end at once, keeps its place until a step takes it). A step trains the first `batch_size` admitted
+  groups that are not stale, and stops waiting once it has counted `refill.max_groups_per_step` (3.0) times `batch_size`
+  groups, training what it admitted. `group_admission_options: {band: [lo, hi]}` also rejects groups whose pass rate is
+  outside the band. `all`, the default, admits every group, as before. A step then trains up to several times the
+  informative groups, and only those, at more rollouts a step: up to the cap's multiple of the groups it counts, and
+  where the trainer bounds the run, the groups that start while it trains, which the horizon and the rollout permits
+  bound, not the cap; each step logs what it admitted and rejected, and why (`train/admission/...`). Under a loss whose
+  objective is not zero at zero advantages, a rejected group's advantage-independent terms go too, and loading warns;
+  beside a rule, `num_minibatches` must be 1. Custom rules register with `@group_admission` or are named as
+  `module:Class`; the API is in `platoon.experimental`, and `platoon.testing.check_group_admission` checks a rule. It is
+  experimental: it becomes the recommendation only after a GPU comparison ([Train only on groups that carry
+  signal](docs/how-to/train-and-eval.md#train-only-on-groups-that-carry-signal-experimental), [Write a group admission
+  rule](docs/extending/group-admission.md)).
+- **Rollout permits that come back as each rollout ends, by default.** A training rollout returns its permit
+  (`train.max_concurrent_rollouts`) as soon as it ends rather than when its group's workflow returns
+  (`train.permit_release: rollout`, the default), so the next group starts on the permits a group's finished rollouts
+  give back instead of waiting for its slowest one; on long agentic tasks a quarter to a third of the budget sat idle
+  that way. `GroupRolloutWorkflow` runs each member on its group's lease, so a group starts on its first free permit
+  and its members as the rest free (rolling starts), each member's straggler deadline shifted by its own start delay; a
+  workflow that does not say it runs its rollouts on the lease gets each group's permits whole, as before. Groups are
+  drawn, decided, credited, admitted and resumed as before, a partly finished group counts whole toward the horizon,
+  and a run at `max_staleness: 0` with the default budget trains the same datums in the same order. More groups are
+  open at once, so more long groups can go stale: the run warns when they do, and raising `max_staleness` by one is the
+  documented answer. The default changes ahead of a GPU comparison of the two settings; `train.permit_release: group`
+  keeps the behavior of earlier releases, event for event (RFC 0020;
+  [Rollout permits](docs/how-to/train-and-eval.md#rollout-permits); what changes for a config that sets nothing is
+  under Changes, below).
+- **Run a workflow's own rollouts on the lease (experimental).** `platoon.experimental` exports `rollout_lease()` and
+  `RolloutLease`: a workflow runs each rollout in `async with rollout_lease().rollout(i):`, whose permit comes back
+  when the block exits, and declares `runs_rollouts_on_lease = True` for rolling starts. In a training draw a block for
+  an index outside the draw's size raises `IndexError`, and a second block for an index `RuntimeError`, under either
+  setting; outside a training draw, as in an evaluation, the lease is a no-op ([Run rollouts on the
+  lease](docs/extending/rollout-leases.md)).
+- **See what keeps groups from starting.** Every training run logs, each step, the share of the step in which the
+  dispatcher could not start a group and why (`train/dispatch/blocked_share/{permits,horizon,labels,plan,sampler}`),
+  the permits held (`rollout_client/permits_held_mean`), the groups waiting for a worker-startup slot under process
+  isolation (`rollout_client/startup_gate_waiting_mean`), and, where a straggler policy applies, what it censors
+  (`train/batch/censoring/*`, and each label's: the share of rollouts it cancelled, and over mixed groups the pass
+  rate of each group's slowest valid rollout against the others'). It warns, once per start of training, when more
+  than 2% of the groups the last 10 steps consumed went stale (so from the tenth step on), naming what held the
+  dispatcher back and the fixes, and when more of `GroupRolloutWorkflow`'s rollouts ran at once than
+  `max_concurrent_rollouts`.
+- **Rollouts start without the work that each used to do again, or wait for.** Two costs fell on a rollout's start.
+  A CLI harness's first rollouts on a node waited while one of them copied the harness's toolchain to node-local disk
+  (about 36,000 files and 800 MB for OpenHands), at every start and every resume in a new job: `platoon train` now
+  stages its toolchains while it opens the training service and saves at launch, and starts no rollout, training's
+  or an evaluation's, before that is done (`platoon eval` while it lists its tasks), so that no rollout waits for the
+  copy and the first ones wait only for what of it outlasts the launch save; it waits ten minutes at most, and not
+  past a shutdown request. And each rollout worker imported, after its fork, what its environment and harness import
+  when they open, about 3,700 modules for an in-process ORS environment played by CodeAct, and parsed the
+  environment's task file again: the workers' fork server now does that once, before it forks them, from what the
+  config names (the environment's module and the openreward SDK, each function harness's and program's module, the
+  registry lookups, an in-process environment's task lists for the run's splits), and starts as soon as the training
+  client is open. It keeps only what leaves it fork-safe: a module or a build that starts a thread or a process,
+  leaves a file, socket or event loop open, or seeds a numpy generator from the OS is left out with a warning that
+  says why, and the workers import it themselves. `train.workflow_config.worker_preload` adds modules that an
+  environment imports only when it opens. In CPU benchmarks of TextCraft-Synth played by CodeAct with Qwen3-4B's
+  renderer, a forked worker reached its agent in 0.03 s instead of 7-9 s, 25-30 s and 48-56 s with 32, 128 and 256
+  workers starting at once, with 149 file system calls on the shared filesystem instead of 17,134 and 30 MB of memory
+  of its own instead of 290 MB. In CPU emulations of an OpenHands first wave whose toolchain copy took 77-90 s, the
+  first sandbox could open 8-17 s sooner after the training client opened, and 46-53 s sooner behind a 38 s launch
+  save ([Rollouts are slow to start](docs/how-to/troubleshooting.md#rollouts-are-slow-to-start)).
+- **A limit on rollouts starting at once (experimental).** `train.max_starting_rollouts: N` lets at most `N` rollouts
+  set up their workers, sandboxes and harnesses at once, training's and evaluation's together, first come, first
+  served: a `GroupRolloutWorkflow` rollout takes a start slot once it holds its permit and gives it back as its first
+  model call is issued, as it ends, or after `worker_startup_budget_seconds` + 300 s without a call. It is for
+  start-ups that contend for a shared capacity, such as sandboxes that each extract a root filesystem; off by default
+  (`null`), it changes nothing. It shortens no one-time start-up work (the fork server's import, a harness toolchain's
+  copy to each node, the modules each worker imports), and with any value a run's whole first wave reaches the model
+  later. Each step logs the rollouts starting and waiting to start, their waits and why slots came back
+  (`rollout_client/start_limit/...`), and the run warns when slots come back on their timer, or mostly only at their
+  rollouts' end ([Rollout start-ups](docs/how-to/train-and-eval.md#rollout-start-ups-experimental)).
+
+### Changes
+
+- `train.task_sampler` takes registered names and `module:Class`. An unknown name is still refused when the config
+  loads, in the same report as the file's other problems, with a longer message that begins as before, unless an
+  entry names a `package` that could register it; it is then refused before the run starts.
+- A full checkpoint's `tasks/dispatch-*.json` is format 2: it adds the row each outstanding draw drew, the count and
+  state of each task sampler, the run's and each environment's under `weighted` (and `auto` for a mixture), and the
+  slots waiting for an environment's adaptive sampler. A resume reads platoon 0.3.0's format 1 as before, and goes on
+  exactly where its run stood; platoon 0.3.0 cannot resume exactly from a checkpoint that 0.4.0 wrote (it draws from
+  the checkpoint's batch, as from a checkpoint of 0.2)
+  ([Checkpoints and resume](docs/how-to/train-and-eval.md#checkpoints-and-resume)).
+- The per-task statistics record which task sampler drew each group, and why: `GroupRecord.sampler` names the
+  sampler that chose the task (the run's sampler as the config names it, or an entry's as `<sampler>@<entry>`, such as
+  `uniform@<entry>` for an environment's `uniform` under `weighted`), with the draw's `reason` and `score`, and so do
+  the draw events of `tasks/events.jsonl`, every one of them.
+- Every training run's `lock.json` records its task samplers, the run's and each entry's it asks, as components of
+  `kind: task_sampler` with their options, defaults included; and every run logs what its samplers drew since the last
+  step, by reason, and how long their decisions took (`train/sampler/draws`, `train/sampler/draws/<reason>`,
+  `train/sampler/decision_ms`, and an entry's under `train/sampler/environment/<entry>/`).
+- The per-task statistics take in settled groups in the order they were drawn, at each step's metrics, each full
+  checkpoint and each adaptive decision, not in the order they completed, so their values no longer depend on
+  completion order within a step.
+- The per-task statistics have a sixth fate, `rejected`, a group admission rule's: `platoon tasks show` prints it
+  after `lost`, and `platoon tasks export` has a `fate_rejected` column after `fate_lost`, so the five columns after it
+  (`group_size` to `newest_version`) move one place right. A rejection's `fate` event in `tasks/events.jsonl` names the
+  rule and its reason (`rule`, `admission`).
+- `GroupRolloutWorkflow` declares `gives_verdicts = True`; a workflow class of your own that gives each group a
+  verdict declares it too, so that `group_admission: informative` loads beside it.
+- A full checkpoint of a run under a group admission rule records in its row of `checkpoints.jsonl` where the order
+  stood (`next_position`): a resume that cannot read the checkpoint's state of the draws draws on from there, since
+  such a run's steps draw more positions than their batch.
+- `GroupRolloutWorkflow` declares `runs_rollouts_on_lease = True` and runs each member in a block of its group's
+  lease; a subclass that overrides `arun_episode`, `_run_group_rollouts` or `_run_group_member`, itself or through a
+  mixin, reads as `False` unless its own class body sets it. Under `permit_release: group` the blocks hold nothing,
+  but a training group of a subclass that runs a member index twice, as a retry of the whole group in
+  `arun_episode` does, now fails with `RuntimeError` under either setting: a retry stays inside the member's block.
+  A member's rollout sees no lease, so a group that it runs in turn takes no permits of its own and runs as before.
+- **Breaking: rollout permits come back as each rollout ends, unless `train.permit_release: group`.** The default of
+  `train.permit_release` is `rollout`, so `train.max_concurrent_rollouts` counts the rollouts running, no longer the
+  whole groups it holds. Where the permits bound a run, more groups run at once and start sooner, steps get shorter, and
+  more long groups can be dropped as stale: when more than 2% of the groups the last 10 steps consumed went stale, the
+  run warns and advises `max_staleness + 1`. There its rollouts are requested in another order, some on a newer policy,
+  and a restart redoes more of them. In process, a rollout's permit also waits, at most 60 s, for the sandbox and env
+  session teardowns that platoon finishes in the background, so that no more sandboxes are alive at once than the budget
+  (under `group` such a teardown can still outlive its group, as before). A run whose permits never bind, as at
+  `max_staleness: 0` with the default budget, trains as before. Each start of training under `rollout` says so in a line
+  of its log (`Each rollout returns its permit as it ends (train.permit_release: rollout) ...`). `train.permit_release:
+  group` restores the behavior of earlier releases ([The previous
+  behavior](docs/how-to/train-and-eval.md#the-previous-behavior)).
+- Under `train.permit_release: rollout`, `rollout_client/rollouts_in_flight_configured` is `max_concurrent_rollouts`
+  itself, so `concurrency_achieved_fraction` reads as the permits' busy share, and `groups_in_flight` can exceed the
+  budget over the group size. The straggler settings' documentation calls them a deadline against runaway rollouts,
+  not a throughput lever.
+- Under `train.permit_release: rollout`, an in-process rollout's permit comes back once the sandbox and env session
+  teardowns that platoon finishes in the background have ended too, such as one that a straggler cut interrupts or an
+  ORS environment's that waits for its code to end, so that no more sandboxes are alive at once than
+  `max_concurrent_rollouts`. The permit waits for them at most 60 s, and the run warns of a teardown that runs longer;
+  a cancellation ends the wait and no teardown, and a rollout that had ended keeps its outcome. Under `group` nothing
+  waits for them, as before ([Rollout permits](docs/how-to/train-and-eval.md#rollout-permits)).
+- A staged harness toolchain has a stamp beside it, `.<copy>.staged`, that records the tree hash it was checked
+  against and the jobs that checked it. Where the copy outlives its job (`PLATOON_TOOLCHAIN_CACHE` on node-local disk
+  that persists), the first staging of each later job hashes the copy again and keeps it when it matches its
+  manifest; before, a kept copy was used unchecked. One that no longer matches is copied again beside it, and the old
+  copy is set aside whole (`.<copy>.<hex>.stale`), never removed, since rollouts of another job may still run from it.
+  A copy staged by an earlier platoon is checked once. A cache that platoon cannot write to (read-only, another
+  user's, a full disk) records no check, so its kept copy is used unchecked, as before, with a warning.
+  `platoon.harness.toolchains.prestage` stages toolchains ahead of rollouts.
+- The rollout workers' fork server takes 4-8 s longer to start and holds 150-230 MB more memory, which the workers it
+  forks share (14-20 s against 10-13 s, and 890-930 MB against 670-740 MB, in CPU benchmarks of TextCraft-Synth played
+  by CodeAct with Qwen3-4B's renderer), once per run and while the trainer saves at launch; each worker holds far less
+  of its own.
+  Its first log line counts the modules it imported for the environments beyond the worker's stack (`imported the
+  worker's stack and 9 module(s) the environments open with`). An environment variable that one of those imports
+  sets is set in each worker too. Under `worker_start_method: exec`, `rollout_isolation: inprocess` and
+  `worker_python_env_isolation` nothing is imported ahead, as before, and a `worker_preload` set there is warned
+  about.
+
+### Fixes
+
+- A `GroupRolloutWorkflow` group without a straggler policy no longer leaves its other rollouts running when one of
+  them raises (as a subclass's own `arun_episode_single` can): it cancels them and raises once they have unwound. They
+  ran on after the group had failed and its rollout permits had come back, so more rollouts could run at once than
+  `train.max_concurrent_rollouts`, on work that no step trains. A cancelled group likewise returns only once all its
+  rollouts have unwound, not once the first has.
+- A resume under `train.task_sampler: uniform` draws again exactly the row it had drawn; it could take the listing's
+  form of the row, whose nested values differ in their empty keys.
+- A rollout worker that is cancelled, as by a straggler cut or a stop, no longer leaves its readiness and diagnostics
+  files in node-local scratch, where they stayed until a later run found them a day old.
 - **A model service that sends no routing ids is warned about once, not for each rollout.** With
   `rollout_isolation: process`, the trainer warned about every rollout whose model calls did not all get a routing
   id, which a server with rollout routing replay (R3) sends with each sampled sequence. With a service that sends
@@ -18,6 +652,41 @@ release, require a range such as `platoon[tinker,ors]>=0.3,<0.4`.
   has sent some, and it reports the first rollout to get any after rollouts without them, naming the first few of
   those. The metrics `train/rollout_worker_routing_id_coverage` and `eval/rollout_worker_routing_id_coverage` are
   logged as before.
+
+### Removed
+
+- **Breaking: `train.task_order` is gone.** Platoon 0.3.0 renamed it `train.task_sampler` and deprecated the old name
+  for removal in 0.4.0. A config or an override that still sets it fails as a configuration error (exit 78), with
+  `train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler`; so does a config copied from
+  platoon 0.2.0's `config show --defaults`, which spells `task_order: auto`, even beside a `task_sampler`, where 0.3.0
+  ignored it. Set `train.task_sampler` instead: it takes the old name's values, `auto` and `weighted`, which draw as
+  they did ([Train on several environments](docs/how-to/train-and-eval.md#train-on-several-environments)).
+
+### Install and upgrade
+
+```bash
+pip install -U 'platoon[tinker,ors]>=0.4,<0.5'
+# with the TextCraft extension, name it too:
+pip install -U 'platoon[tinker,ors]>=0.4,<0.5' 'platoon-textcraft[platoon]'
+```
+
+- **To upgrade a project that pins one minor release**, move its range to 0.4, such as `platoon[tinker,ors]>=0.4,<0.5`.
+  Platoon 0.4 refuses the components of an installed extension whose requirement on platoon excludes it, such as
+  `platoon>=0.3,<0.4`, with an error that names both versions, until a release of the extension admits 0.4;
+  meanwhile, `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` loads them anyway
+  ([Compatibility and provenance](docs/extending/index.md#compatibility-and-provenance)).
+- **A config that sets `train.task_order` no longer loads:** use `train.task_sampler`, which takes its values
+  (`platoon config validate` names the key).
+- **`train.permit_release` now defaults to `rollout`.** Where the permits bound a run, more groups run at once and
+  steps get shorter, and more long groups can be dropped as stale: if the run warns, raise `train.max_staleness` by
+  one. `train.permit_release: group` trains as 0.3 did
+  ([The previous behavior](docs/how-to/train-and-eval.md#the-previous-behavior)).
+- **The TextCraft extension's release for platoon 0.4 is `platoon-textcraft` 0.3.0**, whose `platoon` extra requires
+  `platoon[ors]>=0.4,<0.5`. Its code and data are those of 0.2.0. The release for platoon 0.3 stays 0.2.0: there, keep
+  the extension within 0.2 (`platoon-textcraft>=0.2,<0.3`), since platoon 0.3 refuses the components of 0.3.0, also
+  when it is installed without its extra. An upgrade of platoon alone leaves 0.2.0 installed, which pip does not flag
+  and platoon 0.4 refuses: upgrade the two together, as above
+  ([The TextCraft extension](docs/getting-started/install.md#the-textcraft-extension)).
 
 ## 0.3.0 (2026-10-20)
 

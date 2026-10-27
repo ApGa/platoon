@@ -1,15 +1,19 @@
 """Fetch Harbor datasets by name into a content-addressed cache, and pin them with a lock.
 
-    dataset: hf://org/harbor-dataset@f216b86ca1a18d44433d6cb45f70bec81f47c66e   # or a local directory
+    dataset: hf://org/harbor-dataset@f216b86ca1a18d44433d6cb45f70bec81f47c66e   # or a local directory, harbor://, git+
     lock: locks/harbor-dataset-phase0.lock.json  # default: <cache>/locks/<hash of these settings>.lock.json
     tasks: [splits/phase0-smoldata.json]         # allowlists of task ids: only these are downloaded
     select: {source_dataset: [FineEnvs/SmolDataEnvs-harbor-train]}   # filters on the dataset index's fields
     overlays: [overlays/smoldata-run-before-copy]
-    refuse: {sidecars: true, gpus: true, agent_user: true, per_task_build: false, uploads_over_mb: 100}
+    refuse: {sidecars: false, gpus: true, agent_user: true, privileges: true, per_task_build: false,
+             uploads_over_mb: 100}
     index: [{path: data/tasks.jsonl, fields: [split_group]}, {metadata: [kaggle_dataset_name]}]
 
 These are keys of a Harbor entry's ``service_kwargs`` (:func:`fetch_config`). The cache is the Harbor cache,
-``harbor`` in the site profile's cache (:func:`platoon.envs.harbor.lock.default_cache`).
+``harbor`` in the site profile's cache (:func:`platoon.envs.harbor.lock.default_cache`). The Harbor Hub
+(``harbor://org/name@ref``), Harbor's legacy registry (``harbor://name@version``, with ``registry``), git repositories
+(``git+<url>@<commit>#<path>``) and adapters (``adapter: {repo, commit, path, ...}`` instead of ``dataset``) are
+:mod:`platoon.envs.harbor.sources`.
 
 A fetch resolves the source at its pinned revision, reads the dataset's index (``registry.json``, else
 ``task-index.json``, else a scan for ``task.toml``), downloads only the selected tasks, applies overlays, and
@@ -62,6 +66,29 @@ Moving references (a branch, no revision) resolve only with ``update=True`` (``p
 
 An overlay changes the cached task, so its digest is the overlaid content's; the lock keeps the upstream digest
 as ``upstream_digest`` and the overlays' own hash as ``overlay``.
+
+**Compose files.** A task's ``environment/docker-compose.yaml`` is planned at fetch
+(:mod:`platoon.envs.harbor.compose`): the lock records its kind (``flags.stack``: ``single``, ``trivial``, ``main_only``
+or ``sidecars``) and its stack plan (``compose``), and refuses a file outside the subset platoon runs (``compose``,
+naming the service and key); with ``refuse: {privileges: false}`` it plans what only the docker provider grants
+(``privileged``, a ``cap_add`` of ``NET_ADMIN``, ...) instead, as the plan's ``privileges``.  Compose's other names
+(``compose.yaml``, ...) are plain files of the task, as in Harbor: the fetch warns of them (``flags.unread_compose``).
+An overlay may edit a task's compose services, and list the host variables its file may name, which a session
+resolves when it opens (they never enter the lock)::
+
+    compose_host_env = ["SCICODE_TEST_DATA"]  # ${SCICODE_TEST_DATA} in the compose file names this host variable
+    [[compose]]
+    service = "main"
+    unset = ["cap_add"]                    # keys to remove (dotted for nested ones: "deploy.resources.reservations")
+    set = {environment = {MODE = "eval"}}  # merged into the service's mappings; other values replace
+    [[compose]]
+    service = "judge"
+    replace = {command = ["judge", "--port", "8081"]}  # keys set whole
+    host_network = {listen = {8081 = "JUDGE_PORT"}, token = "JUDGE_TOKEN", bind = "JUDGE_HOST"}  # on the fallback
+
+A stack's plan also records the references to its services that the host-network fallback could not rewrite, from a
+scan of the task's files (:func:`platoon.envs.harbor.host_network.with_unrewritable_references`): under ``stacks:
+host_network`` a task that holds any is refused, unless an overlay edits them away.
 """
 
 from __future__ import annotations
@@ -89,10 +116,24 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any
 
+from platoon.envs.harbor.compose import (
+    COMPOSE_FILE,
+    COMPOSE_RULE,
+    ComposeEdit,
+    ComposeEditError,
+    ComposeError,
+    ComposePlan,
+    compose_path,
+    plan_compose,
+    read_document,
+    stack_kind,
+    unread_compose_files,
+)
 from platoon.envs.harbor.dataset import dataset_tasks
-from platoon.envs.harbor.dockerfile import BUILD_KEY_RULE, DockerfileError, plan_dockerfile
+from platoon.envs.harbor.dockerfile import BUILD_KEY_RULE, DockerfileError, copy_operands, plan_dockerfile
 from platoon.envs.harbor.hashing import (
     DEFAULT_IGNORES,
     GITIGNORE,
@@ -103,46 +144,63 @@ from platoon.envs.harbor.hashing import (
     file_sha256,
     task_files,
 )
+from platoon.envs.harbor.host_network import with_unrewritable_references
 from platoon.envs.harbor.inputs import input_digest, input_files
 from platoon.envs.harbor.lock import TASKS_DIR, DatasetLock, LockedTask, LockError, default_cache, read_lock, write_lock
-from platoon.envs.harbor.task import HarborTask, compose_file, is_trivial_compose
+from platoon.envs.harbor.references import (
+    _COMMIT,
+    _URL,
+    REGISTRY,
+    AdapterSpec,
+    FetchError,
+    check_source,
+    check_url,
+    is_legacy_registry,
+    legacy_registry_pinned,
+    registry_has_local_tasks,
+    registry_inputs,
+    source_pinned,
+)
+from platoon.envs.harbor.task import HarborTask, HarborTaskError, _environment_settings
 
 logger = logging.getLogger(__name__)
 
-REGISTRY = "registry.json"
 TASK_INDEX = "task-index.json"
 OVERLAY_FILE = "overlay.toml"
-COMPOSE_FILENAMES = ("docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml")
 MODES_RULE = "executable bit restored on *.sh files and files starting with #!"
-_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _HF = re.compile(
     r"^hf://(?:datasets/)?(?P<repo>[A-Za-z0-9][\w.-]*/[\w.-]+)(?:@(?P<revision>[^#]+))?(?:#(?P<subdir>.+))?$"
 )
+# What names a source to download rather than a local directory; ``adapter:`` is an adapter's name in the lock.
+_REMOTE_PREFIXES = ("hf://", "harbor://", "git+", "adapter:")
 _PER_TASK_LISTING = 64  # list each task's directory below this many selected tasks per parent, else the parent
 _MAX_ATTEMPTS = 10
 MIB = 1 << 20  # refuse.uploads_over_mb counts MiB
-
-
-class FetchError(ValueError):
-    """A dataset that cannot be fetched as configured."""
+# How a refusal of users to run as says what fetches the task.
+_USERS_FETCHED = "refuse: {agent_user: false} fetches it, for an environment that honors or ignores its users"
 
 
 @dataclass(frozen=True)
 class RefusePolicy:
     """What a fetch records as refused (``refuse:``), besides what :meth:`HarborTask.load` refuses, which a fetch
-    always records (``task_config``: multi-step and non-Linux tasks, collect hooks, a bad ``network_mode``, ...)."""
+    always records (``task_config``: multi-step and non-Linux tasks, a bad ``network_mode``, a stack's sidecar whose
+    command platoon does not know, ...)."""
 
-    # Compose stacks with services beyond `main`, as `stack`. HarborTask.load refuses them too until stacks run, so
-    # with `sidecars: false` they are still refused, as `task_config`.
-    sidecars: bool = True
+    # Compose stacks with services beyond `main`, as `stack`; with `sidecars: false`, the default since platoon 0.5,
+    # they are locked as stacks, which a session runs on a provider that runs stacks (the stacks capability) and a run
+    # refuses elsewhere when it lists its tasks.
+    sidecars: bool = False
     gpus: bool = True  # tasks that ask for GPUs
-    agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix
+    agent_user: bool = True  # [agent].user / [verifier].user / a USER in a deferred suffix (users to run as)
     per_task_build: bool = False  # Dockerfiles whose build prefix no other task shares
+    # Compose services that ask for privileged, or for a cap_add beyond what a rootless service holds (compose); with
+    # false they are planned as the stack's privileges, which only the docker provider grants.
+    privileges: bool = True
     # Tasks whose sessions would upload more than this many MiB into one of their sandboxes (flags.upload_bytes);
     # None: no limit.
     uploads_over_mb: float | None = None
 
-    _SWITCHES = ("sidecars", "gpus", "agent_user", "per_task_build")
+    _SWITCHES = ("sidecars", "gpus", "agent_user", "per_task_build", "privileges")
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any] | None) -> RefusePolicy:
@@ -167,10 +225,12 @@ class RefusePolicy:
         return cls(**data)
 
     def inputs(self) -> dict[str, Any]:
-        """What the lock's inputs digest hashes: the switches, and the size limit only when it is set, so that a lock
-        written before the limit existed still answers a config that sets none."""
+        """What the lock's inputs digest hashes: the switches, and ``privileges`` and the size limit only when they are
+        not their defaults, so that a lock written before they existed still answers a config that sets neither."""
 
-        payload: dict[str, Any] = {key: getattr(self, key) for key in self._SWITCHES}
+        payload: dict[str, Any] = {key: getattr(self, key) for key in self._SWITCHES if key != "privileges"}
+        if not self.privileges:
+            payload["privileges"] = False
         if self.uploads_over_mb is not None:
             payload["uploads_over_mb"] = self.uploads_over_mb
         return payload
@@ -230,6 +290,42 @@ class FetchConfig:
     refuse: RefusePolicy = RefusePolicy()
     index: tuple[IndexFile | MetadataFields, ...] = ()
     workers: int = 8
+    # The legacy registry of a harbor://name@version dataset: a registry.json file or URL (None: Harbor's own).
+    registry: str | None = None
+    # An adapter that generates the tasks, instead of a dataset to download; ``dataset`` is then its name for messages
+    # and the lock (adapter:<repo>@<commit>#<path>).
+    adapter: AdapterSpec | None = None
+
+    @property
+    def local(self) -> bool:
+        """Whether the fetch copies its tasks from local directories, which it does again every time, since their files
+        may change under the same paths: a local dataset directory, or a registry file's tasks that name no
+        ``git_url`` (directories next to the file)."""
+
+        if self.adapter is not None:
+            return False
+        if self.registry is not None and is_legacy_registry(self.dataset):
+            return registry_has_local_tasks(self.dataset, self.registry)
+        return is_local(self.dataset)
+
+    @property
+    def pinned(self) -> bool:
+        """Whether the source names immutable content, which ``platoon train`` and ``platoon eval`` fetch by
+        themselves (:func:`is_pinned`; an adapter at a full commit; a legacy registry's dataset by its version and
+        its registry, a file or a URL with a commit).  The one place that decides it: a fetch refuses a source that
+        is not pinned unless it updates."""
+
+        if self.adapter is not None:
+            return self.adapter.pinned
+        if is_legacy_registry(self.dataset):
+            return legacy_registry_pinned(self.dataset, self.registry)
+        return is_pinned(self.dataset)
+
+    @property
+    def immutable(self) -> bool:
+        """Whether the files the source names cannot change: pinned, and not copied from local directories."""
+
+        return self.pinned and not self.local
 
     @property
     def metadata_fields(self) -> tuple[str, ...]:
@@ -242,23 +338,51 @@ class FetchConfig:
     def lock_path(self) -> Path:
         return self.lock if self.lock is not None else self.cache / "locks" / f"{self.inputs_digest()[:16]}.lock.json"
 
+    def earlier_lock_path(self) -> Path | None:
+        """Where the lock is that platoon wrote for this config before ``refuse.sidecars`` defaulted to false
+        (:meth:`earlier_inputs_digest`): ``lock``, else the cache's lock named by that digest; None for a config that
+        refuses stacks."""
+
+        earlier = self.earlier_inputs_digest()
+        if earlier is None:
+            return None
+        return self.lock if self.lock is not None else self.cache / "locks" / f"{earlier[:16]}.lock.json"
+
     def inputs_digest(self) -> str:
         """SHA-256 over what the fetch is asked for, so a lock can tell whether it answers this config."""
 
+        return self._inputs_digest(self.refuse)
+
+    def earlier_inputs_digest(self) -> str | None:
+        """The inputs digest that this config, which refuses no stacks, had when it set no ``refuse.sidecars`` before
+        that defaulted to false: its digest with ``sidecars: true``.  A lock that records it still answers the config
+        where it refused no task as a stack (:func:`answers`).  None for a config that refuses stacks, whose digest has
+        not changed."""
+
+        return None if self.refuse.sidecars else self._inputs_digest(replace(self.refuse, sidecars=True))
+
+    def _inputs_digest(self, refuse: RefusePolicy) -> str:
         payload = {
             "dataset": self.dataset,
             "tasks": [_sha256_file(path) for path in self.tasks],
             "select": {key: list(values) for key, values in sorted(self.select.items())},
             "overlays": [Overlay.load(path).digest for path in self.overlays],
-            "refuse": self.refuse.inputs(),
+            "refuse": refuse.inputs(),
             "index": [index.__dict__ for index in self.index],
         }
+        # Only when set, so that a lock written before these keys still answers a config that sets neither.
+        if self.registry is not None:
+            payload["registry"] = registry_inputs(self.registry)
+        if self.adapter is not None:
+            payload["adapter"] = self.adapter.inputs()
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=list).encode()).hexdigest()
 
 
 def fetch_config(
-    dataset: str,
+    dataset: str | None = None,
     *,
+    adapter: Mapping[str, Any] | None = None,
+    registry: str | Path | None = None,
     cache: str | Path | None = None,
     lock: str | Path | None = None,
     tasks: str | Path | Sequence[str | Path] = (),
@@ -269,7 +393,9 @@ def fetch_config(
 ) -> FetchConfig:
     """A :class:`FetchConfig` from a Harbor entry's values, fetched into ``cache`` (default: the Harbor cache,
     :func:`~platoon.envs.harbor.lock.default_cache`); relative paths resolve against the working directory, and a
-    relative local ``dataset`` too (a config's are absolute already)."""
+    relative local ``dataset`` too (a config's are absolute already).  ``adapter`` (an adapter that generates the
+    tasks, :class:`~platoon.envs.harbor.references.AdapterSpec`) replaces ``dataset``; ``registry`` (a ``registry.json``
+    file or URL) goes with a ``harbor://name@version`` dataset."""
 
     def resolve(value: str | Path) -> Path:
         path = Path(value).expanduser()
@@ -278,10 +404,31 @@ def fetch_config(
     def paths(value: str | Path | Sequence[str | Path]) -> tuple[Path, ...]:
         return (resolve(value),) if isinstance(value, (str, Path)) else tuple(resolve(item) for item in value)
 
-    if not isinstance(dataset, str) or not dataset:
-        raise FetchError("dataset must name a source: hf://org/name@revision or a local directory")
-    if not dataset.startswith(("hf://", "harbor://", "git+")):
+    spec = None
+    if adapter is not None:
+        if dataset is not None:
+            raise FetchError("Name the dataset or the adapter that generates it, not both")
+        spec = AdapterSpec.parse(adapter, resolve=lambda value: str(resolve(value)))
+        dataset = spec.dataset
+    elif not isinstance(dataset, str) or not dataset:
+        raise FetchError(
+            "dataset must name a source: hf://org/name@revision, harbor://org/name@ref, harbor://name@version, "
+            "git+<url>@<commit>#<path> or a local directory (or name an adapter instead)"
+        )
+    elif not is_local(dataset):
+        check_source(dataset)
+    else:
         dataset = str(resolve(dataset))
+    if registry is not None:
+        if adapter is not None or not is_legacy_registry(dataset):
+            raise FetchError(
+                f"registry names the legacy registry of a harbor://name@version dataset, and {dataset} is none"
+            )
+        if _URL.match(str(registry)):
+            check_url(str(registry), "registry")
+            registry = str(registry)
+        else:
+            registry = str(resolve(registry))
     selection: dict[str, tuple[Any, ...]] = {}
     for key, values in (select or {}).items():
         name = key.removeprefix("index.")
@@ -297,24 +444,67 @@ def fetch_config(
         overlays=paths(overlays),
         refuse=RefusePolicy.from_mapping(refuse),
         index=tuple(index_entry(item) for item in index),
+        registry=registry,
+        adapter=spec,
     )
 
 
+def is_local(dataset: str) -> bool:
+    """Whether ``dataset`` names a local directory rather than a source to download (``hf://``, ``harbor://``,
+    ``git+``, or an adapter's ``adapter:`` name)."""
+
+    return not dataset.startswith(_REMOTE_PREFIXES)
+
+
 def is_pinned(dataset: str) -> bool:
-    """Whether ``dataset`` names immutable content: an hf:// commit, or a local directory."""
+    """Whether ``dataset`` names immutable content: an hf:// commit, a Hub package's revision or digest, a git
+    commit, an adapter at a commit, or a local directory.  A dataset of the legacy registry is pinned only by its
+    registry (:attr:`FetchConfig.pinned`), so it counts as moving here."""
 
     if dataset.startswith("hf://"):
         match = _HF.match(dataset)
         return bool(match and match.group("revision") and _COMMIT.match(match.group("revision")))
-    return not dataset.startswith(("harbor://", "git+"))
+    return is_local(dataset) or source_pinned(dataset)
+
+
+def answers(lock: DatasetLock, config: FetchConfig) -> bool:
+    """Whether ``lock`` was written for ``config``'s fetch settings: by its inputs digest, or, for a lock that platoon
+    wrote before ``refuse.sidecars`` defaulted to false, by the digest it had then
+    (:meth:`FetchConfig.earlier_inputs_digest`), where it refused no task as a stack (``stack``): the new default
+    changes nothing in it."""
+
+    if lock.inputs == config.inputs_digest():
+        return True
+    earlier = config.earlier_inputs_digest()
+    return earlier is not None and lock.inputs == earlier and not any(_refused_as_stack(task) for task in lock.tasks)
+
+
+def _refused_as_stack(task: LockedTask) -> bool:
+    return task.refused is not None and task.refused.split(":")[0] == "stack"
 
 
 def answering_lock(config: FetchConfig) -> DatasetLock | None:
-    """The lock at ``config.lock_path()`` when it answers ``config`` (it was written for these fetch settings), else
-    None."""
+    """The lock that answers ``config`` (:func:`answers`), else None: the one at ``config.lock_path()``, else one
+    written before ``refuse.sidecars`` defaulted to false (:meth:`FetchConfig.earlier_lock_path`)."""
 
-    existing = _read_if_present(config.lock_path())
-    return existing if existing is not None and existing.inputs == config.inputs_digest() else None
+    located = _answering(config)
+    return located[1] if located is not None else None
+
+
+def answering_lock_path(config: FetchConfig) -> Path:
+    """Where the lock that answers ``config`` is (:func:`answering_lock`), else where a fetch of it writes its lock
+    (:meth:`FetchConfig.lock_path`)."""
+
+    located = _answering(config)
+    return located[0] if located is not None else config.lock_path()
+
+
+def _answering(config: FetchConfig) -> tuple[Path, DatasetLock] | None:
+    for path in dict.fromkeys(path for path in (config.lock_path(), config.earlier_lock_path()) if path is not None):
+        existing = _read_if_present(path)
+        if existing is not None and answers(existing, config):
+            return path, existing
+    return None
 
 
 def current_lock(config: FetchConfig) -> DatasetLock | None:
@@ -335,36 +525,52 @@ def ensure_lock(config: FetchConfig, *, fetch_allowed: bool, log: Callable[[str]
     where ``fetch_allowed``: the trainer, never a rollout worker)."""
 
     path = config.lock_path()
-    inputs = config.inputs_digest()
-    existing = _read_if_present(path)
-    if existing is not None and existing.inputs == inputs:
+    located = _answering(config)
+    if located is not None:
+        found, existing = located
         missing = (
             [task.name for task in existing.tasks if not (config.cache / task.path).is_dir()] if fetch_allowed else []
         )
-        if not missing or not is_pinned(config.dataset):
+        if not missing or not config.pinned:
             return existing
         logger.warning(
-            "The cache %s lacks %d task(s) of the lock %s; fetching them again", config.cache, len(missing), path
+            "The cache %s lacks %d task(s) of the lock %s; fetching them again", config.cache, len(missing), found
         )
-    why = "does not exist" if existing is None else "was written for other fetch settings"
+    why = _why_not(config, path)
     if not fetch_allowed:
         raise LockError(
             f"The Harbor lock {path} {why}: run `platoon prepare` on the run's config (or `platoon harbor fetch`), or "
             "start `platoon train` or `platoon eval`, which fetch pinned references, before rollouts of "
             f"{config.dataset}"
         )
-    if not is_pinned(config.dataset):
+    if not config.pinned:
         raise LockError(
             f"{config.dataset} is a moving reference and the lock {path} {why}: pin it with "
-            "`platoon harbor fetch CONFIG --update`, or name a commit"
+            "`platoon harbor fetch CONFIG --update`, or name a commit (a revision or digest on the Harbor Hub)"
         )
     with _flock(fetch_lock_file(config)):
-        existing = _read_if_present(path)  # another process may have fetched while this one waited
-        if existing is not None and existing.inputs == inputs:
-            if all((config.cache / task.path).is_dir() for task in existing.tasks):
-                return existing
+        existing = answering_lock(config)  # another process may have fetched while this one waited
+        if existing is not None and all((config.cache / task.path).is_dir() for task in existing.tasks):
+            return existing
         (log or logger.info)(f"Fetching {config.dataset} into {config.cache} (lock {path})")
         return fetch(config, log=log)
+
+
+def _why_not(config: FetchConfig, path: Path) -> str:
+    """Why no lock answers ``config``, the lock at ``path`` being where a fetch writes it; naming a lock written for it
+    before ``refuse.sidecars`` defaulted to false that refused stacks, which a fetch now locks as runnable."""
+
+    why = "does not exist" if _read_if_present(path) is None else "was written for other fetch settings"
+    earlier = config.earlier_lock_path()
+    old = _read_if_present(earlier) if earlier is not None else None
+    stacks = sum(1 for task in old.tasks if _refused_as_stack(task)) if old is not None else 0
+    if stacks and old is not None and old.inputs == config.earlier_inputs_digest():
+        why += (
+            f" (the lock {earlier}, which platoon wrote for these settings before refuse.sidecars defaulted to false, "
+            f"refused {stacks} task(s) as stacks, which a fetch now locks as runnable; refuse: {{sidecars: true}} "
+            "keeps them refused)"
+        )
+    return why
 
 
 def fetch_lock_file(config: FetchConfig) -> Path:
@@ -380,16 +586,15 @@ def fetch_if_needed(
 ) -> tuple[DatasetLock, bool]:
     """The lock for ``config``, and whether this call fetched it.
 
-    A dataset pinned to a commit whose lock is current (:func:`current_lock`: it answers the settings, records input
-    files, and the cache holds its tasks) is left alone, unless ``update`` or ``repair``; anything else is fetched, a
-    local directory every time, since its files may have changed under the same path.  The fetch takes turns with the
-    other fetches of the same lock (:func:`fetch_lock_file`), so of two at once, on one node or two, the second finds
-    the first's lock current and fetches nothing.
+    A dataset pinned to a commit, revision or digest whose lock is current (:func:`current_lock`: it answers the
+    settings, records input files, and the cache holds its tasks) is left alone, unless ``update`` or ``repair``;
+    anything else is fetched, a local directory every time, since its files may have changed under the same path.
+    The fetch takes turns with the other fetches of the same lock (:func:`fetch_lock_file`), so of two at once, on
+    one node or two, the second finds the first's lock current and fetches nothing.
     """
 
     def current() -> DatasetLock | None:
-        pinned = config.dataset.startswith("hf://") and is_pinned(config.dataset)  # its files cannot change
-        return current_lock(config) if pinned and not (update or repair) else None
+        return current_lock(config) if config.immutable and not (update or repair) else None
 
     if (lock := current()) is not None:
         return lock, False
@@ -404,22 +609,25 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
 
     say = log or logger.info
     started = time.monotonic()
+    overlays = [Overlay.load(path) for path in config.overlays]  # before the source, which may take long to open
     source = _open_source(config, update=update, log=say)
-    overlays = [Overlay.load(path) for path in config.overlays]
-    candidates = source.candidates()
-    for index_file in config.index:
-        if isinstance(index_file, IndexFile):
-            _merge_index(candidates, source.read_json_rows(index_file), index_file)
-    selected = _select(candidates, config)
-    say(f"{len(selected)} of {len(candidates)} tasks selected from {config.dataset}")
-    hashes = _HashMemo()  # what checking the downloads hashed, caching the tasks does not hash again
-    files = source.materialize(selected, hashes)
-    tasks: list[LockedTask] = []
-    (config.cache / TASKS_DIR).mkdir(parents=True, exist_ok=True)
-    for count, candidate in enumerate(selected, 1):
-        tasks.append(_cache_task(candidate, files[candidate.name], config, overlays, hashes))
-        if count % 500 == 0:
-            say(f"cached {count}/{len(selected)} tasks")
+    try:
+        candidates = source.candidates()
+        for index_file in config.index:
+            if isinstance(index_file, IndexFile):
+                _merge_index(candidates, source.read_json_rows(index_file), index_file)
+        selected = _select(candidates, config)
+        say(f"{len(selected)} of {len(candidates)} tasks selected from {config.dataset}")
+        hashes = _HashMemo()  # what checking the downloads hashed, caching the tasks does not hash again
+        files = source.materialize(selected, hashes)
+        tasks: list[LockedTask] = []
+        (config.cache / TASKS_DIR).mkdir(parents=True, exist_ok=True)
+        for count, candidate in enumerate(selected, 1):
+            tasks.append(_cache_task(candidate, files[candidate.name], config, overlays, hashes))
+            if count % 500 == 0:
+                say(f"cached {count}/{len(selected)} tasks")
+    finally:
+        source.close()  # its downloads and checkouts: what the cache needs is in it now
     tasks = _assign_image_kinds(tasks, config.refuse)
     lock = DatasetLock(
         dataset=config.dataset,
@@ -428,6 +636,7 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
         tasks=tuple(sorted(tasks, key=lambda task: task.name)),
         hash_rule=HASH_RULE,
         build_key_rule=BUILD_KEY_RULE,
+        compose_rule=COMPOSE_RULE,
         overlay=_overlays_digest(overlays),
         inputs=config.inputs_digest(),
         selection={
@@ -438,8 +647,21 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
         },
         modes=MODES_RULE,
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        source=dict(source.details),
     )
     write_lock(lock, config.lock_path())
+    unread = [task for task in lock.tasks if task.flags.get("unread_compose")]
+    if unread:
+        names = sorted({name for task in unread for name in task.flags["unread_compose"]})
+        logger.warning(
+            "%d Harbor task(s) of %s hold %s, which Harbor does not read (it reads only environment/%s), such as %s: "
+            "platoon treats them as plain files of the task and runs each task without them, as Harbor does",
+            len(unread),
+            config.dataset,
+            " or ".join(names),
+            COMPOSE_FILE,
+            unread[0].name,
+        )
     refused = Counter(task.refused.split(":")[0] for task in lock.tasks if task.refused)
     say(
         f"Locked {len(lock.tasks)} tasks ({len(lock.runnable())} runnable"
@@ -455,8 +677,10 @@ def fetch(config: FetchConfig, *, update: bool = False, log: Callable[[str], Non
 @dataclass
 class Candidate:
     name: str
-    path: str  # relative to the dataset root
+    path: str  # relative to the dataset root (where a registry's task lives: its repository, commit and path)
     index: dict[str, Any] = field(default_factory=dict)
+    # The content digest the source gives the task ("sha256:<hex>", the Harbor Hub's), which its files must hash to.
+    digest: str | None = None
 
 
 def _select(candidates: Mapping[str, Candidate], config: FetchConfig) -> list[Candidate]:
@@ -560,6 +784,7 @@ class _TaskFiles:
 class _Source:
     resolved: str
     fetched_with: str
+    details: Mapping[str, Any] = MappingProxyType({})  # how the source resolved, for the lock (DatasetLock.source)
 
     def candidates(self) -> dict[str, Candidate]:
         raise NotImplementedError
@@ -572,13 +797,18 @@ class _Source:
 
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Remove what the source downloaded or checked out for the fetch, once its tasks are cached."""
+
 
 def _open_source(config: FetchConfig, *, update: bool, log: Callable[[str], None]) -> _Source:
     dataset = config.dataset
     if dataset.startswith("hf://"):
         return _HubSource(config, update=update, log=log)
-    if dataset.startswith(("harbor://", "git+")):
-        raise FetchError(f"{dataset}: harbor:// and git+ sources are not supported yet; use hf:// or a directory")
+    if config.adapter is not None or not is_local(dataset):
+        from platoon.envs.harbor.sources import open_source  # sources builds on this module
+
+        return open_source(config, update=update, log=log)
     return _LocalSource(Path(dataset))
 
 
@@ -602,12 +832,13 @@ class _LocalSource(_Source):
     it holds a ``task.toml``; else every directory below it that holds one, with the ids ``dataset_dir`` gives
     (:func:`~platoon.envs.harbor.dataset.dataset_tasks`)."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, link: bool = False) -> None:
         if not root.is_dir():
             raise FetchError(f"{root} is not a directory")
         self.root = root.resolve()
         self.resolved = str(self.root)
         self.fetched_with = "platoon (local directory)"
+        self.link = link  # hard-link the files into the cache (a directory the fetch made), else copy them
 
     def candidates(self) -> dict[str, Candidate]:
         registry = _load_json(self.root / REGISTRY)
@@ -634,17 +865,29 @@ class _LocalSource(_Source):
             if not (task_dir / "task.toml").is_file():
                 raise FetchError(f"{task_dir} has no task.toml")
             files = {relative: task_dir / relative for relative in _hashed_paths(task_dir)}
-            out[candidate.name] = _TaskFiles(files=files, link=False)
+            if self.link:  # a link is hard-linked as its target, which outlives the directory the fetch made
+                files = {relative: linked_target(path) for relative, path in files.items()}
+            out[candidate.name] = _TaskFiles(files=files, link=self.link)
         return out
 
 
-class _HubSource(_Source):
-    """A Hugging Face dataset repository at one commit."""
+def linked_target(path: Path) -> Path:
+    """The file a symbolic link names, else ``path``: ``os.link`` would link the link itself (Python before 3.14, on
+    Linux), and a copy of a link whose target is removed with its download or checkout would dangle."""
 
-    def __init__(self, config: FetchConfig, *, update: bool, log: Callable[[str], None]) -> None:
-        match = _HF.match(config.dataset)
+    return Path(os.path.realpath(path)) if os.path.islink(path) else path
+
+
+class _HubSource(_Source):
+    """A Hugging Face dataset repository at one commit (``dataset``, else the config's)."""
+
+    def __init__(
+        self, config: FetchConfig, *, update: bool, log: Callable[[str], None], dataset: str | None = None
+    ) -> None:
+        dataset = dataset or config.dataset
+        match = _HF.match(dataset)
         if match is None:
-            raise FetchError(f"{config.dataset}: expected hf://org/name@revision[#subdir]")
+            raise FetchError(f"{dataset}: expected hf://org/name@revision[#subdir]")
         from huggingface_hub import HfApi
 
         self.repo = match.group("repo")
@@ -658,8 +901,7 @@ class _HubSource(_Source):
             self.resolved = revision
         elif not update:
             raise FetchError(
-                f"{config.dataset} is a moving reference: pin a commit, or resolve it with "
-                "`platoon harbor fetch --update`"
+                f"{dataset} is a moving reference: pin a commit, or resolve it with `platoon harbor fetch --update`"
             )
         else:
             info = _retry(lambda: self.api.repo_info(self.repo, repo_type="dataset", revision=revision or "main"))
@@ -985,12 +1227,21 @@ def _cache_task(
                 shutil.copy2(source, target)
             _restore_executable(target)
         upstream = hashes.content_hash(staging)
+        if candidate.digest is not None and f"sha256:{upstream}" != candidate.digest:
+            raise FetchError(
+                f"Harbor task {candidate.name!r} of {config.dataset}: its files hash to sha256:{upstream}, and the "
+                f"source gives it {candidate.digest}: a damaged download, or a content hash that is not Harbor's"
+            )
         applied: list[str] = []
         refused: str | None = None
+        edits: list[ComposeEdit] = []
+        host_env: list[str] = []
         for overlay in overlays:
             if overlay.matches(candidate.name, candidate.index):
                 problem = overlay.apply(staging)
                 applied.append(overlay.name)
+                edits += overlay.compose
+                host_env += overlay.compose_host_env
                 if problem is not None:
                     refused = f"overlay: {problem}"
                     break
@@ -998,8 +1249,10 @@ def _cache_task(
             hashes.forget_moved()  # the files the overlays replaced
         digest = hashes.content_hash(staging) if applied else upstream
         index = _with_metadata(candidate, staging, config.metadata_fields)
-        files_in = input_files(staging, digest=hashes.input_digest)  # binary files hashed already, for the digest
-        flags, image, verifier_image, problem = _inspect(staging, candidate.name, config.refuse)
+        inspected = _inspect(staging, candidate.name, config.refuse, edits=edits, host_env=host_env)
+        flags, image, verifier_image, problem, compose = inspected
+        # Binary files are hashed already, for the digest; the files main's compose binds are inputs too.
+        files_in = input_files(staging, digest=hashes.input_digest, compose=compose)
         refused = refused or problem
         entry = config.cache / TASKS_DIR / digest
         with _flock(config.cache / ".locks" / "tasks.lock"):
@@ -1024,6 +1277,7 @@ def _cache_task(
         overlays=tuple(applied),
         refused=refused,
         input_files=files_in,
+        compose=compose.to_json() if compose is not None else None,
     )
 
 
@@ -1089,22 +1343,29 @@ def _install(staging: Path, entry: Path) -> None:
 
 
 def _inspect(
-    task_dir: Path, name: str, refuse: RefusePolicy
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str | None]:
-    """A task's flags, build plans and refusal, from its ``task.toml`` and files in ``task_dir``, a temporary
-    directory that messages never name (they name ``name``, the task's id, and paths relative to the task).
+    task_dir: Path,
+    name: str,
+    refuse: RefusePolicy,
+    *,
+    edits: Sequence[ComposeEdit] = (),
+    host_env: Sequence[str] = (),
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None, str | None, ComposePlan | None]:
+    """A task's flags, build plans, refusal and stack plan, from its ``task.toml`` and files in ``task_dir``, a
+    temporary directory that messages never name (they name ``name``, the task's id, and paths relative to the task).
+    ``edits`` and ``host_env`` are what the overlays that match the task give its compose file.
 
-    The refusal is the first of: what ``refuse`` refuses (``stack``, ``gpus``, ``agent_user``); anything that keeps
-    :meth:`HarborTask.load` from loading the task (``task_config``), which every rollout of it would fail on; a
-    Dockerfile that cannot be planned (``image``); and uploads over ``refuse.uploads_over_mb``
-    (``uploads_over_mb``).  ``flags["upload_bytes"]`` records what a session copies into one of the task's
-    sandboxes (:func:`_upload_bytes`).
+    The refusal is the first of: a compose file outside the subset platoon runs (``compose``); what ``refuse``
+    refuses (``stack``, ``gpus``, ``agent_user``); anything that keeps :meth:`HarborTask.load` from loading the task
+    (``task_config``), which every rollout of it would fail on; a Dockerfile that cannot be planned (``image``); and
+    uploads over ``refuse.uploads_over_mb`` (``uploads_over_mb``).  ``flags["upload_bytes"]`` records what a session
+    copies into one of the task's sandboxes (:func:`_upload_bytes`).
     """
 
     try:
         config = tomllib.loads((task_dir / "task.toml").read_text())
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
-        return {}, {"kind": "none"}, None, f"task_config: task.toml: {_without_paths(str(exc), task_dir, name)}"
+        problem = f"task_config: task.toml: {_without_paths(str(exc), task_dir, name)}"
+        return {}, {"kind": "none"}, None, problem, None
     environment = _table(config, "environment")
     verifier = _table(config, "verifier")
     agent = _table(config, "agent")
@@ -1114,10 +1375,13 @@ def _inspect(
     )
     artifacts = config.get("artifacts") or []
     gpus = environment.get("gpus")
+    compose, compose_problem = _plan_compose(
+        task_dir, name, environment, edits, host_env, privileges=not refuse.privileges
+    )
     flags: dict[str, Any] = {
         "verifier": "separate" if verifier.get("environment_mode") == "separate" or verifier_environment else "shared",
         "artifacts": len(artifacts) if isinstance(artifacts, list) else 0,
-        "stack": _stack_kind(task_dir),
+        "stack": compose.kind if compose is not None else _stack_kind(task_dir),
         "network": network,
         "gpus": gpus if isinstance(gpus, int) and not isinstance(gpus, bool) else 0,  # the loader refuses the others
         "agent_user": agent.get("user"),
@@ -1126,6 +1390,8 @@ def _inspect(
     }
     if verifier_environment is not None and verifier_environment.get("network_mode"):
         flags["verifier_network"] = verifier_environment["network_mode"]
+    if unread := unread_compose_files(task_dir):
+        flags["unread_compose"] = unread
     image = _image_plan(task_dir, environment, "environment")
     verifier_image = None
     if flags["verifier"] == "separate":
@@ -1140,24 +1406,66 @@ def _inspect(
     flags["upload_bytes"] = _upload_bytes(task_dir, image, verifier_image, separate=flags["verifier"] == "separate")
     suffix_users = [plan["suffix_user"] for plan in plans if plan.get("suffix_user")]
     errors = [plan["error"] for plan in plans if plan.get("error")]
-    if flags["stack"] == "sidecars" and refuse.sidecars:
-        problem = "stack: the compose file adds sidecar services, which platoon cannot run yet"
+    if compose_problem is not None:
+        problem = compose_problem
+    elif flags["stack"] == "sidecars" and refuse.sidecars:
+        problem = "stack: the compose file adds sidecar services (refuse: {sidecars: false} fetches it as a stack)"
     elif flags["gpus"] > 0 and refuse.gpus:
         problem = f"gpus: the task asks for {flags['gpus']} GPU(s)"
     elif (flags["agent_user"] or flags["verifier_user"]) and refuse.agent_user:
-        problem = "agent_user: the task sets [agent].user or [verifier].user, which rootless sandboxes cannot honor"
+        problem = f"agent_user: the task sets [agent].user or [verifier].user ({_USERS_FETCHED})"
     elif suffix_users and refuse.agent_user:
-        user = suffix_users[0]
-        problem = f"agent_user: the Dockerfile ends with USER {user}, which rootless sandboxes cannot honor"
+        problem = f"agent_user: the Dockerfile ends with USER {suffix_users[0]} ({_USERS_FETCHED})"
     else:
-        problem = _load_problem(task_dir, name) or (f"image: {errors[0]}" if errors else None)
+        problem = _load_problem(task_dir, name, compose) or (f"image: {errors[0]}" if errors else None)
     limit = refuse.uploads_over_mb
     if problem is None and limit is not None and flags["upload_bytes"] > limit * MIB:
         problem = (
             f"uploads_over_mb: a session uploads {flags['upload_bytes'] / MIB:,.1f} MiB into one of the task's "
             f"sandboxes, over the limit of {limit:g} MiB"
         )
-    return flags, image, verifier_image, problem
+    return flags, image, verifier_image, problem, compose
+
+
+def _plan_compose(
+    task_dir: Path,
+    name: str,
+    environment: Mapping[str, Any],
+    edits: Sequence[ComposeEdit],
+    host_env: Sequence[str],
+    *,
+    privileges: bool = False,
+) -> tuple[ComposePlan | None, str | None]:
+    """The task's stack plan (None without a compose file), and the refusal of a file outside the subset
+    (``compose: <service>.<key>: why``) or that an overlay edits wrongly (``overlay: ...``); ``privileges`` plans what
+    only the docker provider grants rather than refusing it."""
+
+    if compose_path(task_dir) is None:
+        if edits:
+            return None, f"overlay: {edits[0].overlay}: edits compose services, and the task has no {COMPOSE_FILE}"
+        return None, None
+    settings: dict[str, Any] = {}
+    try:
+        settings = _environment_settings(dict(environment), "[environment]")
+    except HarborTaskError:  # the task is refused for it (task_config): plan without its settings
+        pass
+    image = environment.get("docker_image")
+    try:
+        plan = plan_compose(
+            task_dir,
+            docker_image=image if isinstance(image, str) and image else None,
+            env=settings.get("env") or {},
+            cpus=settings.get("cpus"),
+            memory_mb=settings.get("memory_mb"),
+            edits=edits,
+            host_env=host_env,
+            privileges=privileges,
+        )
+    except ComposeEditError as exc:
+        return None, f"overlay: {_without_paths(str(exc), task_dir, name)}"
+    except ComposeError as exc:
+        return None, f"compose: {_without_paths(str(exc), task_dir, name)}"
+    return with_unrewritable_references(plan, task_dir), None
 
 
 def _upload_bytes(
@@ -1186,7 +1494,7 @@ def _plan_uploads(task_dir: Path, context: str, plan: Mapping[str, Any]) -> int:
     for step in plan.get("deferred") or ():
         if not step or step[0] != "COPY":
             continue
-        for source in step[1:-1]:
+        for source in copy_operands(step)[1]:
             relative = os.path.normpath(source.rstrip("/") or ".")
             if os.path.isabs(relative) or relative == ".." or relative.startswith("../"):
                 continue  # outside the build context: nothing a session would upload
@@ -1217,14 +1525,15 @@ def _tree_bytes(path: Path) -> int:
     return total
 
 
-def _load_problem(task_dir: Path, name: str) -> str | None:
-    """Why :meth:`HarborTask.load` refuses the task, as a refusal (``task_config: ...``), or None when it loads.
+def _load_problem(task_dir: Path, name: str, compose: ComposePlan | None = None) -> str | None:
+    """Why :meth:`HarborTask.load` refuses the task, as a refusal (``task_config: ...``), or None when it loads, with
+    its stack plan ``compose`` as the lock records it.
 
     Users to run as are let through (``agent_user="ignore"``): the refuse policy decides about them.
     """
 
     try:
-        HarborTask.load(task_dir, agent_user="ignore")
+        HarborTask.load(task_dir, agent_user="ignore", compose=compose)
     except (OSError, ValueError) as exc:  # HarborTaskError, and files that cannot be read or decoded
         return f"task_config: {_without_paths(str(exc), task_dir, name)}"
     return None
@@ -1244,7 +1553,7 @@ def _image_plan(task_dir: Path, environment: Mapping[str, Any], context: str) ->
     if docker_image:
         plan: dict[str, Any] = {"kind": "prebuilt", "ref": docker_image}
         directory = task_dir / context
-        compose = any((directory / name).is_file() for name in COMPOSE_FILENAMES)
+        compose = (directory / COMPOSE_FILE).is_file()  # the one compose file Harbor reads
         if not dockerfile.is_file() and not compose and directory.is_dir() and any(directory.iterdir()):
             plan["upload_environment"] = True  # Harbor uploads environment/ into the workdir of prebuilt tasks
         return plan
@@ -1289,13 +1598,16 @@ def _with_kind(plan: Mapping[str, Any], counts: Counter[str]) -> dict[str, Any]:
 
 
 def _stack_kind(task_dir: Path) -> str:
-    """``single`` (no compose file), ``trivial`` (one that only names ``main``) or ``sidecars``, as the loader
-    decides it."""
+    """``single`` (no compose file), else the kind its services make as written (``trivial``, ``main_only``,
+    ``sidecars``): for a task whose compose file has no plan, since it is refused."""
 
-    compose = compose_file(task_dir)
-    if compose is None:
+    path = compose_path(task_dir)
+    if path is None:
         return "single"
-    return "trivial" if is_trivial_compose(compose) else "sidecars"
+    try:
+        return stack_kind(read_document(path))
+    except ComposeError:
+        return "sidecars"
 
 
 def _restore_executable(path: Path) -> None:
@@ -1339,6 +1651,8 @@ class Overlay:
     edits: tuple[Mapping[str, Any], ...]
     copies: tuple[Mapping[str, Any], ...]
     digest: str
+    compose: tuple[ComposeEdit, ...] = ()  # edits of compose services ([[compose]])
+    compose_host_env: tuple[str, ...] = ()  # host variables the compose file may name
 
     @classmethod
     def load(cls, root: str | Path) -> Overlay:
@@ -1349,9 +1663,21 @@ class Overlay:
             data = tomllib.loads(raw.decode())
         except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
             raise FetchError(f"overlay {root}: cannot read {OVERLAY_FILE}: {exc}") from exc
-        unknown = sorted(set(data) - {"name", "description", "match", "edit", "copy"})
+        unknown = sorted(set(data) - {"name", "description", "match", "edit", "copy", "compose", "compose_host_env"})
         if unknown:
             raise FetchError(f"overlay {path}: unknown keys {unknown}")
+        name = str(data.get("name") or root.name)
+        if not isinstance(data.get("compose", []), list):
+            raise FetchError(f"overlay {path}: [[compose]] must be an array of tables")
+        try:
+            compose = tuple(ComposeEdit.parse(name, entry) for entry in data.get("compose") or ())
+        except ValueError as exc:
+            raise FetchError(f"overlay {path}: {exc}") from exc
+        host_env = data.get("compose_host_env") or []
+        if not isinstance(host_env, list) or not all(
+            isinstance(variable, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) for variable in host_env
+        ):
+            raise FetchError(f"overlay {path}: compose_host_env must list variable names, got {host_env!r}")
         match = {
             str(key): tuple(str(v) for v in (value if isinstance(value, list) else [value]))
             for key, value in (data.get("match") or {}).items()
@@ -1373,15 +1699,17 @@ class Overlay:
             if not source.is_file():
                 raise FetchError(f"overlay {path}: {source} does not exist")
             digest.update(f"\0{copy['source']}\0{file_sha256(source)}".encode())
-        if not edits and not copies:
-            raise FetchError(f"overlay {path} has no [[edit]] or [[copy]]")
+        if not edits and not copies and not compose and not host_env:
+            raise FetchError(f"overlay {path} has no [[edit]], [[copy]], [[compose]] or compose_host_env")
         return cls(
-            name=str(data.get("name") or root.name),
+            name=name,
             root=root,
             match=match,
             edits=edits,
             copies=copies,
             digest=digest.hexdigest(),
+            compose=compose,
+            compose_host_env=tuple(host_env),
         )
 
     def matches(self, name: str, index: Mapping[str, Any]) -> bool:

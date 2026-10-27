@@ -225,11 +225,11 @@ def test_train_runs_under_the_profiles_runs_with_six_tasks_and_two_held_out(
 ) -> None:
     datasets: list[tuple[int, int]] = []
 
-    def trainer(*, config, train_dataset, eval_dataset, train_order=None):
+    def trainer(*, config, train_dataset, eval_dataset, train_order=None, train_sampling=None):
         datasets.append((len(train_dataset), len(eval_dataset)))
         raise Reached
 
-    monkeypatch.setattr("platoon.train.tinker.train.PlatoonTinkerRLTrainer", trainer)
+    monkeypatch.setattr("platoon.train.launch.PlatoonTinkerRLTrainer", trainer)
 
     with pytest.raises(Reached):
         cli.main(["train", str(CONFIG), *_process(site)])

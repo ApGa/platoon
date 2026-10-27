@@ -4,9 +4,11 @@
     python scripts/public_api.py --check    # print how the code differs from the snapshot and exit 1, writing nothing
 
 The public modules (:data:`PUBLIC_MODULES`) are the ones the documentation makes public: ``platoon`` itself
-(``import platoon as pt``) and ``pt.gym``, which ``docs/reference/api.md`` documents, and ``platoon.testing``, whose
-guide (``docs/how-to/test-extensions.md``) makes its exports a stable API.  A module's public names are its
-``__all__``.
+(``import platoon as pt``) and ``pt.gym``, which ``docs/reference/api.md`` documents, ``platoon.testing``, whose
+guide (``docs/how-to/test-extensions.md``) makes its exports a stable API, and ``platoon.experimental``, whose names
+are documented (``docs/reference/experimental.md``, which covers each of its APIs, and the guides
+``docs/extending/task-samplers.md``, ``docs/extending/group-admission.md`` and ``docs/extending/rollout-leases.md``) but
+may change in a minor release: the snapshot shows every such change too.  A module's public names are its ``__all__``.
 
 The snapshot has one line per item, sorted: a function's signature; a class's bases and its public members (fields
 with their types and defaults, attributes, properties, and methods with their signatures); a type alias's value; a
@@ -41,6 +43,7 @@ PUBLIC_MODULES: dict[str, str] = {
     "platoon": "docs/reference/api.md",
     "platoon.gym": "docs/reference/api.md",
     "platoon.testing": "docs/how-to/test-extensions.md",
+    "platoon.experimental": "docs/reference/experimental.md",
 }
 # Exported modules that are public only as a callable, with what a call runs: ``pt.harness`` is the decorator.
 CALLABLE_MODULES: dict[str, str] = {"platoon.harness": "platoon.harness.function:harness"}

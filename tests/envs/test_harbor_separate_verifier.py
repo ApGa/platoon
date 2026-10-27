@@ -121,7 +121,8 @@ async def test_grading_releases_main_and_regrades_from_the_kept_artifacts(record
     second = await session.grade()
     assert (first.reward, second.reward) == (1.0, 1.0)
     assert len(recording.verifiers()) == 2
-    kept = session._kept_artifacts[0]
+    assert session._kept_artifacts is not None
+    kept = session._kept_artifacts.directory
     await session.close()
     assert not main.root.exists() and not kept.exists()
     await session.close()  # idempotent
@@ -355,7 +356,7 @@ async def test_workers_find_registered_tasks_without_indexing_the_dataset(record
 async def test_the_task_agent_timeout_scales_and_ignored_users_are_recorded(recording, make_task):
     task_dir = make_task("user", task_toml='[agent]\ntimeout_sec = 120\nuser = "agent"\n')
     made_elsewhere = Task(id="user", goal="Do the task.", misc={"harbor": {"task_dir": str(task_dir)}})
-    with pytest.raises(EnvSetupError, match="agent_user: ignore") as refused:
+    with pytest.raises(EnvSetupError, match="agent_user: honor, .* or ignore") as refused:
         await _service(recording, task_dir).open(made_elsewhere, rollout_id="r")
     assert refused.value.failure_kind == "env_config" and recording.started == []
 

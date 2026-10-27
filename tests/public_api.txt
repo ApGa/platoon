@@ -160,6 +160,307 @@ platoon.TrajectoryCollection: @dataclass class TrajectoryCollection
 platoon.TrajectoryCollection.id: field str = <factory platoon.trajectory.TrajectoryCollection.<lambda>>
 platoon.TrajectoryCollection.to_dict: def to_dict() -> dict[str, Any]
 platoon.TrajectoryCollection.trajectories: field dict[str, Trajectory] = <factory dict>
+platoon.experimental.Admission: @dataclass(frozen=True) class Admission
+platoon.experimental.Admission.admit: field bool
+platoon.experimental.Admission.reason: field str | None = None
+platoon.experimental.AdmissionCheckContext: @dataclass(frozen=True) class AdmissionCheckContext
+platoon.experimental.AdmissionCheckContext.batch_size: field int
+platoon.experimental.AdmissionCheckContext.entries: field Mapping[str, Mapping[str, Any]]
+platoon.experimental.AdmissionCheckContext.entry: field str | None
+platoon.experimental.AdmissionCheckContext.label_column: field str
+platoon.experimental.AdmissionCheckContext.level: field Level
+platoon.experimental.AdmissionCheckContext.max_groups_per_step: field float
+platoon.experimental.AdmissionCheckContext.workflow_gives_verdicts: field bool
+platoon.experimental.AdmissionRule: class AdmissionRule
+platoon.experimental.AdmissionRule.__init__: def __init__(setup: AdmissionSetup, options: Any = None) -> None
+platoon.experimental.AdmissionRule.admit: def admit(group: GroupRecord, stats: TaskStatsView) -> Admission | bool
+platoon.experimental.AdmissionRule.check: staticmethod def check(options: Any, ctx: AdmissionCheckContext) -> None
+platoon.experimental.AdmissionRule.options_schema: constant NoneType = None
+platoon.experimental.AdmissionSetup: @dataclass(frozen=True) class AdmissionSetup
+platoon.experimental.AdmissionSetup.batch_size: field int
+platoon.experimental.AdmissionSetup.entries: field Mapping[str, EntryInfo]
+platoon.experimental.AdmissionSetup.entry: field str | None
+platoon.experimental.AdmissionSetup.label_column: field str
+platoon.experimental.AdmissionSetup.level: field Level
+platoon.experimental.AdmissionSetup.name: field str
+platoon.experimental.CheckpointParticipant: class CheckpointParticipant(Protocol)
+platoon.experimental.CheckpointParticipant.checkpoint_state: async def checkpoint_state(name: str) -> Mapping[str, Any]
+platoon.experimental.CheckpointParticipant.keys: attribute tuple[str, ...]
+platoon.experimental.CheckpointParticipant.resume: def resume(start: StartPoint) -> None
+platoon.experimental.Draw: @dataclass(frozen=True) class Draw
+platoon.experimental.Draw.reason: field str = "order"
+platoon.experimental.Draw.score: field float | None = None
+platoon.experimental.Draw.task_id: field str
+platoon.experimental.EntryInfo: @dataclass(frozen=True) class EntryInfo
+platoon.experimental.EntryInfo.group_size: field int
+platoon.experimental.EntryInfo.index: field int | None = None
+platoon.experimental.EntryInfo.name: field str | None = None
+platoon.experimental.EntryInfo.seed: field int = 0
+platoon.experimental.EntryInfo.success_threshold: field float = 1.0
+platoon.experimental.EntryInfo.task_ids: field tuple[str, ...] = ()
+platoon.experimental.EntryInfo.weight: field float | None = None
+platoon.experimental.GroupAdmission: class GroupAdmission(Protocol)
+platoon.experimental.GroupAdmission.admit: def admit(group: GroupRecord, stats: TaskStatsView) -> Admission | bool
+platoon.experimental.GroupRecord: @dataclass(frozen=True) class GroupRecord
+platoon.experimental.GroupRecord.drawn_at: field Mapping[str, int]
+platoon.experimental.GroupRecord.entry: field str | None
+platoon.experimental.GroupRecord.from_json: classmethod def from_json(data: Mapping[str, Any]) -> GroupRecord
+platoon.experimental.GroupRecord.group_size: field int
+platoon.experimental.GroupRecord.harness: field str | None
+platoon.experimental.GroupRecord.kind: def kind(threshold: float) -> str | None
+platoon.experimental.GroupRecord.labels: field Mapping[str, str]
+platoon.experimental.GroupRecord.members: field tuple[MemberResult, ...]
+platoon.experimental.GroupRecord.oldest_version: def oldest_version(policy: str = "main") -> int | None
+platoon.experimental.GroupRecord.passes: def passes(threshold: float) -> int
+platoon.experimental.GroupRecord.position: field int | None
+platoon.experimental.GroupRecord.reason: field str
+platoon.experimental.GroupRecord.sampler: field str
+platoon.experimental.GroupRecord.score: field float | None
+platoon.experimental.GroupRecord.seq: field int
+platoon.experimental.GroupRecord.start: field int
+platoon.experimental.GroupRecord.task_id: field str
+platoon.experimental.GroupRecord.to_json: def to_json() -> dict[str, Any]
+platoon.experimental.GroupRecord.valid: property int
+platoon.experimental.GroupRecord.verdict: field str
+platoon.experimental.GroupTotals: @dataclass(frozen=True) class GroupTotals
+platoon.experimental.GroupTotals.all_fail_groups: field int
+platoon.experimental.GroupTotals.all_pass_groups: field int
+platoon.experimental.GroupTotals.attempts: field int
+platoon.experimental.GroupTotals.decayed: field DecayedCounts
+platoon.experimental.GroupTotals.evidence: def evidence(*, now: int) -> tuple[float, float]
+platoon.experimental.GroupTotals.groups: field int
+platoon.experimental.GroupTotals.informative_groups: field int
+platoon.experimental.GroupTotals.passes: field int
+platoon.experimental.GroupTotals.reported_groups: field int
+platoon.experimental.GroupTotals.reward_sum: field float
+platoon.experimental.GroupTotals.uniform_mixed_groups: field int
+platoon.experimental.MAIN: constant str = "main"
+platoon.experimental.MemberResult: @dataclass(frozen=True) class MemberResult
+platoon.experimental.MemberResult.disposition: field str
+platoon.experimental.MemberResult.flag: field bool = False
+platoon.experimental.MemberResult.from_json: classmethod def from_json(data: Mapping[str, Any]) -> MemberResult
+platoon.experimental.MemberResult.outcome: field str
+platoon.experimental.MemberResult.output_tokens: field int | None
+platoon.experimental.MemberResult.passes: def passes(threshold: float) -> bool
+platoon.experimental.MemberResult.reward: field float | None
+platoon.experimental.MemberResult.reward_key: field str | None
+platoon.experimental.MemberResult.scored: field float | None
+platoon.experimental.MemberResult.seconds: field float | None
+platoon.experimental.MemberResult.steps: field int | None
+platoon.experimental.MemberResult.to_json: def to_json() -> dict[str, Any]
+platoon.experimental.MemberResult.valid: field bool
+platoon.experimental.MemberResult.versions: field Mapping[str, tuple[int, int]] = <factory dict>
+platoon.experimental.Objective: class Objective(Protocol)
+platoon.experimental.Objective.loss_fn: attribute str
+platoon.experimental.Objective.loss_fn_config: attribute dict[str, Any]
+platoon.experimental.Objective.metrics: def metrics(originals: list['tinker.Datum'], result: tinker.ForwardBackwardOutput) -> dict[str, float]
+platoon.experimental.Objective.side_channels: attribute frozenset[str]
+platoon.experimental.OutputReport: @dataclass(frozen=True) class OutputReport
+platoon.experimental.OutputReport.entry: field str | None = None
+platoon.experimental.OutputReport.group_stats: field DeferredStats | None = None
+platoon.experimental.OutputReport.label: field str | None = None
+platoon.experimental.OutputReport.members: field tuple['MemberResult', ...] = ()
+platoon.experimental.OutputReport.observed_rollouts: field int | None = None
+platoon.experimental.OutputReport.requested_rollouts: field int | None = None
+platoon.experimental.OutputReport.rollout_stats: field RolloutStats | None = None
+platoon.experimental.OutputReport.task_retained_datums: field int | None = None
+platoon.experimental.OutputReport.trainable_rollouts: field int | None = None
+platoon.experimental.OutputReport.verdict: field str = "unknown"
+platoon.experimental.OutputReport.workload: field RolloutWorkload | None = None
+platoon.experimental.PolicySpec: @dataclass(frozen=True) class PolicySpec
+platoon.experimental.PolicySpec.context_window_length: field int | None = None
+platoon.experimental.PolicySpec.id: field str
+platoon.experimental.PolicySpec.load_checkpoint_path: field str | None = None
+platoon.experimental.PolicySpec.lora_rank: field int = 32
+platoon.experimental.PolicySpec.loss_fn: field str | None = None
+platoon.experimental.PolicySpec.loss_fn_config: field dict[str, Any] | None = None
+platoon.experimental.PolicySpec.model_name: field str
+platoon.experimental.PolicySpec.optimizer: field AdamParams | None = None
+platoon.experimental.PolicySpec.renderer_kwargs: field dict[str, Any] = <factory dict>
+platoon.experimental.PolicySpec.renderer_name: field str
+platoon.experimental.PolicySpec.sample_timeout_seconds: field float | None = None
+platoon.experimental.PolicySpec.tinker_base_url: field str | None = None
+platoon.experimental.RolloutLease: class RolloutLease(Protocol)
+platoon.experimental.RolloutLease.rollout: def rollout(index: int) -> AbstractAsyncContextManager[float]
+platoon.experimental.RolloutLease.size: property int
+platoon.experimental.RolloutOutput: class RolloutOutput(Protocol)
+platoon.experimental.RolloutOutput.report: property platoon.train.workflow.protocol.OutputReport
+platoon.experimental.RolloutOutput.rows: def rows() -> Mapping[str, Sequence['tinker.Datum']]
+platoon.experimental.RolloutWorkflow: class RolloutWorkflow(Protocol)
+platoon.experimental.RolloutWorkflow.arun_episode: async def arun_episode(data: dict) -> RolloutOutput | Sequence[tinker.Datum] | None
+platoon.experimental.Sampler: class Sampler
+platoon.experimental.Sampler.__init__: def __init__(setup: SamplerSetup, options: Any = None) -> None
+platoon.experimental.Sampler.adaptive: constant bool = False
+platoon.experimental.Sampler.check: staticmethod def check(options: Any, ctx: SamplerCheckContext) -> None
+platoon.experimental.Sampler.entry_slots: constant bool = False
+platoon.experimental.Sampler.load_state_dict: def load_state_dict(state: Mapping[str, Any]) -> None
+platoon.experimental.Sampler.metrics: def metrics(stats: TaskStatsView | None) -> Mapping[str, float]
+platoon.experimental.Sampler.next: def next(ctx: SamplerContext) -> Draw | Slot | str | None
+platoon.experimental.Sampler.observe: def observe(group: GroupRecord) -> None
+platoon.experimental.Sampler.options_schema: constant NoneType = None
+platoon.experimental.Sampler.state_dict: def state_dict() -> dict[str, Any]
+platoon.experimental.SamplerCheckContext: @dataclass(frozen=True) class SamplerCheckContext
+platoon.experimental.SamplerCheckContext.batch_size: field int
+platoon.experimental.SamplerCheckContext.entries: field Mapping[str, Mapping[str, Any]]
+platoon.experimental.SamplerCheckContext.entry: field str | None
+platoon.experimental.SamplerCheckContext.label_column: field str
+platoon.experimental.SamplerCheckContext.level: field Level
+platoon.experimental.SamplerCheckContext.run_sampler: field str
+platoon.experimental.SamplerContext: @dataclass(frozen=True) class SamplerContext
+platoon.experimental.SamplerContext.decision: field int
+platoon.experimental.SamplerContext.eligible: field Callable[[str], bool]
+platoon.experimental.SamplerContext.entry: field str | None
+platoon.experimental.SamplerContext.key: field int
+platoon.experimental.SamplerContext.rng: property random.Random
+platoon.experimental.SamplerContext.stats: field TaskStatsView | None
+platoon.experimental.SamplerContext.step: field int
+platoon.experimental.SamplerContext.task_ids: field Sequence[str]
+platoon.experimental.SamplerContext.versions: field Mapping[str, int]
+platoon.experimental.SamplerSetup: @dataclass(frozen=True) class SamplerSetup
+platoon.experimental.SamplerSetup.batch_size: field int
+platoon.experimental.SamplerSetup.entries: field Mapping[str, EntryInfo]
+platoon.experimental.SamplerSetup.entry: field str | None
+platoon.experimental.SamplerSetup.label_column: field str
+platoon.experimental.SamplerSetup.level: field Level
+platoon.experimental.SamplerSetup.name: field str
+platoon.experimental.SamplerSetup.seed: field int
+platoon.experimental.SamplerSetup.task_ids: field tuple[str, ...]
+platoon.experimental.Slot: @dataclass(frozen=True) class Slot
+platoon.experimental.Slot.entry: field str
+platoon.experimental.StepPlan: @dataclass(frozen=True) class StepPlan
+platoon.experimental.StepPlan.end_step: field int
+platoon.experimental.TaskSampler: class TaskSampler(Protocol)
+platoon.experimental.TaskSampler.adaptive: attribute ClassVar[bool]
+platoon.experimental.TaskSampler.load_state_dict: def load_state_dict(state: Mapping[str, Any]) -> None
+platoon.experimental.TaskSampler.next: def next(ctx: SamplerContext) -> Draw | Slot | str | None
+platoon.experimental.TaskSampler.state_dict: def state_dict() -> dict[str, Any]
+platoon.experimental.TaskSources: @dataclass(frozen=True) class TaskSources
+platoon.experimental.TaskSources.eval_dataset: field Any = None
+platoon.experimental.TaskSources.train_dataset: field Any
+platoon.experimental.TaskSources.train_order: field Any = None
+platoon.experimental.TaskSources.train_sampling: field Any = None
+platoon.experimental.TaskStats: @dataclass(frozen=True) class TaskStats(GroupTotals)
+platoon.experimental.TaskStats.all_fail_groups: field int
+platoon.experimental.TaskStats.all_pass_groups: field int
+platoon.experimental.TaskStats.attempts: field int
+platoon.experimental.TaskStats.decayed: field DecayedCounts
+platoon.experimental.TaskStats.drawn: field int
+platoon.experimental.TaskStats.entry: field str | None
+platoon.experimental.TaskStats.evidence: def evidence(*, now: int) -> tuple[float, float]
+platoon.experimental.TaskStats.fates: field Mapping[str, int]
+platoon.experimental.TaskStats.groups: field int
+platoon.experimental.TaskStats.history: field tuple[GroupSummary, ...]
+platoon.experimental.TaskStats.informative_groups: field int
+platoon.experimental.TaskStats.label: field str | None
+platoon.experimental.TaskStats.means: field Mapping[str, DecayedMean]
+platoon.experimental.TaskStats.metric: def metric(name: str, *, now: int) -> float | None
+platoon.experimental.TaskStats.no_evidence_streak: field int
+platoon.experimental.TaskStats.outstanding: field int
+platoon.experimental.TaskStats.passes: field int
+platoon.experimental.TaskStats.reported_groups: field int
+platoon.experimental.TaskStats.reward_sum: field float
+platoon.experimental.TaskStats.task_id: field str
+platoon.experimental.TaskStats.uniform_mixed_groups: field int
+platoon.experimental.TaskStats.uniform_streak: field int
+platoon.experimental.TaskStatsStore: class TaskStatsStore
+platoon.experimental.TaskStatsStore.__init__: def __init__(tasks: Iterable[tuple[str, str | None, str | None]], entries: Mapping[str, EntryInfo], *, column: str, group_size: int = 1, half_life: float | None = 32.0, prior_strength: float = 2.0, no_evidence_limit: int = 3) -> None
+platoon.experimental.TaskStatsStore.counts: def counts(task_id: str) -> TaskCounts
+platoon.experimental.TaskStatsStore.draw: def draw(start: int, seq: int, task_id: str, position: int | None = None) -> None
+platoon.experimental.TaskStatsStore.entry: def entry(name: str) -> GroupTotals
+platoon.experimental.TaskStatsStore.fate: def fate(start: int, seq: int, fate: str, task_id: str | None = None) -> None
+platoon.experimental.TaskStatsStore.from_snapshot: classmethod def from_snapshot(data: Mapping[str, Any]) -> TaskStatsStore
+platoon.experimental.TaskStatsStore.group_size: def group_size(entry: str | None) -> int
+platoon.experimental.TaskStatsStore.label: def label(label: str) -> GroupTotals
+platoon.experimental.TaskStatsStore.labels: def labels() -> list[str]
+platoon.experimental.TaskStatsStore.load: def load(data: Mapping[str, Any]) -> None
+platoon.experimental.TaskStatsStore.lose_outstanding: def lose_outstanding() -> list[tuple[int, int]]
+platoon.experimental.TaskStatsStore.outstanding: property list[tuple[int, int, str, int | None]]
+platoon.experimental.TaskStatsStore.posterior: def posterior(task_id: str, *, now: int) -> tuple[float, float]
+platoon.experimental.TaskStatsStore.reissue: def reissue(old: Sequence[int], new: tuple[int, int]) -> bool
+platoon.experimental.TaskStatsStore.settle: def settle(record: GroupRecord) -> None
+platoon.experimental.TaskStatsStore.snapshot: def snapshot(*, start: int, next_seq: int) -> dict[str, Any]
+platoon.experimental.TaskStatsStore.step_metrics: def step_metrics(*, now: int, prefixes: Mapping[str, str]) -> dict[str, float]
+platoon.experimental.TaskStatsStore.task: def task(task_id: str) -> TaskStats
+platoon.experimental.TaskStatsStore.task_ids: def task_ids() -> list[str]
+platoon.experimental.TaskStatsStore.threshold: def threshold(entry: str | None) -> float
+platoon.experimental.TaskStatsView: class TaskStatsView
+platoon.experimental.TaskStatsView.__init__: def __init__(store: TaskStatsStore, *, now: int, live: bool = True) -> None
+platoon.experimental.TaskStatsView.counts: def counts(task_id: str) -> TaskCounts
+platoon.experimental.TaskStatsView.entry: def entry(name: str) -> GroupTotals
+platoon.experimental.TaskStatsView.group_size: def group_size(entry: str | None) -> int
+platoon.experimental.TaskStatsView.label: def label(label: str) -> GroupTotals
+platoon.experimental.TaskStatsView.labels: def labels() -> tuple[str, ...]
+platoon.experimental.TaskStatsView.live: property bool
+platoon.experimental.TaskStatsView.now: property int
+platoon.experimental.TaskStatsView.posterior: def posterior(task_id: str) -> tuple[float, float]
+platoon.experimental.TaskStatsView.task: def task(task_id: str) -> TaskStats
+platoon.experimental.TaskStatsView.task_ids: def task_ids() -> tuple[str, ...]
+platoon.experimental.TaskStatsView.threshold: def threshold(entry: str | None) -> float
+platoon.experimental.Trainer: class Trainer(Protocol)
+platoon.experimental.Trainer.__aenter__: async def __aenter__() -> Self
+platoon.experimental.Trainer.__aexit__: async def __aexit__(exc_type: Any, exc_val: Any, exc_tb: Any) -> bool | None
+platoon.experimental.Trainer.from_setup: classmethod def from_setup(setup: platoon.train.trainer.api.TrainerSetup) -> Self
+platoon.experimental.Trainer.needs: classmethod def needs(config: Any, options: Any) -> platoon.train.trainer.api.TrainerNeeds
+platoon.experimental.Trainer.run: async def run() -> None
+platoon.experimental.TrainerBase: class TrainerBase
+platoon.experimental.TrainerBase.__aenter__: async def __aenter__() -> Self
+platoon.experimental.TrainerBase.__aexit__: async def __aexit__(exc_type, exc_val, exc_tb) -> bool
+platoon.experimental.TrainerBase.__init__: def __init__(setup: platoon.train.trainer.api.TrainerSetup) -> None
+platoon.experimental.TrainerBase.check: def check(run: TrainerRun) -> None
+platoon.experimental.TrainerBase.close: async def close(run: TrainerRun) -> None
+platoon.experimental.TrainerBase.config: attribute Any
+platoon.experimental.TrainerBase.from_setup: classmethod def from_setup(setup: platoon.train.trainer.api.TrainerSetup) -> Self
+platoon.experimental.TrainerBase.needs: classmethod def needs(config: Any, options: Any) -> platoon.train.trainer.api.TrainerNeeds
+platoon.experimental.TrainerBase.options: constant NoneType = None
+platoon.experimental.TrainerBase.policies: attribute PolicySet
+platoon.experimental.TrainerBase.prepare: async def prepare(run: TrainerRun, start: StartPoint) -> platoon.train.trainer.api.StepPlan
+platoon.experimental.TrainerBase.ready: async def ready(run: TrainerRun) -> None
+platoon.experimental.TrainerBase.run: async def run() -> None
+platoon.experimental.TrainerBase.run_log_path: property str
+platoon.experimental.TrainerBase.run_steps: async def run_steps(run: TrainerRun) -> None
+platoon.experimental.TrainerBase.setup: constant NoneType = None
+platoon.experimental.TrainerBase.started: async def started(run: TrainerRun) -> None
+platoon.experimental.TrainerNeeds: @dataclass(frozen=True) class TrainerNeeds
+platoon.experimental.TrainerNeeds.rollouts: field bool = False
+platoon.experimental.TrainerSetup: @dataclass(frozen=True) class TrainerSetup
+platoon.experimental.TrainerSetup.build_workflows: def build_workflows(policies: PolicySet) -> platoon.train.trainer.api.Workflows
+platoon.experimental.TrainerSetup.config: field Any
+platoon.experimental.TrainerSetup.options: field Any = None
+platoon.experimental.TrainerSetup.policy_specs: field Mapping[str, platoon.train.policy.spec.PolicySpec]
+platoon.experimental.TrainerSetup.tasks: field platoon.train.trainer.api.TaskSources | None = None
+platoon.experimental.TrainerSetup.workflow_builder: field Callable[[PolicySet], Workflows] | None = None
+platoon.experimental.WorkflowCapabilities: @dataclass(frozen=True) class WorkflowCapabilities
+platoon.experimental.WorkflowCapabilities.applies_entry_settings: field bool = False
+platoon.experimental.WorkflowCapabilities.binds_policies: field bool = False
+platoon.experimental.WorkflowCapabilities.gives_verdicts: field bool = False
+platoon.experimental.WorkflowCapabilities.runs_rollout_workers: field bool = False
+platoon.experimental.WorkflowCapabilities.runs_rollouts_on_lease: field bool = False
+platoon.experimental.WorkflowCapabilities.takes_start_limit: field bool = False
+platoon.experimental.WorkflowSetup: @dataclass(frozen=True) class WorkflowSetup
+platoon.experimental.WorkflowSetup.config: field Any
+platoon.experimental.WorkflowSetup.entry_configs: field Mapping[str, Any] | None
+platoon.experimental.WorkflowSetup.filter_errors: field bool
+platoon.experimental.WorkflowSetup.get_task_fn: field Callable[[str], Any]
+platoon.experimental.WorkflowSetup.label_by: field str | None = None
+platoon.experimental.WorkflowSetup.log_path: field str
+platoon.experimental.WorkflowSetup.options: field Mapping[str, Any] = <factory dict>
+platoon.experimental.WorkflowSetup.packages: field Sequence[str] | None = None
+platoon.experimental.WorkflowSetup.phase: field Literal['train', 'eval']
+platoon.experimental.WorkflowSetup.policies: field Mapping[str, Any]
+platoon.experimental.WorkflowSetup.reward_processor: field Callable[..., Any]
+platoon.experimental.WorkflowSetup.rollout_fn: field Callable[..., Any]
+platoon.experimental.WorkflowSetup.stats_scope: field str
+platoon.experimental.Workflows: @dataclass(frozen=True) class Workflows
+platoon.experimental.Workflows.eval: field Any | None = None
+platoon.experimental.Workflows.train: field Any
+platoon.experimental.capabilities_of: def capabilities_of(workflow: object) -> platoon.train.workflow.protocol.WorkflowCapabilities
+platoon.experimental.group_admission: def group_admission(name: str, *, options: Any = None, check: Callable[[Any, AdmissionCheckContext], None] | None = None) -> Callable[[R], R]
+platoon.experimental.informative_at: def informative_at(alpha: float, beta: float, k: int) -> float
+platoon.experimental.pass_at: def pass_at(alpha: float, beta: float, k: int) -> float
+platoon.experimental.report_of: def report_of(output: object) -> platoon.train.workflow.protocol.OutputReport
+platoon.experimental.rollout_lease: def rollout_lease() -> RolloutLease
+platoon.experimental.rows_by_policy: def rows_by_policy(output: Any, trained: str) -> Mapping[str, Sequence['tinker.Datum']]
+platoon.experimental.task_sampler: def task_sampler(name: str, *, options: Any = None, check: Callable[[Any, SamplerCheckContext], None] | None = None) -> Callable[[S], S]
 platoon.get_harness: def get_harness(ref: str) -> Harness
 platoon.gym: module platoon.gym
 platoon.gym.GYM_RETURN_MISC_KEY: constant str = "gym_return"
@@ -208,6 +509,9 @@ platoon.testing.ScriptedPolicy.tokens: def tokens(completion: Completion) -> lis
 platoon.testing.TOY_MODEL_NAME: constant str = "platoon/toy"
 platoon.testing.TOY_RENDERER_NAME: constant str = "qwen3_instruct"
 platoon.testing.TOY_TOKENIZER_DIR: constant Path
+platoon.testing.check_group_admission: def check_group_admission(rule: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('run', 'entry'), budget_ms: float | None = 2.0) -> None
+platoon.testing.check_task_sampler: def check_task_sampler(sampler: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('entry', 'run'), budget_ms: float | None = 20.0) -> None
+platoon.testing.check_trainer: def check_trainer(trainer: type[Trainer], *, options: Any = None) -> None
 platoon.testing.last_user_message: def last_user_message(prompt: str) -> str
 platoon.testing.make_gateway: def make_gateway(policy: ScriptedPolicy | Script = (), *, tokenizer: Tokenizer | None = None, renderer: Renderer | str | None = None, renderer_kwargs: Mapping[str, Any] | None = None, model_name: str = "platoon/toy", **settings: Any) -> ModelGateway
 platoon.testing.rules: def rules(table: Mapping[str, Reply], *, default: Reply | None = None) -> Callable[[str], Reply]

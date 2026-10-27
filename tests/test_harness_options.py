@@ -93,7 +93,7 @@ def route_options(config, split: str) -> dict:
 
 def test_a_misspelled_option_fails_validate_and_train_with_exit_78_before_anything_runs(tmp_path, monkeypatch, capsys):
     trained = []
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", trained.append)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", trained.append)
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # train checks its key before anything else: past it
     config = train_config(tmp_path, openhands(harness_options={"num_retires": 2}))
     problem = f"{WHERE}.num_retires: unknown key; did you mean {WHERE}.num_retries?"
@@ -284,7 +284,7 @@ def test_routes_carry_each_phases_options(tmp_path):
 
 
 def test_lock_json_records_the_options_with_their_defaults(tmp_path, monkeypatch):
-    monkeypatch.setattr("platoon.train.tinker.train.run_tinker_training", lambda args: None)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: None)
     monkeypatch.setenv("TINKER_API_KEY", "tml-test")  # train checks its key before anything else: past it
 
     cli.main(["train", str(train_config(tmp_path, evaluates=False))])

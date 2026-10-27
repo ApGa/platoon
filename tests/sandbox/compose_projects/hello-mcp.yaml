@@ -1,0 +1,54 @@
+outcome: opened and closed
+project:
+  name: <project>
+  services:
+    main:
+      image: platoon-harbor:cc85e621d092d0aa418aaf2f7fb1909e
+      container_name: <project>-main
+      entrypoint: [sleep, infinity]
+      working_dir: /app
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-hello-mcp, platoon.task: harbor/hello-mcp, platoon.stack: <project>, platoon.service: main}
+      networks:
+        internal: {}
+      cpus: 1
+      mem_limit: 2048m
+    mcp-server:
+      image: platoon-harbor:df477d7ca11e542c2f5f658f49696c1c
+      container_name: <project>-mcp-server
+      entrypoint: [python, server.py]
+      working_dir: /app
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-hello-mcp, platoon.task: harbor/hello-mcp, platoon.stack: <project>, platoon.service: mcp-server}
+      networks:
+        internal: {}
+  networks:
+    internal:
+      name: <project>-internal
+      internal: true
+      driver_opts: {com.docker.network.bridge.inhibit_ipv4: 'true'}
+      labels: {platoon.env: harbor, platoon.rollout_id: rollout-hello-mcp, platoon.task: harbor/hello-mcp, platoon.stack: <project>}
+commands:
+  <project>:
+  - [compose, version]
+  - [version, --format, '{{.Server.Version}}']
+  - [network, create, --driver=bridge, --label=platoon.env=harbor, --label=platoon.rollout_id=rollout-hello-mcp, --label=platoon.task=harbor/hello-mcp, --label=platoon.stack=<project>, <project>-egress]
+  - [ps, --all, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, ls, --quiet, --filter=label=platoon.stack=<project>]
+  - [network, rm, <project>-egress, <project>-internal]
+  mcp-server:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, mcp-server]
+  - [network, connect, <project>-egress, <project>-mcp-server]
+  - [start, <project>-mcp-server]
+  - [exec, --workdir, /app, --env=PLATOON_EXEC=<marker>, <project>-mcp-server, python, -c, 'import socket; s=socket.create_connection((''localhost'',8000),timeout=2); s.close()']
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-mcp-server]
+  - [exec, --workdir, /app, --env=PLATOON_EXEC=<marker>, <project>-mcp-server, python, -c, 'import socket; s=socket.create_connection((''localhost'',8000),timeout=2); s.close()']
+  - [rm, --force, --volumes, <project>-mcp-server]
+  main:
+  - [compose, --project-name, <project>, --file, <tmp>/stacks/<project>/compose.yaml, create, --no-recreate, main]
+  - [network, connect, <project>-egress, <project>-main]
+  - [start, <project>-main]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, --user, '0', <project>-main, /bin/sh, -c, <script>, platoon-list]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /logs/agent, /logs/verifier, /logs/artifacts]
+  - [exec, --workdir, /app, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /app]
+  - [exec, --workdir, /, --env=PLATOON_EXEC=<marker>, <project>-main, mkdir, -p, /app]
+  - [inspect, --format, '{{.State.Status}} {{.State.ExitCode}}', <project>-main]
+  - [rm, --force, --volumes, <project>-main]

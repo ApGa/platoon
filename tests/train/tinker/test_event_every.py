@@ -12,7 +12,7 @@ import signal
 import pytest
 from trainer_fakes import Workflow, make_trainer, trainer_config
 
-from platoon.train.tinker.config_defs import EvalConfig
+from platoon.train.config_defs import EvalConfig
 from platoon.utils.config import ConfigError
 
 

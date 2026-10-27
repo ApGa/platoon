@@ -10,16 +10,27 @@ config that leaves ``log_path`` to its launcher prepares as it is.  For each ent
    dataset pinned to a commit whose lock answers the entry, and whose tasks the cache holds, is left alone, and a
    local directory is fetched again, since its files may have changed.  An entry with a hold-out prints its report.
    An entry that names a lock alone reads it; one that serves a directory has nothing to fetch.
-2. **The images.** The images that the lock's runnable tasks, and their separate verifiers, build from Dockerfiles
-   and that the entry's image map lacks are built with the builder of the entry's sandbox provider and recorded in
-   the map: ``oci`` for ``singularity``, ``docker`` for ``docker``.  The ``process`` provider runs no image, so their
-   keys are recorded as ``local``.  Any other provider pulls its images from a registry, which prepare does not
-   guess: the step fails and names the command that builds and pushes them.  The map is the entry's default image
-   map, ``images/<provider>.json`` in the Harbor cache, with the image files in ``images/<provider>/``
-   (:mod:`platoon.envs.harbor.images`).  An entry that serves a directory builds nothing: its tasks run their
-   ``docker_image`` or ``default_image``.  With ``verifier_user: honor``, an image that a verifier
-   which runs as root runs on, and that the ``oci`` builder of platoon before 0.3.0 built, fails the step, naming the
-   build that makes it again: prepare never replaces an image.
+2. **The images.** The images that the lock's runnable tasks, their separate verifiers and their stacks' sidecars
+   build from Dockerfiles (a sidecar's ``build:`` context, whole) and that the entry's image map lacks are built with
+   the builder of the entry's sandbox provider and recorded in the map, so that no rollout builds one: ``oci`` for
+   ``singularity`` (``def`` where its runtime is Apptainer, which has no BuildKit), ``docker`` for ``docker``.  The
+   ``process`` provider runs no image, so their keys are recorded as ``local``.  Any other provider pulls its images
+   from a registry, which prepare does not guess: the step fails and names the command that builds and pushes them.
+   The map is the entry's default image map, ``images/<provider>.json`` in the Harbor cache, with the image files in
+   ``images/<provider>/`` (:mod:`platoon.envs.harbor.images`).  An entry that serves a directory builds nothing: its
+   tasks run their ``docker_image`` or ``default_image``.  Where the entry honors users (``agent_user`` or
+   ``verifier_user`` ``honor``), an image that its sandboxes which honor users run fails the step when the ``oci``
+   builder of platoon before 0.3.0 built it, or when it records no owner manifest and the provider loses the owners an
+   image gives its files (hpc-sandbox: images that platoon before 0.5, the ``def`` builder, or the ``oci`` builder
+   with a squashfs-tools before 4.4 built), naming the build that makes it again, since prepare never replaces an
+   image; and the ``docker_image`` references those sandboxes run are recorded as pulled entries, pinned with their
+   ``USER`` and owner manifest (:mod:`platoon.envs.harbor.owners`), which needs their registries.  Then the
+   **registry images** that the stacks' sidecars run as written (``image: redis:7-alpine``), on any provider but
+   ``process``, are pinned in the map: each by the digest its registry serves for it, with its image's configuration
+   (``ENTRYPOINT``, ``CMD``, ``ENV``, ``USER``, ``HEALTHCHECK``, ...), which sessions run it with.  And where stacks
+   run as pods with egress (``singularity``, ``enroot``), the **pod tools**: slirp4netns, which ``hpc-sandbox
+   fetch-tools`` downloads where no slirp4netns on ``PATH`` does what pods need.  Run prepare on a node like the
+   run's: what it finds on ``PATH`` is this node's.
 3. **The toolchains.** Each toolchain the entry's harness specs run from that is not built under the toolchain root
    is built there (:func:`platoon.harness.toolchains.ensure_toolchain`).  One built from another recipe is never
    replaced: a live run of another config, or of another platoon, may be staging its rollouts from it, so the step
@@ -46,6 +57,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -74,6 +86,7 @@ Say = Callable[[str], None]
 # current: nothing to do; done: made now; missing: a dry run would make it; failed: could not make it; none: nothing to
 # make (a dataset directory, a task set that builds no image, ...).
 Status = Literal["current", "done", "missing", "failed", "none"]
+_FETCH_TOOLS_TIMEOUT_S = 600.0  # hpc-sandbox fetch-tools: one small download
 
 
 class NotPrepared(ConfigError):
@@ -175,6 +188,12 @@ def prepare(
                 out("\n".join(report))
             if lock is not None:
                 record(_images(where, service, lock, dry_run=dry_run, command=command, say=log))
+                for step in (
+                    _registry_images(where, service, lock, dry_run=dry_run, say=log),
+                    _pod_tools(where, service, lock, dry_run=dry_run),
+                ):
+                    if step is not None:
+                        record(step)
             elif service.locked is not None:  # a dry run, before the dataset is fetched
                 record(PrepareStep(where, "images", "missing", "not planned: the dataset is not fetched yet"))
         for ref in environment.harness_refs():
@@ -278,7 +297,7 @@ def _dataset(
     """Fetch the entry's dataset into its lock (``platoon harbor fetch``'s rules), or read the lock it names; with
     the lock, the lines of its hold-out's report, if it has one."""
 
-    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed, is_pinned
+    from platoon.envs.harbor.fetch import FetchError, answering_lock, answering_lock_path, fetch_if_needed
     from platoon.envs.harbor.lock import LockError, read_lock
 
     locked = service.locked
@@ -292,8 +311,8 @@ def _dataset(
         detail = f"current: the lock {locked.lock_path}, {_tasks(lock)} (it names no dataset to fetch)"
         return PrepareStep(where, "dataset", "current", detail), lock, _report(where, service)
     settings = locked.fetch
-    local = not settings.dataset.startswith(("hf://", "harbor://", "git+"))
-    moving = not local and not is_pinned(settings.dataset)  # resolved by platoon harbor fetch --update, never here
+    local = settings.local
+    moving = not local and not settings.pinned  # resolved by platoon harbor fetch --update, never here
     if dry_run or moving:
         lock, gap = _current(settings)
         if lock is None and moving:
@@ -307,7 +326,7 @@ def _dataset(
         if lock is None:
             return PrepareStep(where, "dataset", "missing", f"would fetch {settings.dataset}: {gap}"), None, []
         again = " (a local directory, which prepare fetches again)" if local else ""
-        detail = f"current: the lock {settings.lock_path()}, {_tasks(lock)}{again}"
+        detail = f"current: the lock {answering_lock_path(settings)}, {_tasks(lock)}{again}"
         step = PrepareStep(where, "dataset", "current", detail)
     else:
         fetched_before = local and answering_lock(settings) is not None  # a directory is fetched again every time
@@ -319,7 +338,9 @@ def _dataset(
             again = " again (a local directory's files may have changed)" if fetched_before else ""
             detail = f"fetched {settings.dataset}{again} into the lock {settings.lock_path()}, {_tasks(lock)}"
         else:
-            detail = f"current: the lock {settings.lock_path()} answers it and the cache holds its {_tasks(lock)}"
+            detail = (
+                f"current: the lock {answering_lock_path(settings)} answers it and the cache holds its {_tasks(lock)}"
+            )
         step = PrepareStep(where, "dataset", "done" if fetched else "current", detail)
     return step, lock, _report(where, service)
 
@@ -345,12 +366,12 @@ def _current(settings: Any) -> tuple[DatasetLock | None, str]:
     """The lock that answers ``settings`` when it is current (:func:`~platoon.envs.harbor.fetch.current_lock`), else
     None and why not."""
 
-    from platoon.envs.harbor.fetch import answering_lock, current_lock
+    from platoon.envs.harbor.fetch import answering_lock, answering_lock_path, current_lock
 
     lock = current_lock(settings)
     if lock is not None:
         return lock, ""
-    path = settings.lock_path()
+    path = answering_lock_path(settings)
     answering = answering_lock(settings)
     if answering is None:
         why = "it does not exist" if not path.exists() else "it was written for other fetch settings"
@@ -368,25 +389,71 @@ def _images(
     where: str, service: HarborEnvironmentService, lock: DatasetLock, *, dry_run: bool, command: str, say: Say
 ) -> PrepareStep:
     """Build the images the lock's runnable tasks need and the entry's image map lacks, with its provider's builder.
-    With ``verifier_user: honor``, the step then fails for images that verifiers which run as root run on and that
-    the ``oci`` builder of platoon before 0.3.0 built, naming the build that makes them again
-    (:meth:`~platoon.envs.harbor.service.HarborEnvironmentService.root_images_closed`): prepare never replaces an
-    image, which a run may be using."""
+    Where the entry honors users, the step then fails for images that its sandboxes which honor users run and that the
+    ``oci`` builder of platoon before 0.3.0 built, or that record no owner manifest where the provider needs one,
+    naming the build that makes them again (prepare never replaces an image, which a run may be using), and records the
+    pulled images of such sandboxes (:func:`_pulled_images`)."""
 
     step = _missing_images(where, service, lock, dry_run=dry_run, command=command, say=say)
-    if step.status not in ("current", "done") or not (closed := service.root_images_closed()):
+    if step.status not in ("current", "done", "none"):
         return step
-    tasks = len({name for needing in closed.values() for name in needing})
-    build = f"platoon harbor images build {_config_part(command)} " + " ".join(f"--key {key}" for key in closed)
+    closed = service.closed_images()
+    unrecorded, pulled = service.owner_gaps()
+    if not (closed or unrecorded):
+        return _pulled_images(where, service, step, pulled, dry_run=dry_run, say=say)
+    keys = {**closed, **unrecorded}
+    tasks = len({name for needing in keys.values() for name in needing})
+    build = f"platoon harbor images build {_config_part(command)} " + " ".join(f"--key {key}" for key in keys)
+    why = (
+        f"{len(closed)} were built by the oci builder of platoon before 0.3.0, which unpacked them under the host's "
+        "umask (under one such as 027, their files keep out the users other than root)"
+        if closed
+        else ""
+    )
+    if unrecorded:
+        why += "; " if why else ""
+        why += (
+            f"{len(unrecorded)} record no owners of their files (built by platoon before 0.5, the def builder, or the "
+            "oci builder with a squashfs-tools before 4.4), which the users that a sandbox switches to need"
+        )
     return PrepareStep(
         where,
         "images",
         "failed",
-        f"{step.detail}; but {len(closed)} of them, which {tasks} task(s) run their verifier as root on, were built by "
-        "the oci builder of platoon before 0.3.0, which unpacked them under the host's umask (under one such as 027, "
-        f"their files keep out the users the tests switch to): build them again with `{build}`, then run `{command}` "
-        "again",
+        f"{step.detail}; but of the images that {tasks} task(s) honor users on, {why}: build them again with "
+        f"`{build}`, then run `{command}` again",
     )
+
+
+def _pulled_images(
+    where: str,
+    service: HarborEnvironmentService,
+    step: PrepareStep,
+    pulled: Mapping[str, list[str]],
+    *,
+    dry_run: bool,
+    say: Say,
+) -> PrepareStep:
+    """Record in the entry's image map the pulled images (``pulled``, by reference) that its sandboxes which honor
+    users run, as their registries serve them now (:func:`platoon.envs.harbor.owners.record_pulled`): pinned, with
+    their ``USER`` and the owners their layers give, which such a sandbox needs where its provider loses them."""
+
+    from platoon.envs.harbor.images import default_image_dir
+    from platoon.envs.harbor.owners import record_pulled
+
+    if not pulled:
+        return step
+    images = f"{len(pulled)} pulled image(s) that {len({name for each in pulled.values() for name in each})} task(s)"
+    if dry_run:
+        return PrepareStep(where, "images", "missing", f"{step.detail}; would record {images} honor users on")
+    path = service.task_images.path
+    assert path is not None and service.locked is not None  # owner gaps are a fetched dataset's
+    out = default_image_dir(service.locked.cache, service.provider_name)
+    try:
+        record_pulled(pulled, image_map=path, out_dir=out, log=say)
+    except ValueError as exc:
+        return PrepareStep(where, "images", "failed", f"{step.detail}; but {images} honor users on: {exc}")
+    return PrepareStep(where, "images", "done", f"{step.detail}; recorded {images} honor users on")
 
 
 def _missing_images(
@@ -394,7 +461,7 @@ def _missing_images(
 ) -> PrepareStep:
     """Build the images the lock's runnable tasks need and the entry's image map lacks, with its provider's builder."""
 
-    from platoon.envs.harbor.builders import PROVIDER_BUILDERS, BuildError, build_images, plan_images
+    from platoon.envs.harbor.builders import BuildError, build_images, plan_images, provider_builder
     from platoon.envs.harbor.images import ImageEntry, ImageMap, ImageMapError, default_image_dir, update_image_map
 
     images = service.task_images
@@ -412,7 +479,7 @@ def _missing_images(
     if not missing:
         return PrepareStep(where, "images", "current", f"current: {shown} has the {_images_count(plan.images)}")
     provider = service.provider_name
-    builder = PROVIDER_BUILDERS.get(provider)
+    builder = provider_builder(provider)
     lacking = f"{len(missing)} of the {_images_count(plan.images)}"
     if dry_run:
         how = (
@@ -451,6 +518,92 @@ def _missing_images(
     meanwhile = len(missing) - len(built)
     others = f" ({meanwhile} built meanwhile by another prepare)" if meanwhile else ""
     return PrepareStep(where, "images", "done", f"built {len(built)} with the {builder} builder into {shown}{others}")
+
+
+def _registry_images(
+    where: str, service: HarborEnvironmentService, lock: DatasetLock, *, dry_run: bool, say: Say
+) -> PrepareStep | None:
+    """Pin, in the entry's image map, the registry images that the lock's stacks' sidecars run and the map has not
+    pinned: each by the digest its registry serves for it, with its image's configuration
+    (:func:`~platoon.envs.harbor.builders.pin_images`); nothing where no stack runs, which the step says.  None for an
+    entry whose stacks run none, or that runs them on the ``process`` provider, which runs no image."""
+
+    from platoon.envs.harbor.builders import DigestError, pin_images, plan_images
+    from platoon.envs.harbor.images import ImageMapError
+
+    images = service.task_images
+    if service.provider_name == "process" or images.path is None:
+        return None
+    try:
+        plan = plan_images(lock, images.load())
+    except ImageMapError as exc:
+        raise ConfigError(f"{where}: {exc}") from exc  # the map's file names itself
+    if not plan.pulls:
+        return None
+    if (refusal := service.stacks_refusal()) is not None:
+        return PrepareStep(where, "registry images", "none", f"none pinned: no stack runs here, as {refusal}")
+    shown, count, unpinned = f"the image map {images.path}", f"{len(plan.pulls)} the sidecars run", plan.unpinned
+    if not unpinned:
+        return PrepareStep(where, "registry images", "current", f"current: {shown} pins the {count}")
+    if dry_run:
+        return PrepareStep(where, "registry images", "missing", f"would pin {len(unpinned)} of the {count} in {shown}")
+    try:
+        pinned = pin_images(lock, image_map=images.path, log=say)
+    except DigestError as exc:
+        detail = f"{len(unpinned)} of the {count} could not all be pinned in {shown}: {exc}"
+        return PrepareStep(where, "registry images", "failed", detail)
+    detail = f"pinned {len(pinned)} of the {count} in {shown}, by digest, with their images' configuration"
+    return PrepareStep(where, "registry images", "done", detail)
+
+
+def _pod_tools(
+    where: str, service: HarborEnvironmentService, lock: DatasetLock, *, dry_run: bool
+) -> PrepareStep | None:
+    """Fetch slirp4netns with ``hpc-sandbox fetch-tools`` (a release pinned by its SHA-256) where the entry's stacks
+    run as pods with egress and no slirp4netns on ``PATH`` does what pods need (hpc-sandbox's rule); None for an entry
+    with no such stack."""
+
+    if service.provider_name not in ("singularity", "enroot"):
+        return None
+    stacks = [task.name for task in lock.runnable() if (task.compose or {}).get("kind") == "sidecars"]
+    if not service.egress_stacks(stacks):
+        return None
+    found, why = _slirp4netns(service)
+    if found is not None:
+        return PrepareStep(where, "pod tools", "current", f"current: pods with egress run {found}")
+    if dry_run:
+        return PrepareStep(
+            where, "pod tools", "missing", f"would fetch slirp4netns with hpc-sandbox fetch-tools: {why}"
+        )
+    command = [sys.executable, "-m", "hpc_sandbox", "fetch-tools"]
+    try:
+        fetch = subprocess.run(command, capture_output=True, text=True, timeout=_FETCH_TOOLS_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        detail = f"hpc-sandbox fetch-tools did not finish within {_FETCH_TOOLS_TIMEOUT_S:g} s"
+        return PrepareStep(where, "pod tools", "failed", detail)
+    found, why = _slirp4netns(service)
+    if fetch.returncode != 0 or found is None:
+        output = (fetch.stderr or fetch.stdout).strip()[-500:]
+        detail = f"hpc-sandbox fetch-tools exited {fetch.returncode} ({output}), and {why}"
+        return PrepareStep(where, "pod tools", "failed", detail)
+    return PrepareStep(where, "pod tools", "done", f"fetched slirp4netns with hpc-sandbox fetch-tools: {found}")
+
+
+def _slirp4netns(service: HarborEnvironmentService) -> tuple[str | None, str]:
+    """The slirp4netns the entry's pods would run, as its provider finds it, or None and why there is none."""
+
+    from platoon.sandbox.hpc import HpcProvider
+
+    try:
+        provider = service.provider
+    except ImportError as exc:  # no hpc-sandbox: building the provider says how to install it
+        return None, str(exc)
+    if not isinstance(provider, HpcProvider):
+        return None, f"the {service.provider_name} provider runs no pods"
+    try:
+        return provider.inner.slirp4netns(), ""
+    except provider.hpc_sandbox.SandboxError as exc:  # none that it can run
+        return None, str(exc)
 
 
 def _toolchain(where: str, spec: HarnessSpec, ref: str, *, dry_run: bool, say: Say) -> PrepareStep:

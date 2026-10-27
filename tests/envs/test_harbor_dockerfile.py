@@ -200,8 +200,51 @@ def test_env_arg_label_and_user_in_the_suffix(tmp_path: Path):
         ("ARG", "LATE", ""),
         ("WORKDIR", "data"),
         ("COPY", "a.json", "b.json", "./"),
+        ("USER", "learner"),
     )
     assert plan.suffix_user == "learner"
+
+
+def test_a_suffix_user_keeps_its_place_among_the_deferred_steps(tmp_path: Path):
+    """BuildKit makes a WORKDIR's directories as the USER in effect there, so the plan keeps where each USER falls."""
+
+    context = _context(
+        tmp_path, "FROM python:3.12\nRUN useradd agent\nWORKDIR /app\nUSER agent\nWORKDIR /work\nUSER ${UID}:50\n", {}
+    )
+
+    plan = plan_dockerfile(context / "Dockerfile")
+
+    assert plan.deferred == (("WORKDIR", "/app"), ("USER", "agent"), ("WORKDIR", "/work"), ("USER", "${UID}:50"))
+    assert plan.suffix_user == "${UID}:50"
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "user"),
+    [
+        ("FROM jupyter\nUSER root\nRUN true\nUSER ${NB_UID}\n", "${NB_UID}"),  # the base image's ENV: at open
+        ("FROM jupyter\nARG NB_UID=1000\nRUN true\nUSER ${NB_UID}\n", "1000"),  # in scope: now, as a build
+        ("FROM jupyter\nRUN true\nUSER ${NB_USER:-jovyan}\n", "jovyan"),
+    ],
+)
+def test_a_suffix_user_that_names_the_base_images_environment_is_recorded_as_written(
+    tmp_path: Path, dockerfile: str, user: str
+):
+    plan = plan_dockerfile(_context(tmp_path, dockerfile, {}) / "Dockerfile")
+
+    assert plan.config["user"] == user
+
+
+def test_a_deferred_copy_keeps_its_owner_and_drops_its_link(tmp_path: Path):
+    context = _context(
+        tmp_path,
+        "FROM python:3.12\nRUN useradd agent\nCOPY --chown=agent:agent a.json /app/\nCOPY --link b.json /app/\n",
+        {"a.json": "{}", "b.json": "{}"},
+    )
+
+    plan = plan_dockerfile(context / "Dockerfile")
+
+    assert plan.deferred == (("COPY", "--chown=agent:agent", "a.json", "/app/"), ("COPY", "b.json", "/app/"))
+    assert plan.copied == ("a.json", "b.json")  # the owner is not a source
 
 
 def test_a_dockerfile_without_from_is_refused(tmp_path: Path):
@@ -289,7 +332,7 @@ def test_the_key_covers_a_remote_add_as_written_and_planning_reads_no_network(
 
 
 def test_an_add_of_a_url_named_by_an_env_value_stays_in_the_build(tmp_path: Path):
-    dockerfile = "FROM x\nENV DATA_URL=https://example.com/data.bin\nADD $DATA_URL /data/data.bin\nRUN true\n"
+    dockerfile = "FROM x\nENV DATA_URL=https://example.com/data.bin\nADD $DATA_URL /srv/data.bin\nRUN true\n"
     plan = plan_dockerfile(_context(tmp_path, dockerfile) / "Dockerfile")
     assert [instruction.keyword for instruction in plan.prefix] == ["FROM", "ENV", "ADD", "RUN"]
     assert plan.context_files == () and plan.deferred == ()
@@ -300,7 +343,7 @@ def test_an_add_of_a_url_named_by_an_env_value_stays_in_the_build(tmp_path: Path
     [
         ("FROM x\nRUN true\nADD https://example.com/data.tar.gz /data/\nWORKDIR /w\n", "ADD of a URL"),
         ("FROM x\nARG PDG=https://example.com/pkg\nRUN true\nADD ${PDG}/a.py /opt/a.py\nWORKDIR /w\n", "ADD of a URL"),
-        ("FROM x\nRUN true\nENV DATA=https://example.com/d.bin\nADD $DATA /data/d.bin\nWORKDIR /w\n", "ADD of a URL"),
+        ("FROM x\nRUN true\nENV DATA=https://example.com/d.bin\nADD $DATA /srv/d.bin\nWORKDIR /w\n", "ADD of a URL"),
         (f"FROM x\nRUN true\nADD --checksum={CHECKSUM} https://example.com/x /opt/x\nWORKDIR /w\n", "ADD --checksum"),
         ("FROM x\nRUN true\nADD https://github.com/org/repo.git#v1.0 /src\nWORKDIR /w\n", "ADD of a git repository"),
         ("FROM x\nRUN true\nADD git@github.com:org/repo.git /src\nWORKDIR /w\n", "ADD of a git repository"),

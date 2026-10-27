@@ -90,7 +90,7 @@ environments:
 - **Telemetry and process isolation.** With `rollout_isolation: inprocess` (the default), every counter is logged
   with each step's metrics under its own name. With `rollout_isolation: process`, rollouts run in worker processes
   and the trainer adds up only a fixed set of counter names across them
-  (`CUMULATIVE_KEYS` in [`platoon/train/tinker/workers/telemetry.py`](../../platoon/train/tinker/workers/telemetry.py));
+  (`CUMULATIVE_KEYS` in [`platoon/train/workers/telemetry.py`](../../platoon/train/workers/telemetry.py));
   other names are not reported from workers.
 
 ### Check it on CPU

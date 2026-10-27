@@ -19,7 +19,7 @@ environment that ships with platoon. `platoon config` itself never contacts a tr
 | The file has | Schema | Used by |
 |---|---|---|
 | an `inference:` section | `PlatoonEvalConfig` (`platoon/eval/run.py`) | `platoon eval`, `platoon rollout` |
-| a `train:` section | `PlatoonTinkerRLTrainerConfig` (`platoon/train/tinker/config_defs.py`) | `platoon train`, `platoon rollout` |
+| a `train:` section | `PlatoonTinkerRLTrainerConfig` (`platoon/train/config_defs.py`) | `platoon train`, `platoon rollout` |
 | neither | none: plain YAML, only meant to be extended | `extends:` |
 
 The top-level keys of a training config:
@@ -111,12 +111,12 @@ The merge rules (`platoon/utils/config.py`):
   is not a mapping is a configuration error.
 - **Input paths are relative to the file that names them,** as `extends:` is, so a config runs the same from any
   directory: an environment's harness `.toml` spec, and the options its service reads files from (a Harbor entry's
-  `dataset`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`, `overlays` and `mounts[].source`, a task table's
-  `path`). A relative input that names nothing beside its file is a configuration error, never looked up anywhere
-  else; when the path exists relative to the working directory, where such paths resolved before, the error names
-  that path too. A split manifest named relative to a `dataset_dir` that the same file names stays relative to it,
-  a `lock` that a fetch will write need not exist yet, and paths inside a dataset (`index[].path`) stay relative to
-  the dataset.
+  `dataset`, `registry`, `adapter.repo`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`, `overlays` and
+  `mounts[].source`, a task table's `path`). A relative input that names nothing beside its file is a configuration
+  error, never looked up anywhere else; when the path exists relative to the working directory, where such paths
+  resolved before, the error names that path too. A split manifest named relative to a `dataset_dir` that the same
+  file names stays relative to it, a `lock` that a fetch will write need not exist yet, and paths inside a dataset
+  (`index[].path`) stay relative to the dataset.
 - **Overrides and outputs are relative to the working directory:** a path given on the command line (step 3), and
   where a run writes, `log_path` and `inference.output_dir`, in which a leading `~` names the home directory. The
   run's record holds these paths absolute (step 6).
@@ -184,7 +184,7 @@ $ uv run platoon config validate train.yaml broken.yaml
 ok   train.yaml (PlatoonTinkerRLTrainerConfig)
 FAIL broken.yaml
   train.learning_rate: unknown key
-  train.task_sampler: 'random' is not one of 'auto', 'weighted', 'uniform'
+  train.task_sampler: 'random' is not one of 'auto', 'weighted', 'uniform', 'pass_rate', a name an environment's package registers, or module:Class
   stats.trail_name: unknown key; did you mean stats.trial_name?
 ```
 
@@ -215,8 +215,8 @@ both phases (`ok   environments.yaml (EnvironmentsConfig)`).
 
 A key that is going away still loads, for one minor release. `config validate` lists each deprecated key a file
 sets under it, with the key that replaces it and the release that removes it, and `--strict` fails on them, so CI
-finds them before that release does. For a `train.yaml` that still sets `train.task_order`, the name of
-`train.task_sampler` until platoon 0.3.0:
+finds them before that release does. Platoon 0.3.0, which renamed `train.task_order` to `train.task_sampler`, said
+so of a `train.yaml` that still set the old name:
 
 ```console
 $ uv run platoon config validate --strict train.yaml
@@ -230,13 +230,13 @@ such a config warns with `pt.PlatoonDeprecationWarning`, a `FutureWarning`;
 `-W error::platoon.PlatoonDeprecationWarning`, turns them into errors.
 
 Once the release a deprecation names removes the key, a config that still sets it does not load (exit code 78): the
-key is unknown, and its problem says what replaces it and which release removed it. For a `train.yaml` that still
-sets `train.rollout_group_key`, which platoon 0.3.0 removed:
+key is unknown, and its problem says what replaces it and which release removed it. For that `train.yaml`, since
+platoon 0.4.0:
 
 ```console
 $ uv run platoon config validate train.yaml
 FAIL train.yaml
-  train.rollout_group_key: unknown key; platoon 0.3.0 removed it; use train.label_by
+  train.task_order: unknown key; platoon 0.4.0 removed it; use train.task_sampler
 ```
 
 A service option that a release removed fails the same way as the config loads, `--no-resolve` or not
@@ -327,8 +327,9 @@ Two files go there, replacing any older copies:
   statistics its checkpoint names adds itself to `tasks_state_lost`: its number, the checkpoint, why, and the older
   checkpoint whose statistics it loaded instead, if any ([Per-task statistics](train-and-eval.md#per-task-statistics)),
   and one whose sampling inputs (the task sampler, the batch size, the label column, the entries' order, an entry's
-  weight, seed or training tasks) differ from its checkpoint's adds itself to `sampling_changed`: its number, the
-  checkpoint and the changes ([Checkpoints and resume](train-and-eval.md#checkpoints-and-resume)).
+  weight, seed or training tasks, a group admission rule and its cap) differ from its checkpoint's adds itself to
+  `sampling_changed`: its number, the checkpoint and the changes
+  ([Checkpoints and resume](train-and-eval.md#checkpoints-and-resume)).
 
 To repeat a run, pass its record back as the config: `platoon train <run dir>/config.resolved.yaml`. Use a new
 `stats.trial_name` for a fresh run; reusing the same run directory resumes it (see [Checkpoints and

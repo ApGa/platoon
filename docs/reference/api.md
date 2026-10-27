@@ -610,7 +610,10 @@ gateway through the sandbox's route (`session.sandbox.routes["gateway"]`, which 
 loopback.  The runner refuses to place a harness in a sandbox that does not (`host_loopback = False`) and has
 no route; a session that does not say keeps the earlier rule, that a sandbox with a network shares the host's.
 A session may also give `agent_timeout_s` (optional): the task's own time limit for its agent in seconds, or
-None, which harness rollouts cap the root's harness with, as they do with the rollout's `timeout`.
+None, which harness rollouts cap the root's harness with, as they do with the rollout's `timeout`.  And
+`task_mcp_servers` (optional): the MCP servers the task itself offers, as a harness in its sandbox reaches them
+(each a mapping with `name`, `transport`, and `url` or `command` and `args`), which harness specs render
+as `{task_mcp_servers}`.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -814,11 +817,12 @@ A named environment: `name@version` and the partial `environments` entry it stan
 `EnvironmentEntry(name, version="1", *, description="", harness_defaults=None, **keys)`, where `keys` are
 keys of an `environments` entry (`service`, `service_kwargs`, `harness`, `program`,
 `reward_processor`, `agents`, `dataset_kwargs`, ...), checked against the config schema when the entry
-is built.  A run chooses the rest (`FORBIDDEN_KEYS`): `env`, `name`, `weight`, `max_staleness`, the
-run-level settings, the tasks it leaves out (`exclude_tasks`; an environment that should not offer a task leaves
-it out of its own task lists, in a new version), `harness_options`, for which `harness_defaults` maps a
-harness name to the options the environment needs from that harness, of `workflow_config` all but the
-rollout settings (`rollout_config`) its tasks were measured with, and `eval_overrides.workflow_config`.
+is built.  A run chooses the rest (`FORBIDDEN_KEYS`): `env`, `name`, `weight`, `task_sampler` and
+`task_sampler_options`, `group_admission` and `group_admission_options`, `max_staleness`, the run-level
+settings, the tasks it leaves out (`exclude_tasks`; an environment that should not offer a task leaves it out of
+its own task lists, in a new version), `harness_options`, for which `harness_defaults` maps a harness name to
+the options the environment needs from that harness, of `workflow_config` all but the rollout settings
+(`rollout_config`) its tasks were measured with, and `eval_overrides.workflow_config`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

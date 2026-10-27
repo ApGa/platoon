@@ -12,11 +12,13 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import textwrap
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -25,10 +27,12 @@ from test_harbor_fetch import COMMIT, FakeHub, _overlay
 from test_harbor_fetch import hub as fake_hub  # noqa: F401 - a fixture: the fake hub, serving the dataset
 
 from platoon import cli
-from platoon.envs.harbor import builders
+from platoon import prepare as prepare_module
+from platoon.envs.harbor import builders, owners
 from platoon.envs.harbor import fetch as fetch_module
-from platoon.envs.harbor.images import ImageEntry, ImageMap, update_image_map
+from platoon.envs.harbor.images import ImageEntry, ImageMap, pulled_key, update_image_map
 from platoon.envs.harbor.lock import read_lock
+from platoon.envs.harbor.owners import Owner, PulledImage
 from platoon.harness.toolchains import read_manifest
 from platoon.prepare import load_environments, prepare, prepare_command, summary
 from platoon.utils.config import ConfigError
@@ -375,6 +379,138 @@ def test_an_entry_that_serves_a_directory_fetches_and_builds_nothing(site, tmp_p
     assert out[-1] == "ready: 1 made now, 0 already current" and not site["builds"]
 
 
+def _registry_stack_config(tmp_path: Path, **service_kwargs) -> Path:
+    """A config with one Harbor entry on a local dataset of one stack, which its fetch locks: main runs a prebuilt
+    image, and its sidecar the registry image postgres:16-alpine, whose compose file gives it no command."""
+
+    task = tmp_path / "stacks" / "app-db"
+    (task / "environment").mkdir(parents=True)
+    (task / "tests").mkdir()
+    (task / "task.toml").write_text('[environment]\ndocker_image = "python:3.12-slim"\n')
+    (task / "instruction.md").write_text("Use the database.\n")
+    (task / "tests" / "test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+    (task / "environment" / "docker-compose.yaml").write_text("services:\n  db:\n    image: postgres:16-alpine\n")
+    entry = {
+        "name": "stacks",
+        "service": "harbor",
+        "service_kwargs": {
+            "dataset": str(tmp_path / "stacks"),
+            "provider": "singularity",
+            "refuse": {"sidecars": False},
+            **service_kwargs,
+        },
+    }
+    config = tmp_path / "configs" / "stacks.yaml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(yaml.safe_dump({"environments": [entry]}))
+    return config
+
+
+def test_prepare_pins_the_registry_images_that_sidecars_run(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    asked: list[str] = []
+
+    def configure(reference: str, **_: object) -> tuple[str, dict]:
+        asked.append(reference)
+        return "sha256:" + "a" * 64, {"config": {"Entrypoint": ["docker-entrypoint.sh"], "Cmd": ["postgres"]}}
+
+    monkeypatch.setattr(builders, "registry_config", configure)
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: ("/usr/bin/slirp4netns", ""))
+    config = _registry_stack_config(tmp_path)
+
+    steps, lines, code = _run(config)
+
+    assert code == 0 and [(step.step, step.status) for step in steps] == [
+        ("dataset", "done"),
+        ("images", "none"),
+        ("registry images", "done"),
+        ("pod tools", "current"),
+    ]
+    default = tmp_path / "site" / "harbor" / "images" / "singularity.json"
+    entry = ImageMap.load(default).entries[pulled_key("postgres:16-alpine")]
+    assert entry.image == "docker://postgres@sha256:" + "a" * 64 and entry.cmd == ("postgres",)
+    assert lines[2] == (
+        f"environments[stacks] registry images: pinned 1 of the 1 the sidecars run in the image map {default}, by "
+        "digest, with their images' configuration"
+    )
+    assert lines[3] == "environments[stacks] pod tools: current: pods with egress run /usr/bin/slirp4netns"
+    steps, lines, code = _run(config)
+    assert code == 0 and steps[2].status == "current" and asked == ["postgres:16-alpine"]
+
+
+def test_prepare_fetches_pod_tools_where_stacks_with_egress_need_them(
+    site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    found: list[str | None] = ["/usr/bin/slirp4netns"]
+    fetched: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object):
+        fetched.append(argv)
+        found[0] = "/srv/tools/slirp4netns-1.3.6-x86_64"
+        return prepare_module.subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(builders, "registry_config", lambda reference, **_: ("sha256:" + "a" * 64, {"config": {}}))
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: (found[0], "no slirp4netns is on PATH"))
+    monkeypatch.setattr(prepare_module.subprocess, "run", run)
+    config = _registry_stack_config(tmp_path)
+    assert _run(config)[2] == 0 and not fetched  # this node has one
+    found[0] = None
+
+    steps, lines, code = _run(config, dry_run=True)
+    assert steps[-1].line() == (
+        "environments[stacks] pod tools: would fetch slirp4netns with hpc-sandbox fetch-tools: no slirp4netns is on "
+        "PATH"
+    )
+    steps, lines, code = _run(config)
+    assert code == 0 and steps[-1].status == "done"
+    assert fetched == [[sys.executable, "-m", "hpc_sandbox", "fetch-tools"]]
+    assert lines[-2].endswith(
+        "pod tools: fetched slirp4netns with hpc-sandbox fetch-tools: /srv/tools/slirp4netns-1.3.6-x86_64"
+    )
+    offline = _registry_stack_config(tmp_path / "offline", network_policy="none")
+    steps, lines, code = _run(offline)
+    assert code == 0 and [step.step for step in steps] == ["dataset", "images", "registry images"]  # no egress
+
+
+def test_a_fetch_of_the_pod_tools_that_hangs_fails_its_step(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def run(argv: list[str], **kwargs: Any):
+        raise prepare_module.subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(builders, "registry_config", lambda reference, **_: ("sha256:" + "a" * 64, {"config": {}}))
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: (None, "no slirp4netns is on PATH"))
+    monkeypatch.setattr(prepare_module.subprocess, "run", run)
+
+    steps, lines, code = _run(_registry_stack_config(tmp_path))
+
+    assert code == 1 and steps[-1].line() == (
+        "environments[stacks] pod tools: hpc-sandbox fetch-tools did not finish within 600 s"
+    )
+
+
+def test_prepare_pins_and_fetches_nothing_for_stacks_that_do_not_run_here(
+    site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    asked: list[str] = []
+
+    def configure(reference: str, **_: object) -> tuple[str, dict]:
+        asked.append(reference)
+        return "sha256:" + "a" * 64, {"config": {}}
+
+    monkeypatch.setattr(builders, "registry_config", configure)
+    monkeypatch.setattr(prepare_module, "_slirp4netns", lambda service: (None, "no slirp4netns is on PATH"))
+
+    steps, lines, code = _run(_registry_stack_config(tmp_path, stacks="refuse"))
+
+    assert code == 0 and [(step.step, step.status) for step in steps] == [
+        ("dataset", "done"),
+        ("images", "none"),
+        ("registry images", "none"),
+    ]  # and no pod tools, which no stack here needs
+    assert lines[2] == (
+        "environments[stacks] registry images: none pinned: no stack runs here, as the environment sets stacks: refuse"
+    )
+    assert not asked
+
+
 def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_before_0_3_0(site, tmp_path: Path):
     """With verifier_user: honor, an image that a verifier runs as root on, and whose receipt records no oci builder
     revision (as the fake builds here, and the oci builder's before 0.3.0), may keep its files from the users the tests
@@ -423,6 +559,59 @@ def test_prepare_refuses_the_images_of_root_verifiers_that_the_oci_builder_made_
     built = ImageMap.load(default).entries[verifier_key]
     again = ImageEntry(image=built.image, builder="oci", receipt={"builder_revision": 1})  # built since
     update_image_map(default, {verifier_key: again})
+    steps, lines, code = _run(config)
+    assert code == 0 and [step.status for step in steps if step.step == "images"] == ["current"], lines
+
+
+def test_prepare_records_the_owners_that_sandboxes_honoring_users_need(site, tmp_path: Path, monkeypatch):
+    """With agent_user: honor on a provider that loses the owners an image gives its files (singularity): an image built
+    without an owner manifest fails the step, naming the build that makes it again, and a task's docker_image is
+    recorded as a pulled entry, pinned, with its USER and the owners its layers give.  Then the step is current."""
+
+    tasks = {
+        "built": {"task.toml": '[agent]\nuser = "agent"\n', "environment/Dockerfile": "FROM python:3.12\nRUN true\n"},
+        "pulled": {"task.toml": '[agent]\nuser = "nobody"\n[environment]\ndocker_image = "python:3.12-slim"\n'},
+    }
+    for name, files in tasks.items():
+        for relative, text in {**files, "instruction.md": "Do it.\n", "tests/test.sh": "true\n"}.items():
+            (tmp_path / "dataset" / name / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / "dataset" / name / relative).write_text(text)
+    service_kwargs = {"dataset": str(tmp_path / "dataset"), "refuse": {"agent_user": False}, "agent_user": "honor"}
+    service_kwargs |= {"provider": "singularity", "provider_options": {"fakeroot": True}}
+    entry = {"name": "honored", "service": "harbor", "service_kwargs": service_kwargs, "harness": str(_spec(tmp_path))}
+    config = tmp_path / "configs" / "honored.yaml"
+    config.parent.mkdir()
+    config.write_text(yaml.safe_dump({"environments": [entry]}))
+    pulls: list[str] = []
+
+    def pull(reference: str) -> PulledImage:
+        pulls.append(reference)
+        return PulledImage("docker://python@sha256:" + "d" * 64, "sha256:" + "d" * 64, None, [Owner("/srv/x", 1, 1)])
+
+    monkeypatch.setattr(owners, "pull_owners", pull)
+
+    steps, lines, code = _run(config)
+    (images,) = [step for step in steps if step.step == "images"]
+    (lock_path,) = (tmp_path / "site" / "harbor" / "locks").iterdir()
+    key = read_lock(lock_path).get("built").image["key"]
+    assert code == 1 and images.status == "failed", lines
+    assert "record no owners of their files" in images.detail and f"--key {key}" in images.detail
+    assert pulls == []  # nothing is pulled while the step fails
+
+    default = tmp_path / "site" / "harbor" / "images" / "singularity.json"
+    built = ImageMap.load(default).entries[key]
+    manifest = Path(built.image).with_suffix(".owners")
+    manifest.write_text("1000 1000 /app\n")
+    again = ImageEntry(image=built.image, builder="oci", file_owners=str(manifest), receipt={"builder_revision": 1})
+    update_image_map(default, {key: again})  # built again, by this platoon's oci builder
+    steps, lines, code = _run(config)
+    (images,) = [step for step in steps if step.step == "images"]
+    assert code == 0 and images.status == "done", lines
+    assert images.detail.endswith("; recorded 1 pulled image(s) that 1 task(s) honor users on")
+    assert pulls == ["docker://python:3.12-slim"]
+    recorded = ImageMap.load(default).get("docker://python:3.12-slim")
+    assert recorded is not None and recorded.builder == "pulled" and recorded.image.endswith("d" * 64)
+
     steps, lines, code = _run(config)
     assert code == 0 and [step.status for step in steps if step.step == "images"] == ["current"], lines
 
@@ -675,7 +864,7 @@ def opened(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, l
 
     reached: dict[str, list] = {"train": [], "eval": [], "rollout": []}
 
-    def trainer(*, config, train_dataset, eval_dataset, train_order=None):
+    def trainer(*, config, train_dataset, eval_dataset, train_order=None, train_sampling=None):
         reached["train"].append(len(train_dataset))
         raise Reached
 
@@ -696,7 +885,7 @@ def opened(site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, l
         return rollout
 
     monkeypatch.setattr("platoon.train.tinker.proxy.build_renderer", build_renderer)
-    monkeypatch.setattr("platoon.train.tinker.train.PlatoonTinkerRLTrainer", trainer)
+    monkeypatch.setattr("platoon.train.launch.PlatoonTinkerRLTrainer", trainer)
     monkeypatch.setattr("platoon.eval.run.EvalRunner", Runner)
     monkeypatch.setattr(cli, "_eval_policy_class", lambda: _Policy)
     monkeypatch.setattr(AutoRollout, "from_config", route)
@@ -953,7 +1142,7 @@ def test_a_supervised_run_with_prepare_prepares_once_before_its_first_start(
             from pathlib import Path
 
             import platoon.prepare
-            import platoon.train.tinker.train as training
+            import platoon.train.launch as training
             from platoon.train import supervise
 
             def prepare(*args, **kwargs):
@@ -961,7 +1150,7 @@ def test_a_supervised_run_with_prepare_prepares_once_before_its_first_start(
                     log.write("a start\\n")
                 raise AssertionError("a start prepared")
 
-            def trainer(*, config, train_dataset, eval_dataset, train_order=None):
+            def trainer(*, config, train_dataset, eval_dataset, train_order=None, train_sampling=None):
                 path = Path({str(starts)!r})
                 n = int(path.read_text()) + 1 if path.exists() else 1
                 path.write_text(str(n))
@@ -1007,3 +1196,68 @@ def test_a_supervised_start_that_is_not_prepared_names_a_prepare_command_that_pr
     assert "toolchain agent-1.0, which a run never" in err and f"prepare it with: {prepare_command(snapshot)}" in err
     cli.main(["prepare", str(snapshot)])
     assert capfd.readouterr().out.splitlines()[-1].startswith("ready: ")
+
+
+# --- the images of a stack's sidecars --------------------------------------------------------------------------------
+
+STACKS = Path(__file__).parent / "fixtures" / "harbor-stacks" / "tasks"
+
+
+def _stack_config(tmp_path: Path, provider: str) -> tuple[Path, dict]:
+    """A config of one fetched stack task, app-kv's copy whose sidecar builds its image from ./kv; and its entry's
+    service_kwargs."""
+
+    task = tmp_path / "stacks" / "app-kv-built"
+    shutil.copytree(STACKS / "app-kv", task)
+    compose = task / "environment" / "docker-compose.yaml"
+    compose.write_text(compose.read_text().replace("    image: python:3.12-slim\n", "    build: ./kv\n"))
+    (task / "environment" / "kv" / "Dockerfile").write_text("FROM python:3.12-slim\nCOPY kv.py /srv/kv/kv.py\n")
+    toml = task / "task.toml"
+    toml.write_text(toml.read_text().replace("platoon/app-kv", "platoon/app-kv-built"))
+    kwargs = {"dataset": str(task.parent), "refuse": {"sidecars": False}, "provider": provider}
+    config = tmp_path / "configs" / f"stacks-{provider}.yaml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(
+        yaml.safe_dump({"environments": [{"name": "stacks", "service": "harbor", "service_kwargs": kwargs}]})
+    )
+    return config, kwargs
+
+
+def test_prepare_builds_the_images_of_a_stacks_sidecars_with_the_providers_builder(site, tmp_path: Path):
+    config, _ = _stack_config(tmp_path, "docker")
+
+    steps, lines, code = _run(config)
+
+    assert code == 0 and [(step.step, step.status) for step in steps] == [("dataset", "done"), ("images", "done")]
+    (lock_path,) = (tmp_path / "site" / "harbor" / "locks").iterdir()
+    (build,) = read_lock(lock_path).get("app-kv-built").service_builds()
+    assert site["builds"] == [(build["key"], "docker")]  # main's image is prebuilt: the sidecar's alone
+    assert "built 1 with the docker builder" in lines[-2]
+    steps, lines, code = _run(config)
+    assert code == 0 and [step.status for step in steps] == ["done", "current"]  # a directory is fetched again
+
+
+@pytest.mark.asyncio
+async def test_a_sidecar_that_builds_its_image_runs_once_prepare_recorded_it(
+    site, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Where the process provider runs it: prepare records the sidecar's image as local, the run lists the task, and
+    its stack scores its oracle."""
+
+    from platoon.envs.harbor import HarborEnvironmentService
+
+    monkeypatch.setenv("PLATOON_NODE_SCRATCH", str(tmp_path / "scratch"))
+    config, kwargs = _stack_config(tmp_path, "process")
+
+    steps, lines, code = _run(config)
+
+    assert code == 0 and "recorded 1 of the 1 image(s) the runnable tasks build as local" in lines[-2]
+    service = HarborEnvironmentService(**kwargs, provider_options={"root": str(tmp_path / "sandboxes")})
+    await service.check_tasks("train", ["app-kv-built"])  # before, it is not prepared (test_harbor_stacks.py)
+    session = await service.open(await service.get_task("app-kv-built"), rollout_id="built")
+    try:
+        assert (await session.run_solution()).exit_code == 0
+        outcome = await session.grade()
+        assert (outcome.status, outcome.reward) == ("scored", 1.0)
+    finally:
+        await session.close()

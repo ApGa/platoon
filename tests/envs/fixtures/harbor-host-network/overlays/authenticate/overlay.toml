@@ -1,0 +1,8 @@
+description = "Run the key-value store on the host-network fallback: the port it listens on, its token, a 127.0.0.1 bind"
+
+[match]
+name = "app-kv-*"
+
+[[compose]]
+service = "kv"
+host_network = { listen = { 6379 = "KV_PORT" }, token = "KV_TOKEN", bind = "KV_HOST" }

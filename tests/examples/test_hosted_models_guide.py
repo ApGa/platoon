@@ -75,7 +75,7 @@ def test_the_guide_s_forwarding_table_is_the_gateway_s():
         ("platoon/gateway/hosted.py", "MAX_RETRY_AFTER_S = 60.0"),
         ("platoon/gateway/hosted.py", 'REDACTED = "[redacted]"'),
         ("platoon/gateway/server.py", "KEEPALIVE_SECONDS = 10.0"),
-        ("platoon/train/tinker/config_defs.py", "serve evaluation only"),
+        ("platoon/train/config_defs.py", "serve evaluation only"),
     ],
 )
 def test_the_guide_s_facts_are_platoon_s(source, fragment):

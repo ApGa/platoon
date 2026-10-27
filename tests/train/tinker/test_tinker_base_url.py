@@ -8,6 +8,7 @@ service, so a client built without the configured URL reaches another server tha
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
@@ -15,8 +16,9 @@ import yaml
 from platoon import cli
 from platoon.eval.config_defs import EvalPolicy
 from platoon.task import Task
-from platoon.train.tinker import proxy, rl
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.tinker import proxy
+from platoon.train.trainer import rl as rl_module
 from platoon.utils.config import build_config
 
 BASE_URL = "http://self-hosted:8000"
@@ -80,9 +82,29 @@ def test_register_tinker_llm_opens_its_session_on_the_given_server(sessions):
 def test_the_trainer_registers_its_policy_on_the_configured_server(sessions):
     config = build_config(PlatoonTinkerRLTrainerConfig, _settings(tinker_base_url=BASE_URL))
 
-    rl.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
+    rl_module.PlatoonTinkerRLTrainer(config=config, train_dataset=[])
 
     assert sessions == [{"base_url": BASE_URL}]
+
+
+def test_the_recovery_pruner_deletes_on_the_server_the_trainer_trains_on(tmp_path, sessions, monkeypatch):
+    """The trainer reads its policy's server from the config once, as it is built: its training session and its
+    recovery pruner's session open on that server, also after the config changes."""
+
+    settings = _settings(tinker_base_url=BASE_URL, log_path=str(tmp_path / "logs"), checkpoint={"keep_recovery": 2})
+    settings["train"]["max_staleness"] = 1
+    config = build_config(PlatoonTinkerRLTrainerConfig, settings)
+    no_tasks: Any = []
+    trainer = rl_module.PlatoonTinkerRLTrainer(config=config, train_dataset=no_tasks)
+    pruners: list[dict] = []
+    monkeypatch.setattr(rl_module, "RecoveryCheckpointPruner", lambda **kwargs: pruners.append(kwargs))
+    config.tinker_base_url = "http://moved:8000"
+
+    trainer.policies.connect()
+    trainer._start_recovery_pruning()
+    pruners[0]["service_client_factory"]()
+
+    assert sessions == [{"base_url": BASE_URL}] * 3  # the model gateway's, the training session's and the pruner's
 
 
 def test_rollout_of_a_training_config_samples_the_configured_server(tmp_path, sessions, capsys):
@@ -105,7 +127,7 @@ def test_without_tinker_base_url_every_client_reads_the_environment_as_before(tm
     config = tmp_path / "train.yaml"
     config.write_text(yaml.safe_dump(_settings(log_path=str(tmp_path / "logs"))))
 
-    rl.PlatoonTinkerRLTrainer(config=build_config(PlatoonTinkerRLTrainerConfig, _settings()), train_dataset=[])
+    rl_module.PlatoonTinkerRLTrainer(config=build_config(PlatoonTinkerRLTrainerConfig, _settings()), train_dataset=[])
     cli.main(["rollout", str(config), "--task", "t1", "--output-dir", str(tmp_path / "run")])
 
     assert sessions == [{}, {}]

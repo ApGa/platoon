@@ -12,7 +12,7 @@ from platoon.sandbox import Mount, SandboxSnapshot, SandboxSpec, get_provider
 from platoon.sandbox import process as process_module
 from platoon.sandbox._exec import run_command
 from platoon.sandbox.process import SANDBOX_ROOT_ENV, PathMap, ProcessProvider, ProcessSandbox
-from platoon.utils.stopping import registered_process_groups
+from platoon.utils.stopping import process_start_time, registered_process_groups
 
 
 @pytest.fixture
@@ -168,6 +168,34 @@ async def test_kill_processes_ends_what_commands_left_and_keeps_the_sandbox(prov
 
 
 @pytest.mark.asyncio
+async def test_kept_processes_outlive_kill_processes_until_the_sandbox_stops(provider: ProcessProvider):
+    """A task's init, started by a command, and what it started (a child, a daemon in a session of its own) are spared
+    by ``kill_processes`` once kept, with their group; ``stop`` ends them."""
+
+    sandbox = await _start(provider)
+    try:
+        started = await sandbox.exec(
+            'sh -c \'echo $$ > /tmp/init.pid; setsid sh -c "echo \\$$ > /tmp/daemon.pid; exec sleep 30" '
+            "</dev/null >/dev/null 2>&1 & exec sleep 30' </dev/null >/dev/null 2>&1 & sleep 0.3",
+            timeout_s=10,
+        )
+        assert started.exit_code == 0
+        init = int((sandbox.root / "tmp" / "init.pid").read_text())
+        daemon = int((sandbox.root / "tmp" / "daemon.pid").read_text())
+        start = process_start_time(init)
+        sandbox.keep_processes([f"{init}:{start}", f"{daemon}:{process_start_time(daemon)}"])
+        group, detached = await _plant(sandbox)
+
+        await sandbox.kill_processes()
+
+        assert await _wait_group_gone(group) and await _wait_gone(detached)
+        assert _running(init) and _running(daemon)
+    finally:
+        await sandbox.stop()
+    assert await _wait_gone(init) and await _wait_gone(daemon)
+
+
+@pytest.mark.asyncio
 async def test_stop_also_ends_processes_that_left_their_group(provider: ProcessProvider):
     sandbox = await _start(provider)
     group, detached = await _plant(sandbox)
@@ -307,9 +335,9 @@ async def test_mounts_and_custom_workdirs_are_mapped(provider: ProcessProvider, 
     data = tmp_path / "data"
     data.mkdir()
     (data / "input.txt").write_text("mounted\n")
-    sandbox = await _start(provider, workdir="/workspace", mounts=[Mount(source=str(data), target="/mnt/data")])
+    sandbox = await _start(provider, workdir="/workspace", mounts=[Mount(source=str(data), target="/srv/inputs")])
     try:
-        result = await sandbox.exec("pwd; cat /mnt/data/input.txt")
+        result = await sandbox.exec("pwd; cat /srv/inputs/input.txt")
         assert result.stdout.splitlines() == [str(sandbox.root / "workspace"), "mounted"]
     finally:
         await sandbox.stop()
@@ -328,4 +356,32 @@ def test_get_provider_resolves_names_and_import_paths(tmp_path: Path):
     assert isinstance(get_provider("process", root=tmp_path), ProcessProvider)
     provider = get_provider("platoon.sandbox.process:ProcessProvider", root=tmp_path)
     assert provider.root == tmp_path
-    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback"})
+    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback", "stacks"})
+
+
+@pytest.mark.asyncio
+async def test_a_start_cancelled_while_its_directory_is_made_leaves_nothing(
+    provider: ProcessProvider, monkeypatch: pytest.MonkeyPatch
+):
+    """The thread that makes a sandbox's directory runs on when its start is cancelled: the directory it makes is
+    deleted once it is made, never left behind (a stack's start cancelled midway cancels its services' starts)."""
+
+    made = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    create = ProcessSandbox.create
+
+    def slow_create(cls, base_dir: Path, spec: SandboxSpec, source: Path | None = None) -> ProcessSandbox:
+        time.sleep(0.3)
+        sandbox = create(base_dir, spec, source)
+        loop.call_soon_threadsafe(made.set)
+        return sandbox
+
+    monkeypatch.setattr(ProcessSandbox, "create", classmethod(slow_create))
+    starting = asyncio.ensure_future(_start(provider))
+    await asyncio.sleep(0.05)
+    starting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starting
+    await asyncio.wait_for(made.wait(), timeout=5.0)
+    await asyncio.sleep(0.1)  # the deletion, once the thread is done
+    assert list(provider.root.iterdir()) == []

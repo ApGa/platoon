@@ -17,7 +17,15 @@ A sandbox's commands run as your own user, unless ``fakeroot: true`` (where the 
 on the copy layout: they then run as root of a user namespace that maps root to your uid and your subordinate ids
 (from ``/etc/subuid``) to the users after it, so a command can switch users as in Docker.  What those users write
 belongs to your subordinate ids on the host, which only an hpc-sandbox that hands such files back before it deletes
-a sandbox (0.4 on) can delete: :meth:`SingularityProvider.root_refusal` refuses root sandboxes on any other.
+a sandbox (0.4 on) can delete: :meth:`SingularityProvider.root_refusal` refuses root sandboxes on any other.  The
+files an image gives users other than root are root's there, since hpc-sandbox extracts every image as you, unless
+the spec names the image's owner manifest (``SandboxSpec.file_owners``), which hpc-sandbox applies from 0.5 on
+(:meth:`~platoon.sandbox.hpc.HpcProvider.file_owners_refusal`).
+
+Multi-container stacks run as hpc-sandbox pods (:mod:`platoon.sandbox.hpc_stacks`), with hpc-sandbox 0.5 and on a
+node that nests user namespaces, on the copy layout whatever ``rootfs_layout`` says: their sidecars run as root with
+your subordinate ids where your user has them, as Docker's root can switch users, else as your own uid.  Pods on
+Apptainer are experimental: no site of platoon's has run them yet.
 """
 
 from __future__ import annotations

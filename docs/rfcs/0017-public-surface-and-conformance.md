@@ -268,6 +268,11 @@ class TestAgent(HarnessConformance):
   trajectories and compares a later run with them, with normalizers for ids and times. It stores the tokenizer's
   fingerprint and compares token fields only when it matches, so a golden recorded with a model's tokenizer still
   checks messages, tool calls and outcomes under the toy tokenizer; core's CodeAct goldens are the first users.
+- **Trainers and credit** ([RFC 0021](0021-trainers-credit-and-policies.md)) follow the same rules: their APIs start
+  in `platoon.experimental` with no `tinker` import at load, and `platoon.testing` gains `check_trainer` (two steps on
+  a fake Tinker service, an interrupt and a resume, the saved state and the step hooks) and `check_credit_estimator`
+  (advantages on action tokens only, state that resumes), plus `check_shared_service`, which runs against a live
+  service. Their promotion to stable waits for an outside user, as this RFC requires.
 
 ### 6. `platoon env check` and `platoon harness check`
 

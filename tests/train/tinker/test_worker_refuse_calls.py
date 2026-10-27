@@ -13,7 +13,7 @@ from platoon.envs.ors import cleanup as ors_cleanup
 from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.sandbox.base import SandboxSpec
 from platoon.sandbox.process import ProcessProvider
-from platoon.train.tinker.workers import entrypoint
+from platoon.train.workers import entrypoint
 
 
 def test_a_stopping_worker_starts_no_sandbox(tmp_path, monkeypatch):

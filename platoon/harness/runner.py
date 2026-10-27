@@ -237,6 +237,7 @@ class HarnessRunner:
                     max_steps=max_steps,
                     mcp_url=mcp_url,
                     options=options,
+                    task_mcp_servers=_task_mcp_servers(session, placement),
                 ),
                 disable_builtins=_disable_builtins(spec, builtins, placement),
             )
@@ -274,6 +275,16 @@ class HarnessRunner:
             self._installed.add(key)
 
 
+def _task_mcp_servers(session: EnvSession, placement: Placement) -> list[dict[str, Any]]:
+    """The task's own MCP servers for ``{task_mcp_servers}``, as the session's sandbox reaches them (a session's
+    optional ``task_mcp_servers``): none for a harness that runs locally, which reaches only those that the env's tools
+    serve (a Harbor stack's ``http://`` servers), through those tools."""
+
+    if placement != "task_sandbox":
+        return []
+    return [dict(server) for server in getattr(session, "task_mcp_servers", None) or ()]
+
+
 async def _sandbox_urls(
     spec: HarnessSpec, session: EnvSession, base_url: str, mcp_url: str | None
 ) -> tuple[str, str | None]:
@@ -298,9 +309,10 @@ async def _sandbox_urls(
         if not getattr(session, "host_loopback", True):
             raise HarnessSetupError(
                 f"harness {spec.ref} would run in the task sandbox, which does not share this host's network (its "
-                f"provider does not declare host_loopback) and has no route to the model gateway, so it could not "
-                f"reach the gateway at {base_url}; run it with placement: local, or use a sandbox provider that "
-                "runs sandboxes on this host or gives them a gateway route"
+                "provider does not declare host_loopback, or it is the main of a stack with a network of its own) and "
+                f"has no route to the model gateway, so it could not reach the gateway at {base_url}; run it with "
+                "placement: local, or use a sandbox provider that runs sandboxes on this host or gives them a gateway "
+                "route"
             )
         return base_url, mcp_url
     route, origin = route.rstrip("/"), base_url.rstrip("/")

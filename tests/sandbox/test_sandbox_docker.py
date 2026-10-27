@@ -120,14 +120,17 @@ async def test_sandbox_lifecycle_drives_the_cli(fake_docker: Path, tmp_path: Pat
     container = sandbox.id
     run, listing = _calls(fake_docker)
     assert run[:4] == ["run", "--detach", "--name", container]
-    # The container's own processes are listed before any command runs, from "/".
-    assert listing[:6] == ["exec", "--workdir", "/", container, "/bin/sh", "-c"] and listing[-1] == "platoon-list"
+    # The container's own processes are listed before any command runs, from "/", as root whatever the image's USER.
+    assert listing[:8] == ["exec", "--workdir", "/", "--user", "0", container, "/bin/sh", "-c"]
+    assert listing[-1] == "platoon-list"
 
     await sandbox.exec("echo hi", env={"K": "V"}, cwd="sub")
     await sandbox.exec(["cat"], stdin=b"data")
+    await sandbox.exec_as("agent:staff", ["id"])
     assert _calls(fake_docker) == [
         ["exec", "--workdir", "/app/sub", "--env=K=V", container, "bash", "-c", "echo hi"],
         ["exec", "--workdir", "/app", "--interactive", container, "cat"],
+        ["exec", "--workdir", "/app", "--user", "agent:staff", container, "id"],
     ]
 
     tests = tmp_path / "tests"
@@ -136,9 +139,9 @@ async def test_sandbox_lifecycle_drives_the_cli(fake_docker: Path, tmp_path: Pat
     await sandbox.upload(tests, "/tests")
     await sandbox.upload(tests / "x", "/logs/x.txt")
     calls = _calls(fake_docker)
-    assert calls[0][-4:] == [container, "mkdir", "-p", "/tests"]
+    assert calls[0][-6:] == ["--user", "0", container, "mkdir", "-p", "/tests"]  # platoon's own command: as root
     assert calls[1] == ["cp", f"{tests}/.", f"{container}:/tests"]
-    assert calls[2][-4:] == [container, "mkdir", "-p", "/logs"]
+    assert calls[2][-6:] == ["--user", "0", container, "mkdir", "-p", "/logs"]
     assert calls[3] == ["cp", str(tests / "x"), f"{container}:/logs/x.txt"]
 
     monkeypatch.setenv("FAKE_DOCKER_KIND", "dir")
@@ -151,8 +154,12 @@ async def test_sandbox_lifecycle_drives_the_cli(fake_docker: Path, tmp_path: Pat
 
     await sandbox.kill_processes()
     (kill,) = _calls(fake_docker)
-    assert kill[:6] == ["exec", "--workdir", "/", container, "/bin/sh", "-c"]
-    assert kill[7:] == ["platoon-kill", "100", "0.05", "1:1000", "7:1003"]  # all but these die
+    assert kill[:8] == ["exec", "--workdir", "/", "--user", "0", container, "/bin/sh", "-c"]  # root kills everyone's
+    assert kill[9:] == ["platoon-kill", "100", "0.05", "", "1:1000", "7:1003"]  # all but these die
+    sandbox.keep_processes(["9:900", "20:2000"])  # a task's init, and what it started: they live on, with descendants
+    await sandbox.kill_processes()
+    (kill,) = _calls(fake_docker)
+    assert kill[9:] == ["platoon-kill", "100", "0.05", "20:2000 9:900", "1:1000", "7:1003"]
     monkeypatch.setenv("FAKE_DOCKER_KILL_FAILS", "1")
     with pytest.raises(RuntimeError, match="still alive after SIGKILL: 12"):
         await sandbox.kill_processes()
@@ -168,7 +175,7 @@ async def test_sandbox_lifecycle_drives_the_cli(fake_docker: Path, tmp_path: Pat
 
     await sandbox.stop()
     await sandbox.stop()
-    assert _calls(fake_docker) == [["rm", "--force", container], ["rmi", snapshot.path]]
+    assert _calls(fake_docker) == [["rm", "--force", "--volumes", container], ["rmi", snapshot.path]]
     with pytest.raises(RuntimeError, match="stopped"):
         await sandbox.exec("true")
     await restored.stop()
@@ -194,7 +201,7 @@ async def test_failed_starts_clean_up_and_raise(fake_docker: Path, monkeypatch):
     with pytest.raises(RuntimeError, match="simulated failure"):
         await provider.start(SandboxSpec(image="docker://python:3.12"))
     run, remove = _calls(fake_docker)
-    assert remove == ["rm", "--force", run[3]]
+    assert remove == ["rm", "--force", "--volumes", run[3]]
 
 
 @pytest.mark.asyncio
@@ -217,7 +224,7 @@ async def test_a_start_cancelled_during_docker_run_removes_its_container(
         await starting
 
     run, remove = _calls(fake_docker)  # `docker run` may have created the container before it was killed
-    assert remove == ["rm", "--force", run[3]]
+    assert remove == ["rm", "--force", "--volumes", run[3]]
     assert sandbox_cleanup.read_mirror(str(mirror)) == []
 
 
@@ -240,7 +247,7 @@ async def test_a_failed_start_stays_listed_for_reaping_until_its_container_is_go
         await DockerProvider().start(SandboxSpec(image="docker://python:3.12"))
 
     run, remove = _calls(fake_docker)
-    assert remove == ["rm", "--force", run[3]]
+    assert remove == ["rm", "--force", "--volumes", run[3]]
     assert [record.labels for record in sandbox_cleanup.read_mirror(str(mirror))] == listed
 
 
@@ -271,7 +278,7 @@ if args[0] != "exec" or "platoon-list" in args:
     sys.exit(0)
 env, index, interactive = dict(os.environ), 1, False
 while args[index].startswith("--"):
-    if args[index] == "--workdir":
+    if args[index] in ("--workdir", "--user"):
         index += 2
         continue
     if args[index].startswith("--env="):

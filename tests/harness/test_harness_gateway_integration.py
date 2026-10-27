@@ -22,13 +22,13 @@ from platoon.config_defs import RolloutConfig  # noqa: E402
 from platoon.task import Task  # noqa: E402
 from platoon.testing import TOY_MODEL_NAME, TOY_TOKENIZER_DIR, toy_tokenizer  # noqa: E402
 from platoon.train.components import EnvironmentRoute  # noqa: E402
-from platoon.train.tinker.workers.protocol import (  # noqa: E402
+from platoon.train.workers.protocol import (  # noqa: E402
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
     RolloutWorkerRequest,
 )
-from platoon.train.tinker.workers.run import run_rollout_request  # noqa: E402
+from platoon.train.workers.run import run_rollout_request  # noqa: E402
 
 MODEL_NAME = TOY_MODEL_NAME
 # The test model's tokenizer files (tokenizer.json and tokenizer_config.json, which AutoTokenizer loads).

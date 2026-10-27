@@ -1,0 +1,289 @@
+{
+ "description": "One named environment entry with settings of its own (rollout_config.max_steps), in training and evaluation",
+ "request_settings": [
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": 7,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "<fakes>:unused_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
+   "startup_budget_seconds": 300.0,
+   "task": {"fork_strategy": "subtask", "goal": null, "max_steps": 7, "misc": {}}
+  },
+  {
+   "conversion": {
+    "filter_errors": false,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": 7,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/eval",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "<fakes>:unused_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
+   "startup_budget_seconds": 300.0,
+   "task": {"fork_strategy": "subtask", "goal": null, "max_steps": 7, "misc": {}}
+  }
+ ],
+ "scenario": "single-entry",
+ "starts": [
+  {
+   "events": [
+    {"batch": 0, "checkpoint": null, "event": "start", "loaded": null, "start": 1, "state_lost": null},
+    {"event": "draw", "position": 0, "reason": "order", "sampler": "auto", "seq": 0, "start": 1, "task_id": "t3", "version": 0},
+    {"event": "draw", "position": 1, "reason": "order", "sampler": "auto", "seq": 1, "start": 1, "task_id": "t2", "version": 0},
+    {"event": "settle", "passes": 2, "seq": 1, "start": 1, "task_id": "t2", "valid": 3, "verdict": "trained", "version": 0},
+    {"event": "settle", "passes": 0, "seq": 0, "start": 1, "task_id": "t3", "valid": 3, "verdict": "uniform", "version": 0},
+    {"event": "fate", "fate": "consumed", "seq": 1, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 0, "start": 1},
+    {"event": "draw", "position": 2, "reason": "order", "sampler": "auto", "seq": 2, "start": 1, "task_id": "t5", "version": 1},
+    {"event": "draw", "position": 3, "reason": "order", "sampler": "auto", "seq": 3, "start": 1, "task_id": "t4", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 2, "start": 1, "task_id": "t5", "valid": 3, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 1, "seq": 3, "start": 1, "task_id": "t4", "valid": 3, "verdict": "trained", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 2, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1}
+   ],
+   "files": [
+    "checkpoints.jsonl",
+    "evaluations.jsonl",
+    "identity.json",
+    "tasks/dispatch-s1-final.json",
+    "tasks/dispatch-s1-recovery-000000.json",
+    "tasks/events.jsonl",
+    "tasks/state-s1-final.json",
+    "tasks/state-s1-recovery-000000.json"
+   ],
+   "messages": [
+    "INFO Loading config from <tmp>/train.yaml",
+    "INFO Sampling timeout: 600 s (train.sample_timeout_seconds)",
+    "INFO environments[only]: rollout_config.max_steps 7, in evaluation: rollout_config.max_steps 7",
+    "INFO training tasks: 6, drawn in epochs of 6 (3 batches of 2), 2 steps planned",
+    "INFO environments[only]: 6 tasks, weight tasks, 100.0% of the slots: each task drawn about 0.67 times over the run's 2 steps",
+    "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
+    "INFO Created new training client for test/model with rank 32",
+    "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Evaluating every 2 steps, the first at step 2; eval.at_start: true would evaluate the starting policy at step 0 too",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
+    "INFO Starting training from batch 0 to 2",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
+    "INFO Saving weights only after completing batch 0 (steps_completed=1, save_every=None, recovery_every=None)",
+    "INFO Step 1/2 | Epoch 0 | Batch time: <t>s | Datums: 6",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 1",
+    "INFO Saving weights only after completing batch 1 (steps_completed=2, save_every=None, recovery_every=None)",
+    "INFO Step 2/2 | Epoch 0 | Batch time: <t>s | Datums: 6",
+    "INFO Starting evaluation at step 2",
+    "WARNING No completed root rewards available for task v1; retaining rollout stats but skipping training",
+    "INFO Evaluation completed in <t>s for 2 tasks",
+    "INFO Saving permanent checkpoint final at step 2...",
+    "INFO Training complete successfully!",
+    "INFO Training complete. Total time: <t>s"
+   ],
+   "outcome": "completed",
+   "requests": {
+    "eval": [["v0", 0, 2, 1, 2], ["v1", 0, 2, 1, 2]],
+    "train": [
+     ["t3", 0, 0, 0, 0],
+     ["t3", 1, 0, 0, 0],
+     ["t3", 2, 0, 0, 0],
+     ["t3", 3, 0, 0, 0],
+     ["t2", 0, 0, 0, 0],
+     ["t2", 1, 0, 0, 0],
+     ["t2", 2, 0, 0, 0],
+     ["t2", 3, 0, 0, 0],
+     ["t5", 0, 1, 0, 1],
+     ["t5", 1, 1, 0, 1],
+     ["t5", 2, 1, 0, 1],
+     ["t5", 3, 1, 0, 1],
+     ["t4", 0, 1, 0, 1],
+     ["t4", 1, 1, 0, 1],
+     ["t4", 2, 1, 0, 1],
+     ["t4", 3, 1, 0, 1]
+    ]
+   },
+   "saves": [
+    {
+     "batch": 0,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000000.json",
+      "format": 2,
+      "sha256": "d526322e23890484eed3ec16d700a7a91739124cc256d59acc6233884f658d6b",
+      "start": 1
+     },
+     "name": "recovery-000000",
+     "optimizer_steps": 0,
+     "policy_version": 0,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000000",
+     "state_path": "tinker://run-1/weights/recovery-000000",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000000.json",
+      "format": 1,
+      "sha256": "584e14b8f6bc90b44e613dba160f047d892fc80cc1acbdf0c240b1820e74cbc7",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 2,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-final.json",
+      "format": 2,
+      "sha256": "88d7598ea72b4ab6312e7cde4a0e86b71356e17276ee1048cbaab7c626bf2813",
+      "start": 1
+     },
+     "name": "final",
+     "optimizer_steps": 2,
+     "policy_version": 2,
+     "sampler_path": "tinker://run-1/sampler_weights/final",
+     "state_path": "tinker://run-1/weights/final",
+     "tasks": {
+      "file": "tasks/state-s1-final.json",
+      "format": 1,
+      "sha256": "c9bade508be0480077fb05ad6ecfa538fa9818d6c1b004cb12aa249a0e2d3d9a",
+      "start": 1
+     },
+     "wandb_run_id": null
+    }
+   ],
+   "tinker": [
+    ["create_lora_training_client", "test/model", 32],
+    ["save_state", "recovery-000000"],
+    ["save_weights_for_sampler", "recovery-000000"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000000"],
+    ["set_version", 0],
+    ["publish", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    ["publish_binding", "train", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.04761905], "logprobs": [-0.75, -0.25], "target_tokens": [743, 518], "tokens": [691, 743]},
+       {"advantages": [0.0, -0.095238104], "logprobs": [-0.375, -0.4375], "target_tokens": [586, 426], "tokens": [811, 586]},
+       {"advantages": [0.0, 0.04761905], "logprobs": [-0.125, -0.8125], "target_tokens": [22, 264], "tokens": [464, 22]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 1, "sampler:run-1/weights-only-1"],
+    ["publish_binding", "train", 1, "sampler:run-1/weights-only-1"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, -0.030303031, -0.030303031], "logprobs": [-0.3125, -0.5625, -0.125], "target_tokens": [611, 630, 380], "tokens": [487, 611, 630]},
+       {"advantages": [0.0, 0.06060606, 0.06060606, 0.06060606], "logprobs": [-0.125, -0.4375, -0.875, -0.125], "target_tokens": [490, 343, 690, 473], "tokens": [806, 490, 343, 690]},
+       {"advantages": [0.0, -0.030303031], "logprobs": [-0.5, -0.625], "target_tokens": [912, 847], "tokens": [568, 912]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_weights_and_get_sampling_client"],
+    ["publish", 2, "sampler:run-1/weights-only-2"],
+    ["publish_binding", "train", 2, "sampler:run-1/weights-only-2"],
+    ["save_state", "final"],
+    ["save_weights_for_sampler", "final"]
+   ]
+  }
+ ]
+}

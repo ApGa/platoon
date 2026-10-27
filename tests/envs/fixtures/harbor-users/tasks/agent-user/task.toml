@@ -1,0 +1,14 @@
+version = "1.0"
+
+[task]
+name = "platoon/agent-user"
+
+[agent]
+timeout_sec = 120.0
+user = "agent"
+
+[verifier]
+timeout_sec = 60.0
+
+[environment]
+workdir = "/app"

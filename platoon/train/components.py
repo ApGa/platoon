@@ -31,12 +31,6 @@ BudgetMode = Literal["linear", "depth_aware"]
 ChildGrading = Literal["env", "verifier", "none"]
 ToolAccess = Literal["full", "no_terminal", "read_only"]
 ForkMode = Literal["shared", "copy", "fresh"]
-# ``train.task_sampler`` (:class:`platoon.train.auto.AutoDataset`), how a run draws its training tasks: ``auto``
-# orders a mixture's training tasks by weight and leaves a single environment's to the dataloader's shuffle;
-# ``weighted`` orders both by weight; ``uniform`` draws every training task of every entry in seeded shuffled passes,
-# with no entry's share.
-TaskSampler = Literal["auto", "weighted", "uniform"]
-TASK_SAMPLERS: tuple[str, ...] = get_args(TaskSampler)
 # ``environments[].weight: tasks``: the entry's share of a mixture is its number of training tasks, so that every task
 # of the mixture is drawn equally often.
 TASKS_WEIGHT = "tasks"
@@ -257,6 +251,7 @@ _ENTRY_REFUSED_KEYS = {
         for name in (
             "rollout_isolation",
             "worker_start_method",
+            "worker_preload",
             "worker_startup_budget_seconds",
             "worker_finalize_grace_seconds",
             "worker_parent_grace_seconds",
@@ -440,6 +435,25 @@ class EnvironmentConfig:
     }
     # ``workflow_config`` is a mapping as given, checked as the settings an entry may set (platoon.utils.config).
     FIELD_SCHEMAS: ClassVar[dict[str, Any]] = {"workflow_config": EntryWorkflowSettings}
+    # The task sampler's name and options, checked when the config loads beside its other problems: a name that no
+    # package could register, a run's sampler named as an entry's, options for a built-in sampler that takes none, and
+    # pass_rate's options (platoon.train.samplers).
+    VALUE_PROBLEMS: ClassVar[dict[str, Callable[[Any, Mapping[str, Any], Mapping[str, Any], str], list[str]]]] = {
+        "task_sampler": lambda value, entry, root, path: _sampler_checks().entry_sampler_problems(
+            value, entry, root, path
+        ),
+        "task_sampler_options": lambda value, entry, root, path: _sampler_checks().entry_options_problems(
+            value, entry, root, path
+        ),
+        # The entry's group admission rule's name and options likewise, and options without the entry's own rule
+        # (platoon.train.admissions).
+        "group_admission": lambda value, entry, root, path: _admission_checks().entry_rule_problems(
+            value, entry, root, path
+        ),
+        "group_admission_options": lambda value, entry, root, path: _admission_checks().entry_options_problems(
+            value, entry, root, path
+        ),
+    }
 
     # A named environment, ``name[@version]`` (or ``module:attr``): a partial entry that an installed extension
     # registers in the ``platoon.environments`` entry-point group, laid under this entry's own keys when the
@@ -489,6 +503,27 @@ class EnvironmentConfig:
     # positive number, the entries' shares in proportion to their numbers. A mixture's weights are all numbers or
     # all ``tasks``.
     weight: float | Literal["tasks"] = "tasks"
+    # How the entry's task is chosen for each slot the run's sampler hands it, under ``train.task_sampler: weighted``
+    # (a mixture's default, and a single environment's with a sampler of its own): ``uniform`` (null: the default),
+    # the entry's tasks in seeded shuffled passes with its ``seed``; ``pass_rate`` (experimental), the task whose next
+    # group is most likely to mix passes and failures, by its pass rate in the run's per-task statistics, decided when
+    # the entry can start a group; a name the entry's ``package`` registers with ``@task_sampler``; or
+    # ``module:Class``. The run's ``uniform`` and ``pass_rate`` ask no entry's sampler, and a named environment
+    # cannot set it. See docs/how-to/train-and-eval.md.
+    task_sampler: str | None = None
+    # Options of the entry's task_sampler, checked against its options when the config loads (pass_rate's: explore,
+    # max_draws_per_epoch, max_outstanding_per_task, candidates, seed); ``uniform`` takes none.
+    task_sampler_options: dict[str, Any] = field(default_factory=dict)
+    # Which of the entry's settled training groups count toward the batch (experimental; null: the run's,
+    # ``train.group_admission``, with its options): ``all``, ``informative``, a name the entry's ``package`` registers
+    # with ``@group_admission``, or ``module:Class``. Once any entry's rule is not ``all``, every entry's groups are
+    # counted as train.group_admission says (a stale or failed group of an entry at ``all`` no longer counts toward the
+    # batch), and train.refill's cap is the run's. A named environment cannot set it. See
+    # docs/how-to/train-and-eval.md.
+    group_admission: str | None = None
+    # Options of the entry's own group_admission, which they go with (an entry that sets none inherits the run's rule
+    # and options); ``all`` takes none.
+    group_admission_options: dict[str, Any] = field(default_factory=dict)
     # The entry's own training settings, laid over ``train.workflow_config`` for its training groups: the keys that act
     # on one group or one rollout (EntryWorkflowSettings), such as ``group_size``, ``min_successful_group_size``,
     # ``leave_one_out_baseline`` and ``rollout_config.max_steps``. A key it leaves out keeps the run's; ``null`` unsets
@@ -596,6 +631,18 @@ class EnvironmentConfig:
             raise ValueError(f"{where}: harness must be a spec reference or a {{spec: weight}} mapping")
         if self.harness is not None and self.service is None:
             raise ValueError(f"{where}: a harness needs an environment `service` to open sessions with")
+        if self.task_sampler is not None and (not isinstance(self.task_sampler, str) or not self.task_sampler):
+            raise ValueError(f"{where}: task_sampler must name a task sampler, got {self.task_sampler!r}")
+        if not isinstance(self.task_sampler_options, Mapping):
+            raise ValueError(f"{where}: task_sampler_options must be a mapping, got {self.task_sampler_options!r}")
+        self.task_sampler_options = copy.deepcopy(dict(self.task_sampler_options))
+        if self.group_admission is not None and (not isinstance(self.group_admission, str) or not self.group_admission):
+            raise ValueError(f"{where}: group_admission must name a group admission rule, got {self.group_admission!r}")
+        if not isinstance(self.group_admission_options, Mapping):
+            raise ValueError(
+                f"{where}: group_admission_options must be a mapping, got {self.group_admission_options!r}"
+            )
+        self.group_admission_options = copy.deepcopy(dict(self.group_admission_options))
         if isinstance(self.exclude_tasks, (str, Mapping)) or not isinstance(self.exclude_tasks, Sequence):
             raise ValueError(f"{where}: exclude_tasks must be a list of task ids or names, got {self.exclude_tasks!r}")
         if bad := [item for item in self.exclude_tasks if not _names_a_task(item)]:
@@ -628,6 +675,23 @@ def _service_deprecated_options(service: Any) -> Mapping[str, Any]:
     from platoon.envs.service import service_deprecated_options
 
     return service_deprecated_options(service)
+
+
+def _sampler_checks() -> Any:
+    """The module whose functions check a config's task samplers when it loads (:mod:`platoon.train.samplers`, imported
+    when a config is checked, not when this module is)."""
+
+    from platoon.train import samplers
+
+    return samplers
+
+
+def _admission_checks() -> Any:
+    """The module whose functions check a config's group admission rules when it loads."""
+
+    from platoon.train import admissions
+
+    return admissions
 
 
 def _service_option_hints(service: Any) -> Mapping[str, str]:

@@ -1,0 +1,17 @@
+version = "1.0"
+
+[task]
+name = "platoon/app-kv-auth"
+
+[agent]
+timeout_sec = 60.0
+
+[verifier]
+timeout_sec = 30.0
+env = { KV_CHECK_URL = "http://kv:6379" }
+
+[environment]
+docker_image = "python:3.12-slim"
+workdir = "/app"
+cpus = 1
+memory_mb = 512

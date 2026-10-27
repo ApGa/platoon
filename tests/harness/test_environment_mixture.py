@@ -31,9 +31,9 @@ from platoon.train.components import (
     interleave_by_weight,
     normalize_environment_configs,
 )
-from platoon.train.tinker.dataset_order import PRESERVE_DATASET_ORDER_COLUMN, PoolPasses
-from platoon.train.tinker.workers.protocol import validated_ref
-from platoon.train.tinker.workers.run import DEFAULT_REWARD_PROCESSOR
+from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN, PoolPasses
+from platoon.train.workers.protocol import validated_ref
+from platoon.train.workers.run import DEFAULT_REWARD_PROCESSOR
 from platoon.trajectory import ParentInfo, Trajectory, TrajectoryCollection
 
 HERE = __name__
@@ -345,7 +345,7 @@ def test_a_mixtures_weights_are_all_numbers_or_all_tasks():
 
 
 def test_weight_tasks_loads_from_a_config_file_and_an_override(tmp_path):
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.utils.config import ConfigError, resolve_config
 
     path = tmp_path / "train.yaml"
@@ -441,7 +441,7 @@ def test_uniform_draws_a_single_environment_in_the_batches_auto_draws(count):
     """For one environment, ``uniform`` draws the batches the dataloader's shuffled passes draw under ``auto``; only its
     epochs differ, which hold every task, the last batch filled from the next pass."""
 
-    from platoon.train.tinker.rl import PlatoonTinkerDataloader
+    from platoon.train.dataloader import PlatoonTinkerDataloader
 
     single = environment("a", dataset_kwargs={"prefix": "a", "count": count})
     auto = AutoDataset.training(config(single))
@@ -457,7 +457,7 @@ def test_uniform_draws_a_single_environment_in_the_batches_auto_draws(count):
 
 
 def test_uniform_takes_no_entry_weights(tmp_path):
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig, task_sampler_problems
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, task_sampler_problems
     from platoon.utils.config import ConfigError, resolve_config
 
     path = tmp_path / "train.yaml"
@@ -479,163 +479,46 @@ def test_uniform_takes_no_entry_weights(tmp_path):
 
 
 def test_an_unknown_task_sampler_is_refused():
-    from platoon.train.tinker.config_defs import TrainConfig
+    """A name that is neither core's nor ``module:Class``, while no entry names a package that could register it: the
+    trainer config refuses it with the line the loader reports, and AutoDataset, which resolves the run's sampler,
+    with resolution's message.  ``TrainConfig`` alone takes any name, which a package may register."""
 
-    with pytest.raises(ValueError, match="task_sampler must be one of"):
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, TrainConfig
+    from platoon.utils.config import ConfigError
+
+    with pytest.raises(ConfigError, match="unknown task sampler 'shuffled'"):
         AutoDataset.from_config(config(environment("a"), task_sampler="shuffled"), "train")
-    with pytest.raises(ValueError, match="task_sampler must be one of"):
-        TrainConfig(model_name="m", renderer_name="r", task_sampler="shuffled")
-    with pytest.raises(ValueError, match="task_sampler must be one of"):  # the deprecated name's value too
-        TrainConfig(model_name="m", renderer_name="r", task_order="shuffled")
-    assert TrainConfig(model_name="m", renderer_name="r").task_sampler == "auto"
-    # The deprecated name takes only the values it had: uniform came after it.
-    uniform: Any = "uniform"
-    with pytest.raises(ValueError, match="takes 'auto' or 'weighted', got 'uniform': set train.task_sampler instead"):
-        TrainConfig(model_name="m", renderer_name="r", task_order=uniform)
-
-
-@pytest.mark.parametrize(
-    ("key", "values"), [("task_sampler", "'auto', 'weighted', 'uniform'"), ("task_order", "'auto', 'weighted'")]
-)
-def test_a_config_file_s_unknown_sampler_names_the_samplers_under_either_name(tmp_path, key, values):
-    """The message platoon gave for ``train.task_order`` before 0.3.0, also for its new name, whose null is ``auto``,
-    in a file and in an override; the deprecated name lists the values it takes, which ``uniform`` is not."""
-
-    import warnings
-
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.utils.config import ConfigError, resolve_config
-
-    path = tmp_path / "train.yaml"
-    path.write_text(f"train: {{model_name: m, renderer_name: r, {key}: random}}\nlog_path: runs\n")
-    with warnings.catch_warnings(), pytest.raises(ConfigError) as error:
-        warnings.simplefilter("ignore")  # task_order's deprecation
-        resolve_config(path, [], PlatoonTinkerRLTrainerConfig)
-    assert f"train.{key}: 'random' is not one of {values}" in error.value.problems
-    path.write_text("train: {model_name: m, renderer_name: r}\nlog_path: runs\n")
-    with pytest.raises(ConfigError, match=rf"train\.{key} must be one of {values}, got 'random'"):
-        resolve_config(path, [f"train.{key}=random"], PlatoonTinkerRLTrainerConfig)
-
-
-def test_task_order_is_the_deprecated_name_of_task_sampler():
-    """``train.task_order``, ``task_sampler``'s name before platoon 0.3.0, is read as ``task_sampler`` is, and then
-    cleared: the run has one sampler.  Beside ``task_sampler``, the same sampler agrees, and ``auto``, its default
-    before 0.3.0, yields; ``weighted`` beside another sampler is an error."""
-
-    from platoon.train.tinker.config_defs import TrainConfig
-
-    def sampler(**names: str) -> tuple[str | None, str | None]:
-        built = TrainConfig(model_name="m", renderer_name="r", **names)
-        return built.task_sampler, built.task_order
-
-    assert sampler(task_order="weighted") == ("weighted", None)
-    assert sampler(task_order="auto") == ("auto", None)
-    assert sampler(task_sampler="weighted", task_order="weighted") == ("weighted", None)
-    assert sampler(task_sampler="auto", task_order="auto") == ("auto", None)
-    assert sampler(task_sampler="weighted", task_order="auto") == ("weighted", None)  # 0.2.0's default yields
-    with pytest.raises(
-        ValueError,
-        match=r"train.task_sampler is 'auto' and train.task_order, its deprecated name, is "
-        r"'weighted'; set task_sampler alone",
-    ):
-        TrainConfig(model_name="m", renderer_name="r", task_sampler="auto", task_order="weighted")
-
-
-TASK_ORDER_DEPRECATION = "train.task_order: deprecated; use train.task_sampler instead (platoon 0.4.0 removes it)"
-
-
-@pytest.mark.parametrize(
-    ("task_order", "task_sampler", "message"),
-    [
-        (
-            "auto",
-            "weighted",
-            f"{TASK_ORDER_DEPRECATION}; its value 'auto' is ignored, since train.task_sampler is 'weighted'",
-        ),
-        ("auto", "auto", TASK_ORDER_DEPRECATION),
-        ("weighted", "weighted", TASK_ORDER_DEPRECATION),
-    ],
-)
-def test_a_config_file_may_set_both_names_and_the_warning_says_when_task_order_is_ignored(
-    tmp_path, task_order, task_sampler, message
-):
-    """Both names load when they agree, or when ``task_order`` is ``auto``, its default before 0.3.0 (as a dump of
-    0.2.0's ``config show --defaults`` spells it): ``task_sampler`` decides, and the deprecation warning then says
-    that ``task_order`` was ignored.  ``lock.json``'s record of the deprecation stays the same."""
-
-    from platoon.deprecations import PlatoonDeprecationWarning
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.utils.config import resolve_config
-
-    path = tmp_path / "train.yaml"
-    path.write_text(
-        f"train: {{model_name: m, renderer_name: r, task_order: {task_order}, task_sampler: {task_sampler}}}\n"
-        "log_path: runs\n"
-    )
-
-    with pytest.warns(PlatoonDeprecationWarning) as warned:
-        resolved = resolve_config(path, [], PlatoonTinkerRLTrainerConfig)
-
-    assert [str(item.message) for item in warned if item.category is PlatoonDeprecationWarning] == [message]
-    assert [deprecation.message for deprecation in resolved.deprecations] == [message]
-    assert [deprecation.to_dict() for deprecation in resolved.deprecations] == [
-        {"path": "train.task_order", "replacement": "train.task_sampler", "removed_in": "0.4.0"}
-    ]
-    assert (resolved.config.train.task_sampler, resolved.config.train.task_order) == (task_sampler, None)
-
-
-def test_a_config_file_whose_task_order_weighted_contradicts_task_sampler_does_not_load(tmp_path):
-    import warnings
-
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.utils.config import ConfigError, resolve_config
-
-    path = tmp_path / "train.yaml"
-    path.write_text("train: {model_name: m, renderer_name: r, task_order: weighted}\nlog_path: runs\n")
-
-    with warnings.catch_warnings(), pytest.raises(ConfigError, match="set task_sampler alone") as error:
-        warnings.simplefilter("ignore")  # task_order's deprecation
-        resolve_config(path, ["train.task_sampler=auto"], PlatoonTinkerRLTrainerConfig)
+    train = TrainConfig(model_name="m", renderer_name="r", task_sampler="shuffled")
+    assert train.task_sampler == "shuffled"
+    with pytest.raises(ConfigError) as error:
+        PlatoonTinkerRLTrainerConfig(train=train, log_path="runs")
     assert error.value.problems == [
-        "ValueError: train.task_sampler is 'auto' and train.task_order, its deprecated name, is 'weighted'; set "
-        "task_sampler alone"
+        "train.task_sampler: 'shuffled' is not one of 'auto', 'weighted', 'uniform', 'pass_rate', a name an "
+        "environment's package registers, or module:Class"
     ]
+    assert TrainConfig(model_name="m", renderer_name="r").task_sampler == "auto"
 
 
-def test_a_config_that_sets_task_order_loads_with_a_deprecation_and_draws_the_same_rows(tmp_path):
-    """A config file that still sets ``train.task_order: weighted`` loads with a deprecation warning that names
-    ``train.task_sampler``, and its run draws the rows of one that sets ``task_sampler: weighted``."""
+def test_a_config_file_s_unknown_sampler_names_the_samplers(tmp_path):
+    """An unknown sampler, in the config's one report, in a file and in an override: its line names core's samplers,
+    a package's and ``module:Class``, for an override too, which parses it as any name."""
 
-    from platoon.deprecations import PlatoonDeprecationWarning
-    from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.utils.config import resolve_config
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.utils.config import ConfigError, resolve_config
 
-    def write(name: str, key: str) -> Any:
-        path = tmp_path / name
-        path.write_text(
-            f"train: {{model_name: m, renderer_name: r, batch_size: 4, {key}: weighted}}\n"
-            "log_path: runs\n"
-            "environments:\n"
-            f"  - {{name: a, seed: 343, dataset_loader: {HERE}.load_ids, dataset_kwargs: {{prefix: a, count: 7}},\n"
-            f"     task_loader: {HERE}.load_task, rollout: {HERE}.rollout_a}}\n"
-        )
-        return path
-
-    with pytest.warns(PlatoonDeprecationWarning, match=r"train.task_order: deprecated; use train.task_sampler"):
-        legacy = resolve_config(write("legacy.yaml", "task_order"), [], PlatoonTinkerRLTrainerConfig)
-    current = resolve_config(write("current.yaml", "task_sampler"), [], PlatoonTinkerRLTrainerConfig)
-
-    assert [deprecation.to_dict() for deprecation in legacy.deprecations] == [
-        {"path": "train.task_order", "replacement": "train.task_sampler", "removed_in": "0.4.0"}
-    ]
-    assert current.deprecations == ()
-    assert legacy.config.train.task_sampler == current.config.train.task_sampler == "weighted"
-    rows = AutoDataset.training(legacy.config).order
-    expected = AutoDataset.training(current.config).order
-    assert rows is not None and expected is not None
-    assert [[row["task_id"] for row in rows.epoch(epoch)] for epoch in range(3)] == [
-        [row["task_id"] for row in expected.epoch(epoch)] for epoch in range(3)
-    ]
+    line = (
+        "train.task_sampler: 'random' is not one of 'auto', 'weighted', 'uniform', 'pass_rate', a name an "
+        "environment's package registers, or module:Class"
+    )
+    path = tmp_path / "train.yaml"
+    path.write_text("train: {model_name: m, renderer_name: r, task_sampler: random}\nlog_path: runs\n")
+    with pytest.raises(ConfigError) as error:
+        resolve_config(path, [], PlatoonTinkerRLTrainerConfig)
+    assert line in error.value.problems
+    path.write_text("train: {model_name: m, renderer_name: r}\nlog_path: runs\n")
+    with pytest.raises(ConfigError) as error:
+        resolve_config(path, ["train.task_sampler=random"], PlatoonTinkerRLTrainerConfig)
+    assert line in error.value.problems
 
 
 def test_mixture_evaluation_visits_every_task_once_in_config_order():

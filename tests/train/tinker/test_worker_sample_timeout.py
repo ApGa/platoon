@@ -18,8 +18,8 @@ import platoon.train.tinker  # noqa: F401  (import order: package before data pr
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
 from platoon.testing import TOY_TOKENIZER_DIR
-from platoon.train.tinker.workers.binding import publish_binding
-from platoon.train.tinker.workers.protocol import (
+from platoon.train.workers.binding import publish_binding
+from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
@@ -73,7 +73,7 @@ def test_a_worker_samples_under_the_bound_its_binding_carries_not_its_own_variab
     )
 
     completed = subprocess.run(
-        [sys.executable, "-m", "platoon.train.tinker.workers.entrypoint", request_path],
+        [sys.executable, "-m", "platoon.train.workers.entrypoint", request_path],
         capture_output=True,
         text=True,
         env=env,

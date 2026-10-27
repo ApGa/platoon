@@ -4,6 +4,7 @@
     platoon harbor verify CONFIG [key=value ...]          check the cache entries of the locks against their digests
     platoon harbor images plan CONFIG [key=value ...]     the images the tasks need, and which the image map lacks
     platoon harbor images build CONFIG [key=value ...]    build the missing images and record them in the image map
+    platoon harbor images pin CONFIG [key=value ...]      pin the registry images that sidecars run, with their configs
     platoon harbor images verify CONFIG [key=value ...]   check the map's image files against their SHA-256
     platoon harbor images alias CONFIG [key=value ...] --image IMAGE   point missing keys at an existing image
 
@@ -71,12 +72,12 @@ def fetch(
 ) -> int:
     """Fetch the Harbor datasets a config names into the cache, and lock them.
 
-    CONFIG is a training or evaluation config, whose Harbor entries with a dataset are fetched. A dataset pinned to a
-    commit whose lock answers the config, with a cache that holds its tasks, is left as it is: nothing is downloaded
-    or hashed, unless the lock was written before platoon recorded the tasks' input files. A local directory is fetched
-    again, since its files may have changed. Fetches of one lock take turns, also on several nodes, so a second one
-    finds the first's lock current. Each entry with a hold-out prints the hold-out's report. Prints one JSON line per
-    lock.
+    CONFIG is a training or evaluation config, whose Harbor entries with a dataset (or an adapter) are fetched. A
+    dataset pinned to a commit, revision or digest whose lock answers the config, with a cache that holds its tasks,
+    is left as it is: nothing is downloaded or hashed, unless the lock was written before platoon recorded the tasks'
+    input files. A local directory is fetched again, since its files may have changed. Fetches of one lock take
+    turns, also on several nodes, so a second one finds the first's lock current. Each entry with a hold-out prints
+    the hold-out's report. Prints one JSON line per lock.
 
     Parameters
     ----------
@@ -85,7 +86,8 @@ def fetch(
     overrides
         key=value overrides of a training or evaluation config, as platoon train takes them.
     update
-        Resolve a moving reference (a branch, a tag, no revision) to its current commit, and fetch it.
+        Resolve a moving reference (a branch, a tag, no revision; a Harbor Hub tag; a registry task at HEAD) to what it
+        names now, and fetch it.
     repair
         Fetch a pinned dataset even when its lock answers: hash every cache entry again, and replace a damaged one.
     workers
@@ -94,7 +96,7 @@ def fetch(
 
     from dataclasses import replace
 
-    from platoon.envs.harbor.fetch import FetchError, answering_lock, fetch_if_needed, is_pinned
+    from platoon.envs.harbor.fetch import FetchError, answering_lock, answering_lock_path, fetch_if_needed
 
     given = {"--lock": lock, "--cache": cache}  # hidden: refused, with what replaces them
     removed = [
@@ -110,11 +112,11 @@ def fetch(
         if workers is not None:
             settings = replace(settings, workers=workers)
         where = f"environments[{label}]: "
-        remote = settings.dataset.startswith("hf://") and is_pinned(settings.dataset)  # its files cannot change
+        remote = settings.immutable  # pinned, and not a directory: its files cannot change
         if remote and not (update or repair) and (old := answering_lock(settings)) and not old.records_input_files:
             _say(
-                f"{where}the lock {settings.lock_path()} records no input files, as locks written before platoon "
-                "recorded them do: fetching again to record them"
+                f"{where}the lock {answering_lock_path(settings)} records no input files, as locks written before "
+                "platoon recorded them do: fetching again to record them"
             )
         try:
             result, fetched = fetch_if_needed(settings, update=update, repair=repair, log=_say)
@@ -122,12 +124,15 @@ def fetch(
             raise ConfigError(f"{where}{exc}") from exc
         if not fetched:
             _say(
-                f"{where}the lock {settings.lock_path()} answers the config and the cache holds its "
+                f"{where}the lock {answering_lock_path(settings)} answers the config and the cache holds its "
                 f"{len(result.tasks)} task(s): nothing to fetch (--repair hashes them again)"
             )
         line: dict[str, Any] = {"environment": label}
         line.update(
-            lock=str(settings.lock_path()), tasks=len(result.tasks), runnable=len(result.runnable()), fetched=fetched
+            lock=str(answering_lock_path(settings)),
+            tasks=len(result.tasks),
+            runnable=len(result.runnable()),
+            fetched=fetched,
         )
         if (split := _split_report(service, label)) is not None:
             first, *rest = split.report()
@@ -225,7 +230,9 @@ def _fetch_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str, Fe
     targets: list[tuple[str, FetchConfig, HarborEnvironmentService]] = []
     for label, service in _harbor_entries(config, overrides):
         if service.locked is None or service.locked.fetch is None:
-            _say(f"environments[{label}]: names no dataset to fetch (dataset_dir, task_dirs or a lock alone)")
+            _say(
+                f"environments[{label}]: names no dataset or adapter to fetch (dataset_dir, task_dirs or a lock alone)"
+            )
             continue
         targets.append((label, service.locked.fetch, service))
     if not targets:
@@ -236,7 +243,7 @@ def _fetch_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str, Fe
 def _verify_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str | None, Any, Path]]:
     """Each Harbor entry of a run config with a lock: the lock that answers its dataset, or the lock it names."""
 
-    from platoon.envs.harbor.fetch import answering_lock
+    from platoon.envs.harbor.fetch import answering_lock, answering_lock_path
     from platoon.envs.harbor.lock import LockError, read_lock
 
     targets: list[tuple[str | None, Any, Path]] = []
@@ -259,8 +266,9 @@ def _verify_targets(config: Path, overrides: Sequence[str]) -> list[tuple[str | 
                 raise ConfigError(f"environments[{label}]: {exc}") from exc
         if service.holdout is not None and not dataset_lock.records_input_files:
             fix = f"run `platoon harbor fetch {config}` first" if locked.fetch is not None else "fetch it again"
+            path = answering_lock_path(locked.fetch) if locked.fetch is not None else locked.lock_path
             raise ConfigError(
-                f"environments[{label}]: the lock {locked.lock_path} records no input files, which its hold-out "
+                f"environments[{label}]: the lock {path} records no input files, which its hold-out "
                 f"needs to keep the tasks that share one on one side: {fix}"
             )
         targets.append((label, dataset_lock, locked.cache))
@@ -406,7 +414,7 @@ def _image_targets(
 @images_app.command(name="plan")
 def images_plan(config: Path, /, *overrides: str, image_map: Path | None = None, json_output: bool = False) -> int:
     """List the images the tasks need: one per build key, with its task count, base images and whether the image map
-    has it.
+    has it, and the registry images that their stacks' sidecars run, with whether the map pinned each.
 
     CONFIG is a training or evaluation config: each Harbor entry's lock, with the entry's image map,
     `images/<provider>.json` in the Harbor cache; or a lock file, with --image-map.
@@ -450,7 +458,12 @@ def images_plan(config: Path, /, *overrides: str, image_map: Path | None = None,
             for image in plan.images
         ]
         print(_table(("key", "role", "kind", "tasks", "base", "in map", "example"), rows))
+        if plan.pulls:
+            pulls = [(pull.reference, len(pull.tasks), "yes" if pull.pinned else "no") for pull in plan.pulls]
+            print(_table(("sidecar image", "tasks", "pinned"), pulls))
         summary = f"{len(plan.images)} image(s), {len(plan.missing)} missing from the image map"
+        if plan.pulls:
+            summary += f"; {len(plan.pulls)} registry image(s) of sidecars, {len(plan.unpinned)} not pinned"
         if plan.prebuilt:
             summary += f"; prebuilt references: {plan.prebuilt}"
         if plan.default_image:
@@ -513,7 +526,7 @@ def images_build(
         docker builder: a repository to push to (registry/name).
     """
 
-    from platoon.envs.harbor.builders import PROVIDER_BUILDERS, BuildError, build_images, plan_images
+    from platoon.envs.harbor.builders import BuildError, build_images, plan_images, provider_builder
     from platoon.envs.harbor.images import default_image_dir
 
     try:
@@ -530,7 +543,7 @@ def images_build(
         keys = [name for name in wanted if name in plans[id(target)]] if wanted else None
         if keys == []:
             continue
-        chosen = builder or ("oci" if target.label is None else PROVIDER_BUILDERS.get(target.provider or ""))
+        chosen = builder or ("oci" if target.label is None else provider_builder(target.provider or ""))
         if chosen is None:
             raise ConfigError(
                 f"{target.where}the {target.provider} provider has no builder of its own: for a provider that pulls "
@@ -568,10 +581,62 @@ def images_build(
     return 1 if failed else 0
 
 
+@images_app.command(name="pin")
+def images_pin(
+    config: Path, /, *overrides: str, image_map: Path | None = None, reference: list[str] | None = None
+) -> int:
+    """Pin the registry images that the tasks' stacks' sidecars run (`image: redis:7-alpine`) and the image map has
+    not pinned: each by the digest its registry serves for it, with its image's configuration for this host's platform
+    (ENTRYPOINT, CMD, ENV, WORKDIR, USER, HEALTHCHECK, ...), which sessions run it with. Exits 1 if any could not be
+    pinned.
+
+    CONFIG is a training or evaluation config: each Harbor entry's lock, into the entry's image map; or a lock file,
+    with --image-map.
+
+    Parameters
+    ----------
+    config
+        A training or evaluation config, or a lock file.
+    overrides
+        key=value overrides of a training or evaluation config.
+    image_map
+        A lock file's image map (JSON), created if missing.
+    reference
+        Pin these references (again, if pinned) instead of the unpinned ones.
+    """
+
+    from platoon.envs.harbor.builders import DigestError, pin_images, plan_images
+
+    targets = _image_targets(config, overrides, image_map=image_map, cache=None)
+    wanted = list(reference or ())
+    plans = {id(target): {pull.reference for pull in plan_images(target.lock).pulls} for target in targets}
+    if unknown := [name for name in wanted if not any(name in references for references in plans.values())]:
+        raise ConfigError(f"--reference {unknown}: the runnable tasks' sidecars run no such registry image")
+    failed = False
+    for target in targets:
+        references = [name for name in wanted if name in plans[id(target)]] if wanted else None
+        if references == []:
+            continue
+        map_file = target.map_file("pin")
+        try:
+            pinned = pin_images(target.lock, image_map=map_file, references=references, log=_say)
+        except DigestError as exc:
+            _say(f"platoon harbor images pin: {target.where}{exc}")
+            failed = True
+            continue
+        images = {name: entry.image for name, entry in pinned.items()}
+        if target.label is None:
+            print(json.dumps(images, indent=1))
+        else:
+            print(json.dumps({"environment": target.label, "image_map": str(map_file), "pinned": images}))
+    return 1 if failed else 0
+
+
 @images_app.command(name="verify")
 def images_verify(config: Path, /, *overrides: str, image_map: Path | None = None) -> int:
     """Check the image map against the images the runnable tasks use: each must be in the map, and a local image
-    file must exist and hash to the SHA-256 its entry records. Exits 1 if any is missing or mismatched.
+    file must exist and hash to the SHA-256 its entry records; each registry image that sidecars run must be pinned
+    (but for an entry of the process provider, which runs no image). Exits 1 if any is missing or mismatched.
 
     CONFIG is a training or evaluation config (each Harbor entry's lock, with its image map), or a lock file, with
     --image-map.  Each problem is a line on stdout. A registry reference cannot be hashed here, nor can a file whose
@@ -597,7 +662,7 @@ def images_verify(config: Path, /, *overrides: str, image_map: Path | None = Non
             if not path.exists():
                 raise ConfigError(f"{target.where}image map {path} does not exist")
         site_map = target.current_map() or ImageMap()
-        checks = verify_images(target.lock, site_map)
+        checks = verify_images(target.lock, site_map, pins=target.provider != "process")
         counts = {status: 0 for status in ("ok", "missing", "unchecked")}
         for check in checks:
             counts[check.status] += 1

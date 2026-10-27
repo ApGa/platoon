@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from platoon import cli
-from platoon.train.tinker.config_defs import (
+from platoon.train.config_defs import (
     EVAL_INHERITED_KEYS,
     EVAL_OWN_KEYS,
     EvalConfig,

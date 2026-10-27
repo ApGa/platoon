@@ -39,9 +39,12 @@ version you build against.
 | You add | You write | A config selects it with | Where it is described |
 |---|---|---|---|
 | A credit rule | a `GroupRolloutWorkflow` subclass that overrides `compute_baselines` or `assign_advantages` | `environments[].workflow: package.module.MyWorkflow` and `workflow_kwargs` | [Credit assignment](../tutorials/credit-assignment.md#reference-settings) |
-| A batch transform | a `BatchTransform`, run at the trainer's microbatch boundary | not from a config: `PlatoonTinkerRLTrainer(..., batch_transforms=[...])` in a training script of your own | [`platoon/train/tinker/batch_transforms.py`](../../platoon/train/tinker/batch_transforms.py) |
+| A batch transform | a `BatchTransform`, run at the trainer's microbatch boundary | not from a config: `PlatoonTinkerRLTrainer(..., batch_transforms=[...])` in a training script of your own | [`platoon/train/step/batch_transforms.py`](../../platoon/train/step/batch_transforms.py) |
 | Config sections of your own | a subclass of the training config | `trainer_config: module:Class` | [Write and override configs](../how-to/configs.md#5-keep-keys-strict) |
 | A rollout function or task loaders | `fn(task, rollout_config)`, `fn(config, split, **kwargs)`, `fn(task_id) -> pt.Task` | `rollout:`, `eval_rollout:`, `dataset_loader:`, `task_loader:` | [Config reference](../reference/config.md#environmentconfig); an entry with a `service` and a `harness` needs none of them |
+| A task sampler (experimental, since 0.4.0) | a class with `next(ctx)`, `state_dict()` and `load_state_dict(state)`, registered with `@task_sampler(name)` from `platoon.experimental` | `train.task_sampler:` or an entry's `task_sampler:`, a registered name or `module:Class`, with `task_sampler_options:` | [Write a task sampler](task-samplers.md) |
+| A group admission rule (experimental, since 0.4.0) | a class with `admit(group, stats)`, registered with `@group_admission(name)` from `platoon.experimental` | `train.group_admission:` or an entry's `group_admission:`, a registered name or `module:Class`, with `group_admission_options:` | [Write a group admission rule](group-admission.md) |
+| Rollouts on the lease (experimental, since 0.4.0) | a workflow that runs each rollout in `async with rollout_lease().rollout(i):` from `platoon.experimental`, and says so with `runs_rollouts_on_lease = True` | `train.permit_release: rollout`, the default, beside `environments[].workflow` | [Run rollouts on the lease](rollout-leases.md) |
 
 Some parts are not extension points: the gateway's wire dialects, how budgets are enforced, the training backend
 (any service that implements the Tinker API) and the command line. Changing them, or opening a new extension
@@ -171,7 +174,7 @@ from the first-party extension `platoon-textcraft` (`extensions/textcraft`).
 ## Compatibility and provenance
 
 *Since 0.2.0.* An extension states the versions of platoon it works with in its requirements
-(`platoon >= 0.3, < 0.4`: below 1.0, a minor release may break extensions). Before platoon imports any of its
+(`platoon >= 0.4, < 0.5`: below 1.0, a minor release may break extensions). Before platoon imports any of its
 components, it checks that range against the running platoon from the installed metadata, and refuses an extension
 whose range excludes it, with an error that names both versions. Set `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` to load
 it anyway, for example while you develop against a checkout of platoon.

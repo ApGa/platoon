@@ -846,7 +846,11 @@ def _openai_tool_call(tool_call: ToolCall) -> dict[str, Any]:
 
 
 class CallTimeline(Protocol):
-    """Receives per-call phase timings, e.g. ``platoon.train.tinker.rollout_metrics.RolloutTimeline``."""
+    """Receives per-call phase timings, e.g. ``platoon.train.tinker.rollout_metrics.RolloutTimeline``.
+
+    A timeline may also have ``call_started()``, which :meth:`ModelGateway.chat` calls, without arguments, as it issues
+    each call, before it samples; it must not raise.
+    """
 
     def record(
         self, *, started_at: float, render_seconds: float, sample_seconds: float, parse_seconds: float, ended_at: float
@@ -1328,6 +1332,8 @@ class ModelGateway:
             except Exception:
                 agent.gateway_errors += 1
                 raise
+        if (call_started := getattr(agent.timeline, "call_started", None)) is not None:
+            call_started()  # the call is issued (CallTimeline)
         counted = 1 if kind == "policy" else 0  # a policy call counts against the agent's call cap while it samples
         agent.policy_calls_in_flight += counted
         agent.call_tally.in_flight += counted

@@ -1,0 +1,413 @@
+{
+ "description": "A permanent checkpoint every 2 steps and a recovery checkpoint every step, both due at once, over 6 steps",
+ "request_settings": [
+  {
+   "conversion": {
+    "filter_errors": true,
+    "filter_message_actions": false,
+    "include_traj_depth": false,
+    "include_traj_start": false,
+    "reward_processor_is_default": true,
+    "reward_processor_ref": null,
+    "subagent_datum_sampler": null
+   },
+   "model": {
+    "binding_path": "",
+    "bootstrap_blob": "<0 bytes>",
+    "context_window_length": null,
+    "follow_poll_seconds": 5.0,
+    "max_tokens": 4096,
+    "model_name": "test/model",
+    "renderer_kwargs": {},
+    "renderer_name": "test-renderer",
+    "sample_timeout_seconds": 600.0,
+    "seed": null,
+    "temperature": 1.0,
+    "top_k": -1,
+    "top_p": 1.0
+   },
+   "packages": [],
+   "protocol_version": 2,
+   "python_env_isolation": false,
+   "ready_path": "",
+   "request_id": "<task>-r<number>-<hex>",
+   "response_path": "",
+   "rollout_budget_seconds": 86400.0,
+   "rollout_config": {
+    "enable_subagent_verifiers": true,
+    "extra": {},
+    "inference_params": {"max_completion_tokens": null, "temperature": null, "top_k": null, "top_p": null},
+    "judges": true,
+    "max_steps": null,
+    "model_name": "test/model",
+    "output_dir": "<tmp>/logs/platoon_tinker/run/rollouts/train",
+    "propagate_root_success": false,
+    "return_dict": true,
+    "sampling_precedence": "request",
+    "skip_subagent_reward_computation": false,
+    "step_timeout": 300,
+    "timeout": null,
+    "train": true,
+    "verbose": true
+   },
+   "rollout_fn_ref": "<fakes>:unused_rollout",
+   "rss_soft_limit_bytes": 25769803776,
+   "sandbox_labels": {"platoon.run": "<tmp>/logs/platoon_tinker/run"},
+   "signal_first_call": false,
+   "startup_budget_seconds": 300.0,
+   "task": {"fork_strategy": "subtask", "goal": null, "max_steps": null, "misc": {}}
+  }
+ ],
+ "scenario": "cadence",
+ "starts": [
+  {
+   "events": [
+    {"batch": 0, "checkpoint": null, "event": "start", "loaded": null, "start": 1, "state_lost": null},
+    {"event": "draw", "position": 0, "reason": "order", "sampler": "auto", "seq": 0, "start": 1, "task_id": "train:3", "version": 0},
+    {"event": "draw", "position": 1, "reason": "order", "sampler": "auto", "seq": 1, "start": 1, "task_id": "train:2", "version": 0},
+    {"event": "settle", "passes": 1, "seq": 0, "start": 1, "task_id": "train:3", "valid": 2, "verdict": "trained", "version": 0},
+    {"event": "settle", "passes": 1, "seq": 1, "start": 1, "task_id": "train:2", "valid": 2, "verdict": "trained", "version": 0},
+    {"event": "fate", "fate": "consumed", "seq": 0, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 1, "start": 1},
+    {"event": "draw", "position": 2, "reason": "order", "sampler": "auto", "seq": 2, "start": 1, "task_id": "train:5", "version": 1},
+    {"event": "draw", "position": 3, "reason": "order", "sampler": "auto", "seq": 3, "start": 1, "task_id": "train:4", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 3, "start": 1, "task_id": "train:4", "valid": 1, "verdict": "uniform", "version": 1},
+    {"event": "settle", "passes": 0, "seq": 2, "start": 1, "task_id": "train:5", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 3, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 2, "start": 1},
+    {"event": "draw", "position": 4, "reason": "order", "sampler": "auto", "seq": 4, "start": 1, "task_id": "train:1", "version": 1},
+    {"event": "draw", "position": 5, "reason": "order", "sampler": "auto", "seq": 5, "start": 1, "task_id": "train:0", "version": 1},
+    {"event": "settle", "passes": 1, "seq": 5, "start": 1, "task_id": "train:0", "valid": 2, "verdict": "trained", "version": 1},
+    {"event": "settle", "passes": 2, "seq": 4, "start": 1, "task_id": "train:1", "valid": 2, "verdict": "uniform", "version": 1},
+    {"event": "fate", "fate": "consumed", "seq": 5, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 4, "start": 1},
+    {"event": "draw", "position": 6, "reason": "order", "sampler": "auto", "seq": 6, "start": 1, "task_id": "train:5", "version": 2},
+    {"event": "draw", "position": 7, "reason": "order", "sampler": "auto", "seq": 7, "start": 1, "task_id": "train:4", "version": 2},
+    {"event": "settle", "passes": 0, "seq": 6, "start": 1, "task_id": "train:5", "valid": 2, "verdict": "uniform", "version": 2},
+    {"event": "settle", "passes": 2, "seq": 7, "start": 1, "task_id": "train:4", "valid": 2, "verdict": "uniform", "version": 2},
+    {"event": "fate", "fate": "consumed", "seq": 6, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 7, "start": 1},
+    {"event": "draw", "position": 8, "reason": "order", "sampler": "auto", "seq": 8, "start": 1, "task_id": "train:1", "version": 2},
+    {"event": "draw", "position": 9, "reason": "order", "sampler": "auto", "seq": 9, "start": 1, "task_id": "train:2", "version": 2},
+    {"event": "settle", "passes": 2, "seq": 8, "start": 1, "task_id": "train:1", "valid": 2, "verdict": "uniform", "version": 2},
+    {"event": "settle", "passes": 1, "seq": 9, "start": 1, "task_id": "train:2", "valid": 2, "verdict": "trained", "version": 2},
+    {"event": "fate", "fate": "consumed", "seq": 8, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 9, "start": 1},
+    {"event": "draw", "position": 10, "reason": "order", "sampler": "auto", "seq": 10, "start": 1, "task_id": "train:3", "version": 3},
+    {"event": "draw", "position": 11, "reason": "order", "sampler": "auto", "seq": 11, "start": 1, "task_id": "train:0", "version": 3},
+    {"event": "settle", "passes": 0, "seq": 10, "start": 1, "task_id": "train:3", "valid": 2, "verdict": "uniform", "version": 3},
+    {"event": "settle", "passes": 1, "seq": 11, "start": 1, "task_id": "train:0", "valid": 2, "verdict": "trained", "version": 3},
+    {"event": "fate", "fate": "consumed", "seq": 10, "start": 1},
+    {"event": "fate", "fate": "consumed", "seq": 11, "start": 1}
+   ],
+   "files": [
+    "checkpoints.jsonl",
+    "tasks/dispatch-s1-000006.json",
+    "tasks/dispatch-s1-final.json",
+    "tasks/dispatch-s1-recovery-000000.json",
+    "tasks/dispatch-s1-recovery-000001.json",
+    "tasks/dispatch-s1-recovery-000003.json",
+    "tasks/dispatch-s1-recovery-000005.json",
+    "tasks/events.jsonl",
+    "tasks/state-s1-000006.json",
+    "tasks/state-s1-final.json",
+    "tasks/state-s1-recovery-000000.json",
+    "tasks/state-s1-recovery-000001.json",
+    "tasks/state-s1-recovery-000003.json",
+    "tasks/state-s1-recovery-000005.json"
+   ],
+   "messages": [
+    "INFO This run labels its sandboxes {'platoon.run': '<tmp>/logs/platoon_tinker/run'}",
+    "INFO Created new training client for test/model with rank 32",
+    "INFO Saving recovery checkpoint recovery-000000 at launch (batch 0)",
+    "INFO Each rollout returns its permit as it ends (train.permit_release: rollout); a group's rollouts start as permits free",
+    "INFO Starting training from batch 0 to 6",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 0",
+    "INFO Saving recovery checkpoint recovery-000001 after completing batch 0 (steps_completed=1, save_every=2, recovery_every=1)",
+    "INFO Checkpoint async completed. Creating sampling client from tinker://run-1/sampler_weights/recovery-000001",
+    "INFO Sampling client created successfully",
+    "INFO Step 1/6 | Epoch 0 | Batch time: <t>s | Datums: 4",
+    "WARNING All datums had zero advantage for microbatch 0 (minibatch 0): its objective is zero, so it takes no forward/backward",
+    "WARNING Minibatch 0 of batch 1 takes no optimizer update: none of its microbatches had a nonzero objective",
+    "INFO Batch 1 (step 2) takes no optimizer update: its objective is zero (every advantage is exactly zero: say every group's rollouts scored alike), and a step whose objective is zero never steps the optimizer, whatever filter_zero_advantage_datums says; the policy stays at version 1",
+    "INFO Step 2/6 | Epoch 0 | Batch time: <t>s | Datums: 3",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 2",
+    "INFO Saving recovery checkpoint recovery-000003 after completing batch 2 (steps_completed=3, save_every=2, recovery_every=1)",
+    "INFO Checkpoint async completed. Creating sampling client from tinker://run-1/sampler_weights/recovery-000003",
+    "INFO Sampling client created successfully",
+    "INFO Step 3/6 | Epoch 1 | Batch time: <t>s | Datums: 4",
+    "WARNING All datums had zero advantage for microbatch 0 (minibatch 0): its objective is zero, so it takes no forward/backward",
+    "WARNING Minibatch 0 of batch 3 takes no optimizer update: none of its microbatches had a nonzero objective",
+    "INFO Batch 3 (step 4) takes no optimizer update: its objective is zero (every advantage is exactly zero: say every group's rollouts scored alike), and a step whose objective is zero never steps the optimizer, whatever filter_zero_advantage_datums says; the policy stays at version 2",
+    "INFO Step 4/6 | Epoch 1 | Batch time: <t>s | Datums: 4",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 4",
+    "INFO Saving recovery checkpoint recovery-000005 after completing batch 4 (steps_completed=5, save_every=2, recovery_every=1)",
+    "INFO Checkpoint async completed. Creating sampling client from tinker://run-1/sampler_weights/recovery-000005",
+    "INFO Sampling client created successfully",
+    "INFO Step 5/6 | Epoch 1 | Batch time: <t>s | Datums: 4",
+    "INFO Calling _save_checkpoint_and_get_sampling_client for batch 5",
+    "INFO Saving permanent checkpoint 000006 after completing batch 5 (steps_completed=6, save_every=2, recovery_every=1)",
+    "INFO Checkpoint async completed. Creating sampling client from tinker://run-1/sampler_weights/000006",
+    "INFO Sampling client created successfully",
+    "INFO Step 6/6 | Epoch 2 | Batch time: <t>s | Datums: 4",
+    "INFO Saving permanent checkpoint final at step 6...",
+    "INFO Training complete successfully!",
+    "INFO Training complete. Total time: <t>s"
+   ],
+   "outcome": "completed",
+   "requests": {
+    "train": [
+     ["train:3", 0, 0, 0, 0],
+     ["train:3", 1, 0, 0, 0],
+     ["train:2", 0, 0, 0, 0],
+     ["train:2", 1, 0, 0, 0],
+     ["train:5", 0, 1, 0, 1],
+     ["train:5", 1, 1, 0, 1],
+     ["train:4", 0, 1, 0, 1],
+     ["train:4", 1, 1, 0, 1],
+     ["train:1", 0, 1, 0, 1],
+     ["train:1", 1, 1, 0, 1],
+     ["train:0", 0, 1, 0, 1],
+     ["train:0", 1, 1, 0, 1],
+     ["train:5", 0, 2, 0, 2],
+     ["train:5", 1, 2, 0, 2],
+     ["train:4", 0, 2, 0, 2],
+     ["train:4", 1, 2, 0, 2],
+     ["train:1", 0, 2, 0, 2],
+     ["train:1", 1, 2, 0, 2],
+     ["train:2", 0, 2, 0, 2],
+     ["train:2", 1, 2, 0, 2],
+     ["train:3", 0, 3, 0, 3],
+     ["train:3", 1, 3, 0, 3],
+     ["train:0", 0, 3, 0, 3],
+     ["train:0", 1, 3, 0, 3]
+    ]
+   },
+   "saves": [
+    {
+     "batch": 0,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000000.json",
+      "format": 2,
+      "sha256": "7071f75f771c31d76b24c8f60a9576db7f8510f2870806f4b7c0fa4d486b7995",
+      "start": 1
+     },
+     "name": "recovery-000000",
+     "optimizer_steps": 0,
+     "policy_version": 0,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000000",
+     "state_path": "tinker://run-1/weights/recovery-000000",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000000.json",
+      "format": 1,
+      "sha256": "5be675f5936874b462d57541cc0a9c5b3260b40d65ac1ddbf12bf36e5bfdf0b6",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 1,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000001.json",
+      "format": 2,
+      "sha256": "5f7d5c4ec735acd29e4b94001bb80a86b264fbe56048eb57083021d76428eaf7",
+      "start": 1
+     },
+     "name": "recovery-000001",
+     "optimizer_steps": 1,
+     "policy_version": 1,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000001",
+     "state_path": "tinker://run-1/weights/recovery-000001",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000001.json",
+      "format": 1,
+      "sha256": "08bb5c965258f9603aad5e0a3868e63e423d97b6090a308f3ea6eedd1ccccee2",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 3,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000003.json",
+      "format": 2,
+      "sha256": "7ed0b3ef7773f68cf77f18b4d7783209b9e7bd8943779c67d5c274d2cd767237",
+      "start": 1
+     },
+     "name": "recovery-000003",
+     "optimizer_steps": 2,
+     "policy_version": 2,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000003",
+     "state_path": "tinker://run-1/weights/recovery-000003",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000003.json",
+      "format": 1,
+      "sha256": "accc3edf03edab425c28b31379e07e81ce022a2cf2b8004bd75c908b264c9e0d",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 5,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-recovery-000005.json",
+      "format": 2,
+      "sha256": "0a32574108d176912da7992c4975dcc1cbfd52b07cf5f733f0b5c66373bcd886",
+      "start": 1
+     },
+     "name": "recovery-000005",
+     "optimizer_steps": 3,
+     "policy_version": 3,
+     "sampler_path": "tinker://run-1/sampler_weights/recovery-000005",
+     "state_path": "tinker://run-1/weights/recovery-000005",
+     "tasks": {
+      "file": "tasks/state-s1-recovery-000005.json",
+      "format": 1,
+      "sha256": "632f7dc23b2641a9ee25e230d31bfde61fe9d43fc5083a0b2828721c839cde31",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 6,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-000006.json",
+      "format": 2,
+      "sha256": "2e558e8007dba8f1c586c59dccb96e37807909b76657ab2226675bb853ab9649",
+      "start": 1
+     },
+     "name": "000006",
+     "optimizer_steps": 4,
+     "policy_version": 4,
+     "sampler_path": "tinker://run-1/sampler_weights/000006",
+     "state_path": "tinker://run-1/weights/000006",
+     "tasks": {
+      "file": "tasks/state-s1-000006.json",
+      "format": 1,
+      "sha256": "a917e2f8e4e5daff322892d2ad91f07c8bcb21ee72d1ce3d4ece210157d5b87b",
+      "start": 1
+     },
+     "wandb_run_id": null
+    },
+    {
+     "batch": 6,
+     "dispatch": {
+      "file": "tasks/dispatch-s1-final.json",
+      "format": 2,
+      "sha256": "2e558e8007dba8f1c586c59dccb96e37807909b76657ab2226675bb853ab9649",
+      "start": 1
+     },
+     "name": "final",
+     "optimizer_steps": 4,
+     "policy_version": 4,
+     "sampler_path": "tinker://run-1/sampler_weights/final",
+     "state_path": "tinker://run-1/weights/final",
+     "tasks": {
+      "file": "tasks/state-s1-final.json",
+      "format": 1,
+      "sha256": "a917e2f8e4e5daff322892d2ad91f07c8bcb21ee72d1ce3d4ece210157d5b87b",
+      "start": 1
+     },
+     "wandb_run_id": null
+    }
+   ],
+   "tinker": [
+    ["create_lora_training_client", "test/model", 32],
+    ["save_state", "recovery-000000"],
+    ["save_weights_for_sampler", "recovery-000000"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000000"],
+    ["set_version", 0],
+    ["publish", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    ["publish_binding", "train", 0, "sampler:tinker://run-1/sampler_weights/recovery-000000"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, -0.071428575, -0.071428575, -0.071428575], "logprobs": [-0.375, -0.5625, -0.1875, -0.125], "target_tokens": [717, 220, 937, 53], "tokens": [179, 717, 220, 937]},
+       {"advantages": [0.0, 0.071428575], "logprobs": [-0.8125, -0.3125], "target_tokens": [692, 772], "tokens": [723, 692]},
+       {"advantages": [0.0, 0.071428575, 0.071428575], "logprobs": [-0.3125, -0.4375, -0.125], "target_tokens": [615, 647, 718], "tokens": [183, 615, 647]},
+       {"advantages": [0.0, -0.071428575], "logprobs": [-0.75, -0.1875], "target_tokens": [336, 832], "tokens": [926, 336]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_state", "recovery-000001"],
+    ["save_weights_for_sampler", "recovery-000001"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000001"],
+    ["publish", 1, "sampler:tinker://run-1/sampler_weights/recovery-000001"],
+    ["publish_binding", "train", 1, "sampler:tinker://run-1/sampler_weights/recovery-000001"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.0625, 0.0625, 0.0625], "logprobs": [0.0, -0.125, -0.125, -0.0625], "target_tokens": [812, 912, 788, 826], "tokens": [672, 812, 912, 788]},
+       {"advantages": [0.0, -0.0625, -0.0625, -0.0625], "logprobs": [-0.625, -0.125, -0.625, -0.75], "target_tokens": [600, 981, 132, 983], "tokens": [363, 600, 981, 132]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_state", "recovery-000003"],
+    ["save_weights_for_sampler", "recovery-000003"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000003"],
+    ["publish", 2, "sampler:tinker://run-1/sampler_weights/recovery-000003"],
+    ["publish_binding", "train", 2, "sampler:tinker://run-1/sampler_weights/recovery-000003"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.083333336, 0.083333336, 0.083333336], "logprobs": [-0.3125, -0.125, -0.3125, -0.5], "target_tokens": [453, 48, 915, 696], "tokens": [738, 453, 48, 915]},
+       {"advantages": [0.0, -0.083333336], "logprobs": [-0.625, -0.9375], "target_tokens": [463, 580], "tokens": [582, 463]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_state", "recovery-000005"],
+    ["save_weights_for_sampler", "recovery-000005"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/recovery-000005"],
+    ["publish", 3, "sampler:tinker://run-1/sampler_weights/recovery-000005"],
+    ["publish_binding", "train", 3, "sampler:tinker://run-1/sampler_weights/recovery-000005"],
+    [
+     "forward_backward",
+     {
+      "datums": [
+       {"advantages": [0.0, 0.071428575, 0.071428575], "logprobs": [-0.375, -0.125, -0.625], "target_tokens": [298, 492, 919], "tokens": [918, 298, 492]},
+       {"advantages": [0.0, -0.071428575], "logprobs": [-0.5, 0.0], "target_tokens": [612, 902], "tokens": [995, 612]}
+      ],
+      "inputs": {"advantages": "float32", "logprobs": "float32", "target_tokens": "int64"},
+      "loss_fn": "cispo",
+      "loss_fn_config": {"clip_high_threshold": 5.0, "clip_low_threshold": 0.0}
+     }
+    ],
+    [
+     "optim_step",
+     {"beta1": 0.9, "beta2": 0.95, "eps": 1e-08, "grad_clip_norm": 0.0, "learning_rate": 3e-05, "weight_decay": 0.0}
+    ],
+    ["save_state", "000006"],
+    ["save_weights_for_sampler", "000006"],
+    ["create_sampling_client", "tinker://run-1/sampler_weights/000006"],
+    ["publish", 4, "sampler:tinker://run-1/sampler_weights/000006"],
+    ["publish_binding", "train", 4, "sampler:tinker://run-1/sampler_weights/000006"],
+    ["save_state", "final"],
+    ["save_weights_for_sampler", "final"]
+   ]
+  }
+ ]
+}

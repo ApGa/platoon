@@ -33,8 +33,8 @@ from worker_shutdown_scenarios import (
     _request,
 )
 
-from platoon.train.tinker.workers.entrypoint import TERMINATION_SECONDS
-from platoon.train.tinker.workers.supervisor import RolloutWorkerSupervisor
+from platoon.train.workers.entrypoint import TERMINATION_SECONDS
+from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 
 
 def test_a_worker_whose_trainer_is_killed_stops_a_rollout_that_swallows_cancellation(tmp_path):

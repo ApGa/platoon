@@ -23,9 +23,12 @@ import torch
 import platoon.train.tinker  # noqa: F401
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
-from platoon.train.tinker.config_defs import WorkflowConfig
-from platoon.train.tinker.workers.protocol import RefResolutionError
-from platoon.train.tinker.workflows import group_rollout_workflow as grw
+from platoon.train.config_defs import WorkflowConfig
+from platoon.train.workers.protocol import RefResolutionError
+from platoon.train.workflow import context as context_module
+from platoon.train.workflow import group as group_module
+from platoon.train.workflow import output as output_module
+from platoon.train.workflow.start_limit import StartLimit, held_slot
 from platoon.utils.stats_tracker import get as get_tracker
 
 STUB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,7 +82,7 @@ def _workflow(tmp_path, scope, *, isolation, rollout_fn=None, **config_kwargs):
         worker_termination_grace_seconds=1.0,
         **config_kwargs,
     )
-    return grw.GroupRolloutWorkflow(
+    return group_module.GroupRolloutWorkflow(
         rollout_fn=rollout_fn or worker_stub_rollouts.varied_reward_rollout,
         get_task_fn=lambda task_id: Task(goal="g", id=task_id),
         config=config,
@@ -163,7 +166,7 @@ def test_one_member_s_launch_failure_costs_only_that_member(tmp_path, monkeypatc
     completed and would have satisfied ``min_successful_group_size``.
     """
 
-    from platoon.train.tinker.workers import supervisor as supervisor_module
+    from platoon.train.workers import supervisor as supervisor_module
 
     monkeypatch.setenv("STUB_SLOT_DIR", str(tmp_path / "slots"))
     real_dump = supervisor_module.dump_request
@@ -288,7 +291,7 @@ def test_construction_resolves_a_main_defined_reward_processor(tmp_path, monkeyp
     main_scoped.__module__ = "__main__"
     main_scoped.__qualname__ = "doubled_reward"
 
-    workflow = grw.GroupRolloutWorkflow(
+    workflow = group_module.GroupRolloutWorkflow(
         rollout_fn=worker_stub_rollouts.varied_reward_rollout,
         get_task_fn=lambda task_id: Task(goal="g", id=task_id),
         config=WorkflowConfig(group_size=1, rollout_isolation="process"),
@@ -300,7 +303,8 @@ def test_construction_resolves_a_main_defined_reward_processor(tmp_path, monkeyp
     assert workflow._reward_processor_is_default is False
 
 
-def test_group_atomic_admission_admits_whole_groups(tmp_path):
+@pytest.mark.parametrize("limit", [None, 3], ids=["no-start-limit", "start-limit-of-a-group"])
+def test_group_atomic_admission_admits_whole_groups(tmp_path, limit):
     """Members of a group must start together, and groups must not overlap.
 
     A per-rollout readiness gate would inject start-time skew inside a group,
@@ -308,22 +312,29 @@ def test_group_atomic_admission_admits_whole_groups(tmp_path):
     tail-grace clock when the quorum settles.  The same rollout numbers would
     then deterministically start last and be cancelled having had a fraction of
     their budget, biasing the leave-one-out baseline.
+
+    So also with a start limit of a group's size (``train.max_starting_rollouts``), each member's first model call
+    following its readiness.
     """
 
     events: list[tuple[str, str]] = []
 
-    class Recorder(grw.GroupRolloutWorkflow):
+    class Recorder(group_module.GroupRolloutWorkflow):
         async def arun_episode_single(self, data, rollout_number=0):
             group = data["task_id"]
             events.append(("start", group))
-            slot = grw._group_ready_callback.get()
+            slot = context_module._group_ready_callback.get()
             await asyncio.sleep(0.15)
             events.append(("ready", group))
             if slot is not None:
                 slot()
+            if (start := held_slot()) is not None:
+                start.first_call()
             await asyncio.sleep(0.15)
             events.append(("done", group))
-            return grw._SingleRolloutOutcome(result=None, workload=grw.RolloutWorkload(), observed=False)
+            return output_module._SingleRolloutOutcome(
+                result=None, workload=group_module.RolloutWorkload(), observed=False
+            )
 
     config = WorkflowConfig(
         group_size=3,
@@ -338,6 +349,7 @@ def test_group_atomic_admission_admits_whole_groups(tmp_path):
         model_info=_model_info(),
         stats_scope="iso_admission",
     )
+    workflow.start_limit = StartLimit(limit) if limit else None
 
     async def scenario():
         await asyncio.gather(
@@ -377,13 +389,13 @@ def test_workflow_config_validates_the_isolation_keys():
 def test_worker_requests_carry_the_environments_packages(tmp_path):
     """A rollout worker imports the environments' packages the trainer hands its workflows (train.py)."""
 
-    from platoon.train.tinker.train import worker_package_kwargs
+    from platoon.train.launch import worker_package_kwargs
 
     workflow = _workflow(tmp_path, "iso_packages", isolation="inprocess")
     request = workflow._build_worker_request({"task_id": "task"}, 0)
     assert request.packages == ()
 
-    explicit = grw.GroupRolloutWorkflow(
+    explicit = group_module.GroupRolloutWorkflow(
         rollout_fn=worker_stub_rollouts.varied_reward_rollout,
         get_task_fn=lambda task_id: Task(goal="g", id=task_id),
         config=workflow.config,
@@ -399,5 +411,5 @@ def test_worker_requests_carry_the_environments_packages(tmp_path):
             {"name": "b", "service": "python://other.envs:B"},
         ]
     )
-    assert worker_package_kwargs(grw.GroupRolloutWorkflow, config) == {"packages": ("my_project.envs",)}
+    assert worker_package_kwargs(group_module.GroupRolloutWorkflow, config) == {"packages": ("my_project.envs",)}
     assert worker_package_kwargs(object, config) == {}  # a workflow of another kind gets none

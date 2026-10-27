@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from platoon.envs.harbor import task as task_module
+from platoon.envs.harbor.compose import plan_compose
 from platoon.envs.harbor.task import (
     HARBOR_MISC_KEY,
     Artifact,
@@ -119,17 +122,39 @@ COMPOSE = """services:
       - JUDGE_URL=http://judge:8082
   judge:
     image: frontier-cs-judge:latest
+    command: ["judge", "--port", "8082"]
 """
 
 
-@pytest.mark.parametrize("compose", ["docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"])
 @pytest.mark.parametrize("task_toml", ["", '[environment]\ndocker_image = "ubuntu:24.04"\n'], ids=["default", "image"])
-def test_refuses_multi_container_tasks_whatever_their_image_source(make_task, compose: str, task_toml: str):
+def test_refuses_multi_container_tasks_where_no_stack_runs_whatever_their_image_source(make_task, task_toml: str):
     task_dir = make_task("stack", task_toml=task_toml)
-    (task_dir / "environment" / compose).write_text(COMPOSE)
+    (task_dir / "environment" / "docker-compose.yaml").write_text(COMPOSE)
 
-    with pytest.raises(HarborTaskError, match=rf"environment/{compose} makes the environment a multi-container"):
-        HarborTask.load(task_dir)
+    with pytest.raises(
+        HarborTaskError,
+        match=r"environment/docker-compose.yaml makes the environment a multi-container stack \(sidecar services\), "
+        "and the docker provider runs none; the task is refused, never started without them",
+    ):
+        HarborTask.load(task_dir, stack_refusal="the docker provider runs none")
+    task = HarborTask.load(task_dir)  # where stacks run, it is one
+    assert task.is_stack and task.main is not None and task.main.environment == {"JUDGE_URL": "http://judge:8082"}
+
+
+@pytest.mark.parametrize("compose", ["docker-compose.yml", "compose.yaml", "compose.yml"])
+def test_compose_names_that_harbor_does_not_read_are_plain_files(make_task, compose: str, caplog):
+    """Harbor reads only environment/docker-compose.yaml: a task with another compose name runs as one container in
+    Harbor, and so in platoon, which warns of it."""
+
+    task_dir = make_task(f"plain-{compose}", task_toml='[environment]\ndocker_image = "ubuntu:24.04"\n')
+    (task_dir / "environment" / compose).write_text(COMPOSE)
+    task_module._WARNED_UNREAD.discard(f"environment/{compose}")
+
+    with caplog.at_level("WARNING", logger="platoon.envs.harbor.task"):
+        task = HarborTask.load(task_dir)
+
+    assert task.compose is None and task.docker_image == "ubuntu:24.04"
+    assert f"has environment/{compose}, which Harbor does not read" in caplog.text
 
 
 # ------------------------------------------------------------------------------------------- separate verifiers
@@ -234,7 +259,12 @@ def test_a_verifier_with_its_own_image_needs_no_test_script_in_the_task(make_tas
     ("task_toml", "message"),
     [
         ('[verifier]\nenvironment_mode = "shared"\n[verifier.environment]\ncpus = 1\n', "conflicts with"),
-        ('[verifier]\ncollect = [{command = "dump-db"}]\n', r"\[\[verifier.collect\]\] hooks"),
+        (
+            '[verifier]\ncollect = [{command = "dump-db", service = "db"}]\n',
+            r"\[\[verifier.collect\]\] runs a hook in the compose service 'db', which the task does not start",
+        ),
+        ('[verifier]\ncollect = [{service = "main"}]\n', r"\[\[verifier.collect\]\] needs a command"),
+        ('[verifier]\ncollect = [{command = "x", cwd = "/"}]\n', r"has unknown keys \['cwd'\]"),
         ('artifacts = [{source = "/data", service = "db"}]\n', "compose service 'db'"),
         ('artifacts = ["../etc/passwd"]\n', "must not contain '..'"),
         ("artifacts = [3]\n", "artifacts entries must be paths"),
@@ -248,6 +278,114 @@ def test_a_verifier_with_its_own_image_needs_no_test_script_in_the_task(make_tas
 def test_refuses_verifier_settings_platoon_cannot_honor(make_task, task_toml: str, message: str):
     with pytest.raises(HarborTaskError, match=message):
         HarborTask.load(make_task("bad", task_toml=task_toml))
+
+
+STACK = "services:\n  main: {}\n  db:\n    image: postgres:16\n    command: [postgres]\n"
+
+
+def test_collect_hooks_run_main_s_first_and_their_users_follow_the_policy(make_task):
+    task_dir = make_task(
+        "hooks",
+        task_toml=(
+            '[[verifier.collect]]\nservice = "db"\ncommand = "pg_dump > /tmp/db.sql"\ntimeout_sec = 120\n'
+            '[[verifier.collect]]\ncommand = "sync"\n'
+        ),
+    )
+    (task_dir / "environment" / "docker-compose.yaml").write_text(STACK)
+    task = HarborTask.load(task_dir)
+    assert [(hook.service, hook.command, hook.timeout_s) for hook in task.collect] == [
+        ("main", "sync", 60.0),  # main's hooks run first, as in Harbor
+        ("db", "pg_dump > /tmp/db.sql", 120.0),
+    ]
+
+    as_user = make_task("as-user", task_toml='[[verifier.collect]]\ncommand = "sync"\nuser = "postgres"\n')
+    with pytest.raises(HarborTaskError, match="runs a hook as user 'postgres'.*sets agent_user: honor or ignore"):
+        HarborTask.load(as_user)
+    honored = HarborTask.load(as_user, verifier_user="honor")  # the hook runs as its user, in main
+    assert honored.collect[0].user == "postgres" and honored.honors_users_in("agents")
+    ignored = HarborTask.load(as_user, agent_user="ignore")
+    assert ignored.ignored_users == {"collect": "postgres"} and ignored.collect[0].service == "main"
+    assert ignored.collect[0].user is None and not ignored.honors_users_in("agents")
+
+
+def test_artifacts_of_a_service_name_an_absolute_path_of_one_the_stack_starts(make_task):
+    toml = 'artifacts = ["out.txt", {source = "/var/lib/db/dump.sql", service = "db"}, '
+    toml += '{source = "x", service = "main"}]\n'
+    task_dir = make_task("artifacts", task_toml=toml)
+    (task_dir / "environment" / "docker-compose.yaml").write_text(STACK)
+    assert [(artifact.source, artifact.service) for artifact in HarborTask.load(task_dir).artifacts] == [
+        ("out.txt", None),
+        ("/var/lib/db/dump.sql", "db"),
+        ("x", None),
+    ]
+    relative = make_task("relative", task_toml='artifacts = [{source = "dump.sql", service = "db"}]\n')
+    (relative / "environment" / "docker-compose.yaml").write_text(STACK)
+    with pytest.raises(HarborTaskError, match="must be an absolute path in that service"):
+        HarborTask.load(relative)
+
+
+def test_a_stack_whose_service_a_node_service_serves_is_refused(make_task):
+    task_dir = make_task("external")
+    (task_dir / "environment" / "docker-compose.yaml").write_text(STACK)
+    plan = HarborTask.load(task_dir).compose
+    assert plan is not None
+    marked = {**plan.to_json(), "services": {**plan.services, "db": {"external": "judge-pool"}}}
+    with pytest.raises(HarborTaskError, match="whose service db a node service serves \\(judge-pool"):
+        HarborTask.load(task_dir, compose=marked)
+
+
+@pytest.mark.parametrize(
+    ("compose", "message"),
+    [
+        (
+            "services:\n  main: {}\n  db:\n    image: postgres:16\n",
+            "whose service db runs the command of its registry image postgres:16, which platoon does not know yet",
+        ),
+        (
+            "services:\n  main: {}\n  api:\n    build: ./api\n",
+            "whose service api builds its image from environment/api/Dockerfile, and a dataset directory's task has",
+        ),
+    ],
+    ids=["registry-image-without-a-command", "build-context"],
+)
+def test_a_dataset_directory_s_stack_whose_sidecar_no_rollout_could_start_is_refused(
+    make_task, compose: str, message: str
+):
+    """In a dataset directory, whose tasks have no image map: a fetched dataset's lock keeps them, and a run refuses
+    them when it lists them (where the image map lacks a sidecar's image), as a later platoon may run them."""
+
+    task_dir = make_task("unrunnable")
+    (task_dir / "environment" / "api").mkdir()
+    (task_dir / "environment" / "api" / "Dockerfile").write_text('FROM python:3.12-slim\nCMD ["python"]\n')
+    (task_dir / "environment" / "docker-compose.yaml").write_text(compose)
+    with pytest.raises(HarborTaskError, match=message):
+        HarborTask.load(task_dir)
+    plan = plan_compose(task_dir)  # as a fetch plans it, with the build keys
+    assert plan is not None and HarborTask.load(task_dir, compose=plan).is_stack
+
+
+@pytest.mark.parametrize(
+    ("compose", "message"),
+    [
+        (
+            "services:\n  main: {}\n  judge:\n    image: j\n    command: [j]\n    volumes:\n"
+            "      - ${HOST_AGENT_LOGS_PATH}:${ENV_AGENT_LOGS_PATH}:ro\n",
+            "whose service judge binds the agent log directory read-only, to read what main writes there",
+        ),
+        (
+            "services:\n  main:\n    volumes: [./data:/srv/data]\n  web:\n    image: w\n    command: [w]\n"
+            "    volumes: [./data/sub:/sub:ro]\n",
+            "whose services main and web bind the task's environment/data and environment/data/sub",
+        ),
+    ],
+    ids=["read-only-log-directory", "a-written-bind-inside-another"],
+)
+def test_a_stack_whose_services_would_not_share_what_compose_shares_is_refused(make_task, compose: str, message: str):
+    task_dir = make_task("apart")
+    (task_dir / "environment" / "data" / "sub").mkdir(parents=True)
+    (task_dir / "environment" / "docker-compose.yaml").write_text(compose)
+    with pytest.raises(HarborTaskError, match=message):
+        HarborTask.load(task_dir)
 
 
 def test_a_compose_file_in_tests_makes_the_verifier_a_stack(make_task):
@@ -271,33 +409,58 @@ def test_a_compose_file_that_only_names_main_is_one_container(make_task, compose
 
 
 @pytest.mark.parametrize(
-    "compose",
+    ("compose", "message"),
     [
-        "services:\n  main:\n    environment: [A=1]\n",
-        "services:\n  main: {}\nnetworks:\n  private: {}\n",
-        "services:\n  app: {}\n",
-        "services: [main]\n",
-        "{not: yaml: at all",
+        ("services:\n  app: {}\n", "app: has neither an image nor a build"),
+        ("services: [main]\n", "services: must map service names"),
+        ("{not: yaml: at all", "the file is not YAML"),
+        ("services:\n  main:\n    privileged: true\n", "main.privileged: gives the service every privilege"),
     ],
-    ids=["main-with-keys", "networks", "other-service", "list", "unparsable"],
+    ids=["service-without-image", "list", "unparsable", "privileged"],
 )
-def test_any_other_compose_file_stays_refused(make_task, compose: str):
+def test_other_compose_files_stay_refused_with_the_reason(make_task, compose: str, message: str):
     task_dir = make_task("stack")
-    (task_dir / "environment" / "compose.yaml").write_text(compose)
+    (task_dir / "environment" / "docker-compose.yaml").write_text(compose)
 
-    with pytest.raises(HarborTaskError, match="makes the environment a multi-container stack"):
+    with pytest.raises(HarborTaskError, match=message):
         HarborTask.load(task_dir)
+
+
+@pytest.mark.parametrize(
+    ("compose", "kind"),
+    [
+        ("services:\n  main:\n    environment: [A=1]\n", "main_only"),
+        ("services:\n  main: {}\nnetworks:\n  private: {}\n", "trivial"),
+        ("services:\n  main:\n    stdin_open: true\n    tty: true\n", "trivial"),
+    ],
+    ids=["main-with-keys", "unused-network", "ignored-keys"],
+)
+def test_compose_files_that_name_only_main_run_as_one_sandbox(make_task, compose: str, kind: str):
+    task_dir = make_task("main-only", task_toml='[environment]\ndocker_image = "ubuntu:24.04"\n')
+    (task_dir / "environment" / "docker-compose.yaml").write_text(compose)
+
+    task = HarborTask.load(task_dir)
+
+    assert task.compose is not None and task.compose.kind == kind
+    assert (task.main is not None) == (kind == "main_only")
 
 
 def test_users_are_refused_unless_ignored(make_task):
     task_dir = make_task("users", task_toml='[agent]\nuser = "agent"\n[verifier]\nuser = 0\n')
 
-    with pytest.raises(HarborTaskError, match=r"\[agent\].user = 'agent', \[verifier\].user = '0'.*agent_user: ignore"):
+    with pytest.raises(HarborTaskError, match=r"\[agent\].user = 'agent', \[verifier\].user = '0'.*honor, .*or ignore"):
         HarborTask.load(task_dir)
     task = HarborTask.load(task_dir, agent_user="ignore")
     assert task.ignored_users == {"agent": "agent", "verifier": "0"}
+    honored = HarborTask.load(task_dir, agent_user="honor")  # a root verifier in the sandbox of agents run as theirs
+    assert (honored.honored_users, honored.verifier_root, honored.ignored_users) == (
+        {"agent": "agent", "verifier": "0"},
+        True,
+        {},
+    )
+    unknown: Any = "obey"
     with pytest.raises(ValueError, match="agent_user must be one of"):
-        HarborTask.load(task_dir, agent_user="obey")  # type: ignore[arg-type]
+        HarborTask.load(task_dir, agent_user=unknown)
 
 
 def test_gpus_and_the_index_row_are_kept(make_task):

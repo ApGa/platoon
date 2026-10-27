@@ -2,9 +2,17 @@
 
 | | |
 |---|---|
-| Status | Draft |
+| Status | Draft; superseded in part by [RFC 0021](0021-trainers-credit-and-policies.md) |
 | Created | 2026-10-13 |
 | Builds on | [Architecture](../architecture.md): the model gateway and its agent API, subagents, credit and forks |
+
+**Superseded in part by [RFC 0021](0021-trainers-credit-and-policies.md)**, which replaces the per-agent credit of
+section 7. `CreditPolicy` and the `BaselineSpec` presets, which run inside a `GroupRolloutWorkflow` subclass and give
+one number per agent, become RFC 0021's `CreditEstimator`: asynchronous, chosen per environment entry
+(`environments[].credit`), usable by any workflow and able to set per-token advantages. The `rao` preset is its
+`group` estimator, and its `keyed` estimator covers the `BaselineSpec` key fields. `RoleRule.policy` becomes
+`agents.roles.<role>.policy`. The rest of this RFC (the agent graph, edges, reward events, spawning, messaging and
+verification) stands as written.
 
 ## Summary
 

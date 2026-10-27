@@ -20,13 +20,14 @@ from trainer_fakes import TrainingClient, make_trainer
 
 from platoon.task import Task
 from platoon.train import entry_settings
+from platoon.train import launch as train_module
 from platoon.train.components import ENVIRONMENT_COLUMN
-from platoon.train.tinker import rl as rl_module
-from platoon.train.tinker import train as train_module
-from platoon.train.tinker.config_defs import PlatoonTinkerRLTrainerConfig
-from platoon.train.tinker.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
-from platoon.train.tinker.workflows import GroupRolloutWorkflow
-from platoon.train.tinker.workflows import group_rollout_workflow as workflow_module
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.dispatch.permits import DrawLease, PermitPool
+from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
+from platoon.train.workflow import context as context_module
+from platoon.train.workflow import members as members_module
+from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.config import ConfigError, resolve_config
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
@@ -99,7 +100,7 @@ class _Workflow(GroupRolloutWorkflow):
     def compute_baselines(self, results):
         baselines = super().compute_baselines(results)
         rewards = [(result.task_reward, result.task_reward_valid) for result in results]
-        self.baselines.append((workflow_module.current_entry(), self.config.leave_one_out_baseline, rewards, baselines))
+        self.baselines.append((context_module.current_entry(), self.config.leave_one_out_baseline, rewards, baselines))
         return baselines
 
 
@@ -181,7 +182,7 @@ def test_each_entry_s_groups_run_with_its_own_settings_within_the_concurrency_bu
             outcome_status="scored" if valid else "error",
         )
 
-    monkeypatch.setattr(workflow_module, "run_rollout_request", run_rollout_request)
+    monkeypatch.setattr(members_module, "run_rollout_request", run_rollout_request)
     trainer, _saves, logged = make_trainer(monkeypatch, config, training_client=TrainingClient())
     trainer.train_dataset = _rows(("quick", 4), ("slow", 4))
     llm = SimpleNamespace(version=0, model_name="m")
@@ -394,13 +395,19 @@ def test_a_capped_slow_label_never_stalls_the_other_label_under_a_staleness_boun
 
 def test_rollout_permits_admit_whole_groups_first_come_first_served():
     async def run():
-        permits = rl_module._GroupPermits(12)
+        permits = PermitPool(12)
         order: list[str] = []
-        await permits.acquire(8)
+        first = permits.reserve(8)
 
-        async def take(name: str, count: int) -> None:
-            await permits.acquire(count)
+        async def take(name: str, count: int) -> DrawLease:
+            reservation = permits.reserve(count)
+            try:
+                await reservation.ready()
+            except BaseException:
+                reservation.withdraw()
+                raise
             order.append(name)
+            return reservation
 
         large = asyncio.create_task(take("large", 8))
         await asyncio.sleep(0)
@@ -411,12 +418,12 @@ def test_rollout_permits_admit_whole_groups_first_come_first_served():
         await asyncio.sleep(0)
         cancelled.cancel()
         await asyncio.gather(cancelled, return_exceptions=True)
-        permits.release(8)
-        await asyncio.gather(large, small)
+        first.withdraw()
+        granted = await asyncio.gather(large, small)
         assert order == ["large", "small"]
-        permits.release(8)
-        permits.release(4)
-        await asyncio.wait_for(permits.acquire(12), 1)  # nothing was lost to the cancelled waiter
+        for reservation in granted:
+            reservation.withdraw()
+        assert permits.reserve(12).startable  # nothing was lost to the cancelled waiter
 
     asyncio.run(run())
 
@@ -454,7 +461,7 @@ class _Trainer:
 
     built: list[_Trainer] = []
 
-    def __init__(self, *, config, train_dataset, eval_dataset, train_order) -> None:
+    def __init__(self, *, config, train_dataset, eval_dataset, train_order, train_sampling=None) -> None:
         self.config = config
         self.model_info = SimpleNamespace(model_name="m", llm=SimpleNamespace(version=0))
         self.run_log_path = str(Path(config.log_path, config.stats.experiment_name, config.stats.trial_name))

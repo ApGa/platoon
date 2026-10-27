@@ -61,7 +61,7 @@ cd platoon
 uv sync --extra tinker --extra ors
 ```
 
-Below 1.0, a minor release may change the API, so pin one (`platoon[tinker,ors]>=0.3,<0.4`);
+Below 1.0, a minor release may change the API, so pin one (`platoon[tinker,ors]>=0.4,<0.5`);
 [CHANGELOG.md](CHANGELOG.md) has the release notes.
 
 `platoon train`, `platoon eval` and `platoon rollout` need `TINKER_API_KEY` to sample the policy, and the Tinker
@@ -231,7 +231,7 @@ Harbor and platoon name the same things differently:
 
 | platoon | Harbor | What it is |
 |---|---|---|
-| environment | dataset | An `environments` entry with `service: harbor`: one dataset's tasks, their sandboxes and their grading. `dataset:` names it, as `hf://<org>/<name>@<commit>` or a directory |
+| environment | dataset | An `environments` entry with `service: harbor`: one dataset's tasks, their sandboxes and their grading. `dataset:` names it, as `hf://<org>/<name>@<commit>`, a Harbor Hub package (`harbor://<org>/<name>@<ref>`), a git directory (`git+<url>@<commit>#<path>`) or a directory |
 | harness | agent | What plays each task, in the task's sandbox (`harness:`): `platoon-bash`, `mini-swe-agent@2.4.6`, `openhands@1.54.0.post2` or your own |
 | provider | environment | The container runtime that starts each sandbox: `docker`, `singularity` or `enroot`, named by the site profile, or by `provider` in an entry's `service_kwargs` |
 | task | task | One task directory: `task.toml`, `instruction.md`, `environment/`, `tests/` and `solution/` |
@@ -309,7 +309,7 @@ the problem, and so does an option a harness does not take (`harness_options`, w
 | `platoon/harness/` | the agent contract, function harnesses, TOML specs and their runner, subagents, budgets, verifiers and the built-in harnesses |
 | `platoon/gateway/` | the model gateway: rendering, sampling, parsing and recording every model call, and the MCP tool plane |
 | `platoon/programs.py`, `platoon/gym.py` | episode programs, and adapters from step environments |
-| `platoon/train/tinker/` | the Tinker trainer, rollout workflows, credit assignment and rollout workers |
+| `platoon/train/` | training: the trainer (`trainer/`), a training step (`step/`), what starts the training groups (`dispatch/`), the rollout workflow (`workflow/`), credit assignment (`credit/`), the rollout workers (`workers/`), checkpoints (`checkpoints/`), evaluation during training (`evaluation/`), the config and task selection; the policy client and its renderers (`tinker/`) |
 | `platoon/eval/` | `platoon eval` |
 | `platoon/sandbox/` | task sandboxes: `process`, `docker`, `singularity` and `enroot` |
 | `platoon/hooks.py` | named hooks through which extensions plug into core |
@@ -361,7 +361,8 @@ their modules are imported, and harnesses, programs and environment services are
 
 Platoon is released under the MIT License; see [`LICENSE`](LICENSE). Its tool-call parsers follow SGLang's, which
 are licensed under the Apache License 2.0; see their
-[`NOTICE`](platoon/train/tinker/renderers/tool_parsers/NOTICE).
+[`NOTICE`](platoon/train/tinker/renderers/tool_parsers/NOTICE). Some test fixtures are copies of Harbor's files,
+which are licensed under the Apache License 2.0 too; see their [`NOTICE`](tests/envs/fixtures/harbor-compose/NOTICE).
 
 ## Citation
 

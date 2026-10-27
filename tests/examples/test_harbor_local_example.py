@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import sys
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,8 @@ def test_eval_solves_the_runnable_task_in_a_process_sandbox(tmp_path, capsys, sc
             str(EXAMPLE / "eval.yaml"),
             f"environments.0.service_kwargs.dataset_dir={TASKS}",
             "environments.0.service_kwargs.provider=process",
+            # The process provider runs stacks, unlike the example's providers: refuse them, as those do.
+            "environments.0.service_kwargs.stacks=refuse",
             f"environments.0.service_kwargs.provider_options={{root: {tmp_path / 'sandboxes'}}}",
             f"inference.output_dir={results}",
             "inference.workflow.rollout_config.timeout=120",
@@ -130,13 +133,34 @@ def test_eval_solves_the_runnable_task_in_a_process_sandbox(tmp_path, capsys, sc
     )
 
 
-def test_a_task_with_a_compose_file_is_refused_with_the_reason():
+@pytest.mark.parametrize(
+    ("provider", "reason"),
+    [
+        # Docker runs stacks, but not one whose sidecar runs its registry image's own command, which is not recorded.
+        (
+            "docker",
+            r" whose service db runs the command of its registry image postgres:16, which platoon does not know",
+        ),
+        # Singularity runs stacks as hpc-sandbox 0.5's pods, and none with 0.4.0, which has no pods.
+        (
+            "singularity",
+            r", and the singularity provider runs a multi-container stack as an hpc-sandbox pod, and the installed "
+            r"hpc-sandbox \(0\.4\.0\) has no pods: install hpc-sandbox 0\.5",
+        ),
+    ],
+)
+def test_a_task_with_a_compose_file_is_refused_with_the_reason(provider: str, reason: str, monkeypatch):
     from platoon.envs.harbor import HarborEnvironmentService
+    from platoon.sandbox import compose
 
-    service = HarborEnvironmentService(dataset_dir=TASKS, provider="process")
+    monkeypatch.setattr(compose, "compose_refusal", lambda binary: None)  # a docker CLI with compose, if there is one
+    hpc_sandbox = types.ModuleType("hpc_sandbox")  # one without the pods that the singularity provider runs stacks as
+    monkeypatch.setattr(hpc_sandbox, "__version__", "0.4.0", raising=False)
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", hpc_sandbox)
+    service = HarborEnvironmentService(dataset_dir=TASKS, provider=provider)  # never built: listing runs nothing
 
     assert asyncio.run(service.list_tasks("eval")) == ["write-greeting"]
-    with pytest.raises(ValueError, match=r"multi-container stack .* \(RFC 0010\)"):
+    with pytest.raises(ValueError, match=r"multi-container stack \(sidecar services\)" + reason):
         asyncio.run(service.get_task("needs-a-database"))
 
 
