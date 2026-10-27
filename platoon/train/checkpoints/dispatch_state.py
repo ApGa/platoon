@@ -52,10 +52,15 @@ def state_name(start: int, checkpoint: str) -> str:
 
 
 def save_state(
-    run_dir: str | os.PathLike[str], checkpoint: str, state: Mapping[str, Any], kept: Sequence[tuple[Key, Any]]
+    run_dir: str | os.PathLike[str],
+    checkpoint: str,
+    state: Mapping[str, Any],
+    kept: Sequence[tuple[Key, Any]],
+    shares: Mapping[Key, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Write what checkpoint ``checkpoint`` saves of the dispatcher: the groups it keeps (``kept``, as
-    :meth:`Dispatcher.kept` gives them; those that can be kept) to ``tasks/kept-s<start>-<checkpoint>.json.gz``, then
+    :meth:`Dispatcher.kept` gives them; those that can be kept, with what each policy did with its share when the
+    policies step independently, ``shares``) to ``tasks/kept-s<start>-<checkpoint>.json.gz``, then
     its state (``state``, :meth:`Dispatcher.state`'s, which names that file with its SHA-256) to
     ``tasks/dispatch-s<start>-<checkpoint>.json``, and return the record the checkpoint's row keeps in ``loop_state``
     (``dispatch``): ``{file, sha256, format, start}``, and the kept groups' file (``kept``) when there is one.  Kept
@@ -67,7 +72,7 @@ def save_state(
 
     try:
         start = int(state["start"])
-        kept_record = write_kept_groups(run_dir, start, checkpoint, kept)
+        kept_record = write_kept_groups(run_dir, start, checkpoint, kept, shares)
         content = json.dumps(
             {"format": STATE_FORMAT, **state, "kept": kept_record}, separators=(",", ":"), allow_nan=False
         )

@@ -347,7 +347,7 @@ def test_the_step_clock_advances_the_step_then_the_horizon_then_the_event_then_t
 def test_every_trained_policy_steps_on_the_run_s_one_clock():
     clock = StepClock(step=0, updated=asyncio.Event())
     policies: Any = SimpleNamespace(trainable=lambda: [SimpleNamespace(id=MAIN), SimpleNamespace(id="worker")])
-    run: Any = SimpleNamespace(policies=policies, clock=clock)
+    run: Any = SimpleNamespace(policies=policies, clock=clock, _own=None)  # its policies step in lockstep
     clocks = TrainerRun.clocks.fget(run)
     assert list(clocks) == [MAIN, "worker"] and all(each is clock for each in clocks.values())
 

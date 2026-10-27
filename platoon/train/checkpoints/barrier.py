@@ -55,10 +55,11 @@ def policy_dir(run_dir: str, policy: PolicyId) -> str:
 
 class Counters(NamedTuple):
     """What a policy's row of a checkpoint records of it: the version its saved weights are published at, and the
-    optimizer steps it took."""
+    optimizer steps it took; stepping independently, its own step at the row (None: the checkpoint's)."""
 
     version: int
     optimizer_steps: int
+    step: int | None = None
 
 
 async def save_others(

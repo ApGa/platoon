@@ -21,6 +21,7 @@ same names.
 """
 
 import asyncio
+import functools
 import logging
 import os
 from collections.abc import Mapping
@@ -57,6 +58,7 @@ from platoon.train.policy.set import PolicySet
 from platoon.train.policy.spec import MAIN, PolicyId, agent_bindings, policy_specs
 from platoon.train.sampler_runtime import SamplerSet, TaskSampling
 from platoon.train.startup import RolloutStartup
+from platoon.train.step import independent as _independent  # noqa: F401 - loaded with the trainer, for the old paths
 from platoon.train.step import publish
 from platoon.train.step.batch_transforms import BatchTransform, build_default_batch_transforms
 from platoon.train.task_records import TaskRecorder
@@ -178,9 +180,11 @@ class PlatoonTinkerRLTrainer(TrainerBase):
     def needs(cls, config: Any, options: Any) -> TrainerNeeds:
         """It trains on rollouts of the run's training tasks.  Its steps are not atomic and its updates do not fail
         closed (RFC 0021, open question 8): an interrupt inside a step saves ``<step>_interrupted``, and nonfinite
-        optimizer metrics are logged, as they always were.  A subclass may ask for both."""
+        optimizer metrics are logged, as they always were.  A subclass may ask for both.  Its policies step as
+        ``train.stepping`` says (lockstep, asked without a config)."""
 
-        return TrainerNeeds(rollouts=True, atomic_steps=False, fail_closed_updates=False)
+        stepping = config.train.stepping if config is not None else "lockstep"
+        return TrainerNeeds(rollouts=True, atomic_steps=False, fail_closed_updates=False, stepping=stepping)
 
     @classmethod
     def from_setup(cls, setup: TrainerSetup) -> Self:
@@ -388,7 +392,16 @@ class PlatoonTinkerRLTrainer(TrainerBase):
             max_staleness=max_staleness,
             # Sessions on the service the policy trains on, as its spec read it when the trainer was built.
             service_client_factory=self._leader().new_service_client,
+            **self._pins(self.policies.leader),
         )
+
+    def _pins(self, policy: PolicyId) -> dict[str, Any]:
+        """When the run's policies step independently, what its pruner never deletes of ``policy``'s rows: those a
+        commit names (``pinned``, :meth:`~platoon.train.checkpoints.commits.Commits.pinned`); nothing more in
+        lockstep."""
+
+        commits = self._run.checkpoints.commits if self._run is not None else None
+        return {} if commits is None else {"pinned": functools.partial(commits.pinned, policy)}
 
     def _start_policy_pruning(self) -> dict[PolicyId, RecoveryCheckpointPruner]:
         """The pruner of the recovery checkpoints of each trained policy but the leader (``checkpoint.keep_recovery``),
@@ -401,7 +414,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         if keep is None or largest is None:  # loading refuses keep_recovery without max_staleness
             return {}
         return {
-            policy.id: _policy_pruner(self.run_log_path, policy, keep=keep, largest=largest)
+            policy.id: _policy_pruner(self.run_log_path, policy, keep=keep, largest=largest, pins=self._pins(policy.id))
             for policy in self.policies.trainable()
             if policy.id != self.policies.leader
         }
@@ -584,14 +597,17 @@ class PlatoonTinkerRLTrainer(TrainerBase):
 
     async def ready(self, run: TrainerRun) -> None:
         """7. What the train and evaluation loops share (:meth:`_loop_state`), once the harness toolchains are staged;
-        its clock, which it starts where the start's steps begin, is the run's.  The node services' failure, from now
-        on, stops the steps (:meth:`RolloutStartup.on_node_service_failure`)."""
+        its clock, which it starts where the start's steps begin, is the run's, and, when the trained policies step
+        independently, the leader's, beside each other policy's own (:meth:`TrainerRun.clocks_from`).  The node
+        services' failure, from now on, stops the steps (:meth:`RolloutStartup.on_node_service_failure`)."""
 
         self._shared_state = await self._loop_state(
             run.start, run.shutdown, self._train_dataloader, self._startup, end_batch=run.plan.end_step
         )
         assert self._shared_state.clock is not None  # the loop state is given its clock
         run.clock = self._shared_state.clock
+        if run.independent:  # each trained policy on its own clock, the leader's the loops' one
+            self._shared_state.clocks = run.clocks_from(run.clock)
         # Node services that fail for good stop the steps at the next boundary, as a first signal does; the start then
         # fails with why (_execute).
         self._startup.on_node_service_failure(lambda why: run.shutdown.set())
@@ -762,8 +778,12 @@ class PlatoonTinkerRLTrainer(TrainerBase):
             await pruner.aclose()
 
 
-def _policy_pruner(run_dir: str, policy: Policy, *, keep: int, largest: int) -> RecoveryCheckpointPruner:
-    """The pruner of a trained policy's recovery checkpoints other than the leader's (:meth:`_start_policy_pruning`)."""
+def _policy_pruner(
+    run_dir: str, policy: Policy, *, keep: int, largest: int, pins: Mapping[str, Any]
+) -> RecoveryCheckpointPruner:
+    """The pruner of a trained policy's recovery checkpoints other than the leader's (:meth:`_start_policy_pruning`):
+    in lockstep, it keeps the rows that the leader rows a resume may take name; stepping independently, those a commit
+    names (``pins``)."""
 
     own = policy.spec.max_staleness
     return RecoveryCheckpointPruner(
@@ -771,7 +791,7 @@ def _policy_pruner(run_dir: str, policy: Policy, *, keep: int, largest: int) -> 
         keep=keep,
         max_staleness=own if own is not None else largest,
         service_client_factory=policy.new_service_client,
-        named=lambda: named_state_paths(run_dir, policy.id, keep=keep),
+        **(pins or {"named": lambda: named_state_paths(run_dir, policy.id, keep=keep)}),
     )
 
 

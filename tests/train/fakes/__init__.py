@@ -14,6 +14,8 @@
 - ``loop``: the rl trainer's train loop over groups a test scripts, without the start's dispatcher or saves;
 - ``runs``: the runs the dispatch, task and workflow tests drive: groups that say which rows a step trained, the
   training client that records them, one start on the fake service, and what a crash after a checkpoint leaves;
+- ``independent``: starts of two policies that step independently on two fake services whose training clients
+  remember what each saved state trained (its lineage), for the independent stepping and commit tests;
 - ``members``: the group workflow with scripted members, for the tests of the rollout permits, the start limit and
   the startup permit;
 - ``dispatcher``: the dispatcher's rows, recorder and samplers, for the dispatcher's own tests;

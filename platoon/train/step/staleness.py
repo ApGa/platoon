@@ -177,7 +177,10 @@ class StaleWatch:
             return None
         shares: Counter[str] = Counter()
         for _groups, _stale, blocked in self._window:
-            shares.update({key.rsplit("/", 1)[-1]: share / STALE_WINDOW for key, share in blocked.items()})
+            # Under independent stepping each policy's horizon has a share of its own (horizon:<policy>), which
+            # "horizon" sums.
+            reasons = {key.rsplit("/", 1)[-1]: share for key, share in blocked.items()}
+            shares.update({reason: share / STALE_WINDOW for reason, share in reasons.items() if ":" not in reason})
         horizon = shares["horizon"]
         binding = max(shares, key=lambda reason: shares[reason], default=None)
         if binding is not None and shares[binding] > 0:

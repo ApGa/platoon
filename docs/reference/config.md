@@ -29,6 +29,7 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 - [`EvalOverrides`](#evaloverrides)
 - [`AgentTreeConfig`](#agenttreeconfig)
 - [`WandBConfig`](#wandbconfig)
+- [`PolicyCheckpointConfig`](#policycheckpointconfig)
 - [`AgentRoleConfig`](#agentroleconfig)
 - [`RolloutConfig`](#rolloutconfig)
 - [`StragglerPolicy`](#stragglerpolicy)
@@ -91,6 +92,7 @@ other than `rl`, it declares the policy that trainer trains, and the keys only `
 | `num_microbatches` | int | `1` | Number of microbatches per minibatch. Minibatch must be divisible by num_microbatches. Used for gradient accumulation --> A single weight update per microbatch. With tinker, gradient accumulation is less important, but this may still be useful for streaming to overlap rollout sampling with forward backward computation within the same batch. |
 | `max_staleness` | int \| None | `null` | How many training steps the rollouts of a batch may run ahead of the trained policy, and how many policy versions old a group may be and still train (None: no limit): at most `max_staleness + 1` batches of groups are started and not yet trained. An environment entry may raise its own groups' bound (`environments[].max_staleness`); the run's stays the bound on how far rollouts run ahead. |
 | `stale_filter` | "group" \| "datum" | `"group"` | How the stale filter judges a group against its bound (experimental): `group` (the default) by its oldest datum, dropping the whole group when that one is too old; `datum` each datum by the oldest policy version its own model calls sampled, dropping only the datums that are too old, the others keeping the advantages their group's credit gave them, and the whole group only when every datum is. A rollout that spans a published policy then keeps the datums it sampled since. Under `datum` a workflow that does not stamp each datum with its own version (`GroupRolloutWorkflow` does) has each datum judged by its rollout's (see docs/how-to/train-and-eval.md). |
+| `stepping` | "lockstep" \| "independent" | `"lockstep"` | How the run's trained policies step, when it trains several (experimental): `lockstep` (the default), every policy in each step, on its rows of the step's batch_size groups, each checkpoint saving them all; or `independent`, each policy on its own clock, with its own batch (`policies.<id>.batch_size`), staleness bound and checkpoint cadence (`policies.<id>.checkpoint`), no policy waiting for another's training or saves, and every full save of any policy a point a resume can start from. With one trained policy both are the same. A resume keeps the run's stepping. Only the rl trainer reads it: trainer: sft, which trains one policy, refuses it. See docs/how-to/train-and-eval.md. |
 | `optimizer` | [AdamParams](#adamparams) | `AdamParams()` |  |
 | `loss_fn` | str | `"cispo"` | Tinker loss function, for example `cispo` or `importance_sampling`. |
 | `loss_fn_config` | dict | `{"clip_low_threshold": 0.0, "clip_high_threshold": 5.0}` | Keyword arguments of the loss function. A config's loss_fn_config replaces this default whole, so it names every key its loss takes (cispo: both thresholds); the Tinker service fills a missing one with its own default. |
@@ -256,9 +258,10 @@ The `watchdog:` section: a timer that ends a training process that stops making 
 In a training config: `policies.<key>`.
 
 A `policies:` entry: a model the run trains, samples or scores with besides `main`, under `train:`'s names
-for the same settings (experimental).  A policy the run trains (`trainable`, the default) steps in lockstep with
-main: each step trains every trained policy on its rows of the step's groups, each on its own Tinker service with
-its own optimizer and loss, and each checkpoint saves them all.  A frozen one (`trainable: false`) is sampled by
+for the same settings (experimental).  A policy the run trains (`trainable`, the default) steps with main, in
+lockstep (`train.stepping`, the default: each step trains every trained policy on its rows of the step's groups,
+and each checkpoint saves them all) or on its own clock (`independent`: its own batch and checkpoint cadence),
+each on its own Tinker service with its own optimizer and loss.  A frozen one (`trainable: false`) is sampled by
 the agents `agents:` binds to it or scores for a credit estimator (a teacher), and is never stepped, saved or
 pruned.
 
@@ -278,6 +281,8 @@ pruned.
 | `loss_fn` | str \| None | `null` | The loss a trained policy's rows train under, as train.loss_fn (None: train.loss_fn), and its keyword arguments (None: train.loss_fn_config when the loss is train.loss_fn's, else none, the loss's own defaults). |
 | `loss_fn_config` | dict \| None | `null` |  |
 | `max_staleness` | int \| None | `null` | How many of the trained policy's own versions old its rows may be and still train (None: their entry's bound, else train.max_staleness). The dispatcher's horizon counts the smallest bound of the trained policies that agents sample, train.max_staleness included when main's is unset. |
+| `batch_size` | int \| None | `null` | Under train.stepping: independent, how many of the policy's shares (its rows of a group) each of its steps trains (None: train.batch_size); a smaller batch steps more often. |
+| `checkpoint` | [PolicyCheckpointConfig](#policycheckpointconfig) \| None | `null` | Under train.stepping: independent, when the policy saves full checkpoints, counted in its own steps (None: the run's checkpoint.every and checkpoint.recovery_every, in its steps). |
 
 <a id="agentsconfig"></a>
 
@@ -488,6 +493,22 @@ Configuration for Weights & Biases logging.
 | `api_key` | str \| None | `null` | API key (None: `WANDB_API_KEY`). |
 | `base_url` | str \| None | `null` | URL of a self-hosted W&B server. |
 | `resume_run_id` | str \| None | `null` | W&B run id to resume. |
+
+<a id="policycheckpointconfig"></a>
+
+## PolicyCheckpointConfig
+
+`platoon.train.config_defs.PolicyCheckpointConfig`
+
+In a training config: `policies.<key>.checkpoint`.
+
+`policies.<id>.checkpoint`: when a policy the run trains saves full checkpoints, under `train.stepping: independent`, counted in its own steps.  A key left out is the run's (`checkpoint.every`, in steps, and
+`checkpoint.recovery_every`).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `every` | int \| None | `null` | Its own steps between permanent checkpoints; 0 saves none (None: checkpoint.every, in steps). |
+| `recovery_every` | int \| None | `null` | Its own steps between recovery checkpoints (None: checkpoint.recovery_every). With checkpoint.keep_recovery, keep_recovery × this must exceed the policy's bound (its max_staleness, else the run's largest), which its own pruner keeps. |
 
 <a id="agentroleconfig"></a>
 
@@ -803,7 +824,7 @@ valid result censored, and a task whose last 3 groups had no valid member drawn 
 
 ## Trainers
 
-`trainer:` chooses how a run trains, and `trainer_options` sets the trainer's options. Core's trainers are below ([Fine-tune on a dataset](../how-to/train-and-eval.md#fine-tune-on-a-dataset) for `sft`). Under a trainer other than `rl`, the `train:` keys that only `rl` reads are refused when set: `batch_size`, `num_epochs`, `max_training_steps`, `num_minibatches`, `num_microbatches`, `max_staleness`, `stale_filter`, `loss_fn`, `loss_fn_config`, `workflow_config`, `max_concurrent_rollouts`, `permit_release`, `max_starting_rollouts`, `label_by`, `rollout_group_limits`, `task_sampler`, `task_sampler_options`, `group_admission`, `group_admission_options`, `refill`.
+`trainer:` chooses how a run trains, and `trainer_options` sets the trainer's options. Core's trainers are below ([Fine-tune on a dataset](../how-to/train-and-eval.md#fine-tune-on-a-dataset) for `sft`). Under a trainer other than `rl`, the `train:` keys that only `rl` reads are refused when set: `batch_size`, `num_epochs`, `max_training_steps`, `num_minibatches`, `num_microbatches`, `max_staleness`, `stale_filter`, `stepping`, `loss_fn`, `loss_fn_config`, `workflow_config`, `max_concurrent_rollouts`, `permit_release`, `max_starting_rollouts`, `label_by`, `rollout_group_limits`, `task_sampler`, `task_sampler_options`, `group_admission`, `group_admission_options`, `refill`.
 
 | Trainer | What it trains on | Options |
 |---|---|---|

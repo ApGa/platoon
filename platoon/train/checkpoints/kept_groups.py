@@ -18,6 +18,11 @@ step after a resume consumes it as failed, as the run would have without one.  A
 kept: a resume draws its task again.  The file is gzip-compressed JSON, as the snapshot is JSON: no pickle, so reading
 a run directory runs no code.  Writing it costs about ten bytes per token of the groups it keeps, which every full save
 writes again while they wait for a step.
+
+When the run's trained policies step independently, a group stays kept until each policy that consumed its share has
+saved (:mod:`platoon.train.dispatch.shares`), and its record also holds what each policy did with its share,
+``shares: {policy: {step, age, fate} | null}``, and whether its fate was recorded, ``recorded`` (:func:`kept_shares`);
+a record without them is a group no policy consumed.
 """
 
 from __future__ import annotations
@@ -103,12 +108,17 @@ def write_kept(run_dir: str | os.PathLike[str], name: str, groups: Sequence[Mapp
 
 
 def write_kept_groups(
-    run_dir: str | os.PathLike[str], start: int, checkpoint: str, kept: Sequence[tuple[tuple[int, int], Any]]
+    run_dir: str | os.PathLike[str],
+    start: int,
+    checkpoint: str,
+    kept: Sequence[tuple[tuple[int, int], Any]],
+    shares: Mapping[tuple[int, int], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Write the groups that start ``start``'s checkpoint ``checkpoint`` keeps (``kept``: ``(key, item)`` each, an item
-    as a step dequeues it, with its ``entry``, ``label``, ``record`` and ``rollout``), those that can be kept, and
-    return :func:`write_kept`'s record; None when none can, or, with a warning, when the disk refuses the file: a
-    resume from the checkpoint then rolls their tasks out again."""
+    as a step dequeues it, with its ``entry``, ``label``, ``record`` and ``rollout``), those that can be kept, each with
+    its ``shares`` and ``recorded`` when the policies step independently (``shares``, by key), and return
+    :func:`write_kept`'s record; None when none can, or, with a warning, when the disk refuses the file: a resume from
+    the checkpoint then rolls their tasks out again."""
 
     groups = []
     for key, item in kept:
@@ -124,6 +134,8 @@ def write_kept_groups(
             logger.warning("Cannot keep the settled group %s with checkpoint %s", key, checkpoint, exc_info=True)
             group = None
         if group is not None:
+            if shares is not None and key in shares:
+                group.update(shares[key])
             groups.append(group)
     if not groups:
         return None
@@ -138,6 +150,22 @@ def write_kept_groups(
             exc,
         )
         return None
+
+
+def kept_shares(groups: Sequence[Mapping[str, Any]]) -> dict[tuple[int, int], dict[str, Any]]:
+    """What each kept group of a run that steps independently records of its shares (``shares`` and ``recorded``), by
+    key, for the groups whose record has them; a ``ValueError`` for data it cannot read."""
+
+    found = {}
+    for group in groups:
+        if "shares" not in group:
+            continue
+        try:
+            start, seq = group["key"]
+            found[(int(start), int(seq))] = {"shares": dict(group["shares"]), "recorded": bool(group.get("recorded"))}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"cannot read a kept group's shares: {type(exc).__name__}: {exc}") from exc
+    return found
 
 
 def read_kept(run_dir: str | os.PathLike[str], record: Mapping[str, Any]) -> list[dict[str, Any]]:

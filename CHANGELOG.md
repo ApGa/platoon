@@ -497,13 +497,52 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   trains several policies (`run.learner`, `run.end_step()`) saves one checkpoint of them all on the cadence.
   Loading, and `platoon config validate`, refuse a trained policy that no agent samples, a frozen `agents.policy`, a
   frozen policy with a trained policy's keys, `load_optimizer_state` without `load_checkpoint_path`, an out-of-range
-  key, naming its policy (`policies.<id>: ...`), and a policy's `batch_size` or `checkpoint`, which arrive with
-  independent stepping (RFC 0021's milestone B4b); `identity.json` records each policy's training, and a resume that
-  changes it stops with exit code 78 ([Train several policies in
+  key, naming its policy (`policies.<id>: ...`), and, in lockstep, a policy's `batch_size` or `checkpoint`, which
+  are for policies that step on their own clocks (below); `identity.json` records each policy's training, and a resume
+  that changes it stops with exit code 78 ([Train several policies in
   lockstep](docs/how-to/train-and-eval.md#train-several-policies-in-lockstep-experimental);
   [`examples/two-agent-lockstep`](examples/two-agent-lockstep/README.md) trains the subagents example's delegator
   and its workers as two policies, on one service and on two). A run of one trained policy runs as before, request
   for request.
+- **Each trained policy may step on its own clock (experimental).** `train.stepping: independent` (default: `lockstep`)
+  lets each trained policy step, publish and save on its own clock (RFC 0021, section 2.11; RFC 0003's milestone M2),
+  with its own batch (`policies.<id>.batch_size`, else `train.batch_size`), staleness bound and checkpoint cadence in
+  its own steps (`policies.<id>.checkpoint: {every, recovery_every}`, else `checkpoint.*`), and no policy waits for
+  another's training or saves; with one trained policy it is lockstep, and a trainer's needs say which clocks the run
+  builds (`TrainerNeeds.stepping`, the rl trainer's `train.stepping`). Each group is credited once and then splits into
+  a share per trained policy, its rows of the group, and always one of `main`'s, so that the plan counts every group,
+  `train.batch_size` per `main` step; each policy's steps take its shares in the order they settled from the run's share
+  ledger (`source.ledger`; a trainer of its own takes them through `platoon.experimental.ShareLedger`'s `take`,
+  `judge_version`, `consumed` and `lock`); the dispatcher keeps a horizon per policy, `(k + 1) x batch` of its shares,
+  and starts a group only when every one has room (`train/dispatch/blocked_share/horizon:<id>` names the one that held
+  it back). Each policy judges its own shares against its own version and bound, and publishes after each of its steps.
+  Every full save of any policy is a commit: it captures the run's draws, the groups not yet retired with what each
+  policy did with its share (its step and its age then) and every other policy's newest row and published version under
+  a commit lock, which each group's settling and each step's consumption take too, once no step's end runs its step
+  hooks; then writes them and the policy's weights; then appends the policy's row to its own `checkpoints.jsonl`
+  (another policy's named with its id, `recovery-<id>-<step>`), with `commit_seq` and every policy's row
+  (`loop_state.policies`, with `published_version` and `step`). A group stays kept until each policy that consumed its
+  share has saved after that step (`run/retained_groups`), and pruners keep the rows a commit in flight, or the newest
+  commit of some policy's file, names. A resume takes the commit with the highest `commit_seq` whose named rows hold,
+  each policy going on from the row it names, at one version more than the commit records it published when that is past
+  the row's, and each share it consumed after its row trains again at the age it had (`policies/<id>/retrained_shares`);
+  numbers go on after the highest in any file. Each step logs a row of its own without a W&B step of its own
+  (`StatsLogger.log_row`): `main`'s with its names and `run/step`, every other policy's under `policies/<id>/` with
+  `policies/<id>/step`, and `policies/<id>/share_wait_s` and `policies/<id>/peer_lag/<q>` for each; evaluations count
+  `main`'s steps and record `versions_end` when a policy published while they ran. Step hooks run at the end of each
+  policy's own step (`StepEnd.policy`) and may update that policy only, through their end (`run.learner` sends nothing
+  from them); a commit saves a hook's state as it is then, while every other policy resumes from the older row the
+  commit names, so a hook keeps what moves at a policy's step ends by that policy's step and takes it up at
+  `start.policies[<id>].step`. A stop request ends each policy's loop at its step's end; a step that waits for shares
+  once a stopped policy's horizon is full closes short. Loading refuses, besides lockstep's, a policy's batch that its
+  steps' minibatches and microbatches do not divide, a group admission rule other than `all`, a
+  `checkpoint.keep_recovery` that a policy's own `recovery_every` (else the run's) does not span past its bound, and
+  `train.stepping` under `trainer: sft`, which trains one policy, and warns of a trained policy that saves no full
+  checkpoint before the run's end; a start checks the same against its trainer's needs. `identity.json` records
+  `stepping: independent`, and a resume that changes the stepping stops with exit code 78 ([Step each policy on its own
+  clock](docs/how-to/train-and-eval.md#step-each-policy-on-its-own-clock-experimental);
+  [`examples/two-agent-independent`](examples/two-agent-independent/README.md) steps the subagents example's worker
+  about four times for each of its delegator's steps). With `train.stepping` unset, every run is as before.
 
 ### Changes
 

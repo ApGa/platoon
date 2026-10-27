@@ -78,6 +78,8 @@ class StatsLogger:
         self.start_time = time.perf_counter()
         self._last_log_step = -1
         self._wandb_run = None
+        # The axes and the metric prefixes whose axis W&B was told (log_row).
+        self._defined: set[str] = set()
 
         self._init_logging()
 
@@ -204,6 +206,33 @@ class StatsLogger:
             except Exception as e:
                 logger.warning(f"Failed to log to WandB: {e}")
 
+    def log_row(self, stats: dict[str, float], *, axis: str) -> None:
+        """Log one row without a W&B step of its own, as the rows of policies that step each on its own clock are
+        logged: W&B numbers the rows, and each metric plots against the row's ``axis``, one of its metrics (such as
+        ``policies/worker/step``), which W&B is told once per metric prefix (``define_metric``): the two-level prefix
+        of a ``policies/<id>/...`` name, else the first level.  A row on the run's axis, not a policy's own
+        (``policies/<id>/...``), adds ``time/elapsed_seconds``, as :meth:`log` does.  No log interval applies."""
+
+        stats = dict(stats)
+        if not axis.startswith("policies/"):
+            stats["time/elapsed_seconds"] = time.perf_counter() - self.start_time
+        if self.config.print_stats:
+            self._print_stats(int(stats.get(axis, 0)), None, stats)
+        if self._wandb_run is None:
+            return
+        try:
+            import wandb
+
+            if axis not in self._defined:
+                wandb.define_metric(axis)
+                self._defined.add(axis)
+            for prefix in sorted({_metric_prefix(key) for key in stats} - self._defined):
+                wandb.define_metric(f"{prefix}/*", step_metric=axis)
+                self._defined.add(prefix)
+            wandb.log(stats)
+        except Exception as e:
+            logger.warning(f"Failed to log to WandB: {e}")
+
     def _print_stats(self, step: int, epoch: int | None, stats: dict[str, float]):
         """Print stats to console in a formatted table."""
         header = f"Step {step}"
@@ -268,3 +297,11 @@ class StatsLogger:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+
+
+def _metric_prefix(key: str) -> str:
+    """The prefix whose metrics share an axis (:meth:`StatsLogger.log_row`): ``policies/<id>`` for a policy's own
+    metrics, else the name's first level."""
+
+    parts = key.split("/")
+    return "/".join(parts[:2]) if parts[0] == "policies" and len(parts) > 2 else parts[0]

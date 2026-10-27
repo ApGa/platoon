@@ -2,8 +2,9 @@
 and a plugin never imports a trainer.
 
 =========  ============================================================================================================
-generic    ``policy/``, ``objectives/``, ``trainer/{api,run,registry,hooks,signals,waiting}.py``, ``dispatch/``,
-           ``checkpoints/``, ``evaluation/``, ``workers/``, ``supervised/``, and the flat modules but ``launch.py``
+generic    ``policy/``, ``objectives/``, ``trainer/{api,run,clocks,registry,hooks,signals,waiting}.py``,
+           ``dispatch/``, ``checkpoints/``, ``evaluation/``, ``workers/``, ``supervised/``, and the flat modules but
+           ``launch.py``
 trainers   ``trainer/{rl,loops,state,sft,interleaved}.py``, ``step/``
 plugins    ``workflow/``, ``credit/``
 =========  ============================================================================================================
@@ -23,7 +24,7 @@ import importlib.util
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[2] / "platoon" / "train"
-GENERIC_TRAINER_MODULES = {"api", "run", "registry", "hooks", "signals", "waiting"}
+GENERIC_TRAINER_MODULES = {"api", "run", "clocks", "registry", "hooks", "signals", "waiting"}
 TRAINER_MODULES = {"rl", "loops", "state", "sft", "interleaved"}
 GENERIC_PACKAGES = {"policy", "objectives", "dispatch", "checkpoints", "evaluation", "workers", "supervised"}
 PLUGIN_PACKAGES = {"workflow", "credit"}

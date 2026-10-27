@@ -53,6 +53,15 @@ the capped labels' running groups and the slots they hold fit in ``k`` batches, 
 batch of the horizon; with ``k = 0`` there is no slot to hold, and a capped label starts at most its limit of groups
 each step.
 
+**Independent stepping.**  When the run's trained policies step each on its own clock (``train.stepping:
+independent``), each settled group is split into shares, one per trained policy with rows in it and always one of the
+leader's (:mod:`platoon.train.dispatch.shares`), and each such policy has a horizon of its own instead of the one above
+(:mod:`platoon.train.dispatch.horizons`): a group starts only when every horizon has room for it, and the leader's
+remaining steps bound the plan, ``batch_size`` groups each.  ``pipeline`` then counts the groups running, and each
+horizon the shares settled and taken; a group's settling hands it to the run's share ledger in place of the result
+queue.  Each step's metrics name the horizon that held the dispatcher back
+(``dispatch/blocked_share/horizon:<policy>``).
+
 **Exact resume.**  What a full checkpoint saves of the dispatcher, and how a start that resumes takes it up, is
 :mod:`platoon.train.checkpoints.dispatch_state`'s: every draw is numbered and stamped on its row, and the
 dispatcher keeps every draw no committed step consumed (outstanding) until a committed step consumes it.
@@ -87,6 +96,7 @@ from collections.abc import Awaitable, Callable, Container, Coroutine, Iterable,
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from platoon.train.dispatch.horizons import Horizons
 from platoon.train.dispatch.permits import DrawLease
 from platoon.train.sampler_runtime import Owed, SamplerSet
 from platoon.train.task_stats import MAIN
@@ -124,6 +134,13 @@ class RowReader(Protocol):
     def permits(self) -> Permits: ...
 
     def of(self, data: Mapping[str, Any]) -> tuple[str | None, str | None, int]: ...
+
+
+class SettledSink(Protocol):
+    """Where the dispatcher hands each group that settles: the result queue the steps dequeue from, or, when the run's
+    policies step independently, the share ledger, which splits it into shares."""
+
+    def put_nowait(self, item: Any) -> None: ...
 
 
 class DrawRecorder(Protocol):
@@ -214,7 +231,9 @@ class Dispatcher:
     - ``start`` numbers this start's draws, and the order starts at ``next_position``.
     - ``groups_per_step``: the cap of a run under a group admission rule.  With it, the dispatcher counts its steps as
       the module docstring says (None: every group counts toward the batch).
-    - ``permit_release`` is ``train.permit_release``."""
+    - ``permit_release`` is ``train.permit_release``.
+    - ``horizons``: each trained policy's horizon, when the run's policies step independently (None: the one horizon
+      of a run that steps in lockstep)."""
 
     def __init__(
         self,
@@ -239,6 +258,7 @@ class Dispatcher:
         step: int = 0,
         groups_per_step: int | None = None,
         permit_release: str = "group",
+        horizons: Horizons | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
@@ -294,7 +314,7 @@ class Dispatcher:
         self._next_seq = 0
         self._next_ticket = 0
         self._changed = asyncio.Event()
-        self.results: asyncio.Queue[Any] | None = None
+        self.results: SettledSink | None = None
         # Under a group admission rule: the step's cap, what it counted toward it, and the markers of the groups
         # rejected while it was current that wait in the result queue and freed their slots (a marker that keeps its
         # slot counts in the pipeline instead).
@@ -311,6 +331,10 @@ class Dispatcher:
         self._held_back_reason: str | None = None
         self._held_back_since = 0.0
         self._shares_since = time.monotonic()
+        # Each trained policy's horizon, under independent stepping (None: lockstep), which wakes the dispatcher.
+        self.horizons = horizons
+        if horizons is not None:
+            horizons.changed = self._changed.set
 
     # --- what the train loop tells it -------------------------------------------------------------------------------
 
@@ -350,6 +374,15 @@ class Dispatcher:
                 self._settled.pop(key, None)
                 self._outstanding.pop(key, None)
 
+    def policy_step_started(self, policy: str) -> None:
+        """Under independent stepping, the next step of ``policy`` started: its shares the last one took leave its
+        horizon, and the leader's counts one step of the plan, and of the steps the samplers' contexts carry."""
+
+        assert self.horizons is not None  # a run that steps independently built them
+        self.horizons.step_started(policy)
+        if policy == self.horizons.leader:
+            self.step += 1
+
     def step_started(self) -> None:
         """A new step starts, its policy published: the groups the last one dequeued no longer count."""
 
@@ -366,6 +399,8 @@ class Dispatcher:
         committed step consumes it."""
 
         self._settled[draw.key] = item
+        if self.horizons is not None:  # it no longer runs; the share ledger counts its shares on their horizons
+            self.pipeline -= 1
         if self.results is not None:
             self.results.put_nowait(item)
         self._changed.set()
@@ -387,12 +422,12 @@ class Dispatcher:
 
     # --- the loop ---------------------------------------------------------------------------------------------------
 
-    def bind(self, results: asyncio.Queue[Any]) -> None:
+    def bind(self, results: SettledSink) -> None:
         """Hand the dispatcher the queue its groups settle into, the groups a resume kept first, in the order they
         settled."""
 
         self.results = results
-        for item in self._settled.values():
+        for item in list(self._settled.values()):  # the share ledger retires a kept group that is wholly durable
             results.put_nowait(item)
 
     async def run(
@@ -445,6 +480,11 @@ class Dispatcher:
         rule, the last step's cap too), the horizon (at ``k = 0`` under a rule, the step's cap too), else the labels'
         limits."""
 
+        if self.horizons is not None:  # independent stepping: the plan, else the first horizon without room
+            if not self.horizons.plan_has_room(self.pipeline):
+                return "plan"
+            binding = self.horizons.binding(self.pipeline, self._capped_running())
+            return "labels" if binding is None else f"horizon:{binding}"
         if self.pipeline + self.admitted >= self._steps_left * self.batch_size:
             return "plan"
         if self._horizon_has_room():
@@ -460,6 +500,10 @@ class Dispatcher:
         self._hold_back(self._held_back_reason)
         window = max(1e-9, now - self._shares_since)
         shares = {f"dispatch/blocked_share/{why}": min(1.0, self._held_back[why] / window) for why in BLOCKED_REASONS}
+        if self.horizons is not None:  # each horizon's share, and theirs together as the horizon's
+            held = {policy: self._held_back[f"horizon:{policy}"] for policy in self.horizons.policies}
+            shares["dispatch/blocked_share/horizon"] = min(1.0, sum(held.values()) / window)
+            shares.update({f"dispatch/blocked_share/horizon:{p}": min(1.0, s / window) for p, s in held.items()})
         self._held_back.clear()
         self._shares_since = now
         return shares
@@ -475,6 +519,8 @@ class Dispatcher:
            next groups (:meth:`_held`).  For one of ``label``'s ``waiting`` draws, the slots held for ``label`` do not
            count: they are held for that draw.  Without a bound there is no horizon."""
 
+        if self.horizons is not None:
+            return self._horizons_have_room(label, waiting=waiting)
         in_use = self.pipeline + self.admitted
         if in_use >= self._steps_left * self.batch_size:
             return False
@@ -488,6 +534,26 @@ class Dispatcher:
         if waiting and held and label in self._limits and label in self._waiting_labels():
             held -= min(self._active[label], held)
         return in_use + held < (self.max_staleness + 1) * self.batch_size
+
+    def _horizons_have_room(self, label: str | None, *, waiting: bool) -> bool:
+        """Under independent stepping, whether another group may be dispatched: the leader's remaining steps take
+        more shares than the groups running and its own queued and taken may give it, and every policy's horizon has
+        room (:meth:`~platoon.train.dispatch.horizons.Horizons.binding`), the slots held for the capped labels counted
+        on each as :meth:`_held` counts them on the one horizon of lockstep."""
+
+        assert self.horizons is not None  # the caller checked
+        if not self.horizons.plan_has_room(self.pipeline):
+            return False
+        own = self._active[label] if waiting and label in self._limits and label in self._waiting_labels() else 0
+        return self.horizons.binding(self.pipeline, self._capped_running(), own) is None
+
+    def _capped_running(self) -> int:
+        """The running groups of the capped labels that have draws waiting, each holding a slot for its label's next
+        draw (:meth:`_held`); none without limits."""
+
+        if not self._limits:
+            return 0
+        return sum(self._active[label] for label in self._waiting_labels() if label in self._limits)
 
     def _held(self) -> int:
         """The slots of the horizon held for the groups that follow the capped labels' running ones: one for each
@@ -955,7 +1021,8 @@ class Dispatcher:
             index, by = drawn.get(key, (None, None))
             self._settled[key] = item
             self._outstanding[key] = (task_id, position, index, by)
-        self.pipeline += len(kept)
+        if self.horizons is None:  # independent stepping: the share ledger counts the kept groups' shares
+            self.pipeline += len(kept)
         for old, row, position in [*reissue, *waiting]:
             index, by = drawn.get(old, (None, None))
             draw = self._draw(dict(row), position, index=index, sampler=by or self.sampler)

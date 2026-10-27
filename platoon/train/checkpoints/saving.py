@@ -13,7 +13,7 @@ calls it, as does the rl trainer's method of its name.
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Collection, Mapping
+from collections.abc import Awaitable, Collection, Coroutine, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
 import tinker
@@ -266,3 +266,33 @@ async def _checkpoint_state(source: "RolloutSource", checkpoint: str, loop_state
             if credit is not None and (not kept or "kept" in record):  # the groups the state settled are kept
                 loop_state[CREDIT_KEY] = credit
     return loop_state
+
+
+def capture_state(source: "RolloutSource", checkpoint: str) -> Coroutine[Any, Any, dict[str, Any]]:
+    """When the run's policies step independently, what commit ``checkpoint`` saves of the source's draws, taken at once
+    under the commit lock (the source's ``capture``, :mod:`platoon.train.checkpoints.commits`): the snapshot of the
+    per-task statistics, written now; the dispatcher's state, the groups it keeps and what each policy did with its
+    share of each (the share ledger's snapshot), and the credit estimators' state, as :func:`_checkpoint_state` takes
+    them; and the writing still to do, which writes the dispatcher's files in a thread and gives the entries."""
+
+    loop_state: dict[str, Any] = {}
+    recorder, dispatcher, ledger = source.recorder, source.dispatcher, source.ledger
+    assert dispatcher is not None and ledger is not None  # a source whose policies step independently is open
+    if recorder is not None and (record := recorder.snapshot(checkpoint)) is not None:
+        loop_state["tasks"] = record
+    state, kept, credit, shares = (
+        dispatcher.state(),
+        dispatcher.kept(),
+        credit_states(source.workflow),
+        ledger.snapshot(),
+    )
+
+    async def write() -> dict[str, Any]:
+        record = await asyncio.to_thread(save_state, source.run_dir, checkpoint, state, kept, shares)
+        if record is not None:
+            loop_state[DISPATCH_KEY] = record
+            if credit is not None and (not kept or "kept" in record):  # the groups the state settled are kept
+                loop_state[CREDIT_KEY] = credit
+        return loop_state
+
+    return write()

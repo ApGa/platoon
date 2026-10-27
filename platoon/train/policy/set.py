@@ -9,6 +9,7 @@ policy with (``ModelGateway.serve_policies``).
 """
 
 import asyncio
+import copy
 from collections.abc import Awaitable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, TypeVar
 
@@ -61,6 +62,15 @@ class PolicySet(Mapping[PolicyId, Policy]):
                 roles=agents.roles,
             )
         return cls([Policy(spec, infos[spec.id]) for spec in specs.values()], agents)
+
+    def led_by(self, policy: PolicyId) -> "PolicySet":
+        """The same policies, with ``policy`` as their leader: what the steps of one policy that steps on its own clock
+        read their policy through (its view of the loops' shared state, :mod:`platoon.train.step.independent`), since
+        the lockstep step reads the policy it trains first as the leader.  The run's leader is unchanged."""
+
+        view = copy.copy(self)
+        view.leader = policy
+        return view
 
     def trainable(self) -> list[Policy]:
         """The policies the run trains, in order."""

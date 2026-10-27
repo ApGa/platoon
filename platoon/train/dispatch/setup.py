@@ -58,7 +58,8 @@ def _dispatch(source: "RolloutSource", task_group: asyncio.TaskGroup, *, stop: a
 
     dispatcher = source.dispatcher
     assert dispatcher is not None and source.results is not None  # the start opened it; start() made the queue
-    dispatcher.bind(source.results)
+    # Its groups settle into the steps' queue; when the policies step independently, into the share ledger.
+    dispatcher.bind(source.ledger if source.ledger is not None else source.results)
     dispatcher.rolling = capabilities_of(source.workflow).runs_rollouts_on_lease  # rolling starts
     if dispatcher.permit_release == "rollout":
         logger.info(
@@ -79,9 +80,9 @@ def _dispatch(source: "RolloutSource", task_group: asyncio.TaskGroup, *, stop: a
 def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch: int, end_batch: int) -> Dispatcher:
     """The dispatcher of this start's training groups, from ``start_batch`` to ``end_batch``, over the run's order
     (:func:`_samplers`), starting at the checkpoint's batch, its horizon counting the smallest staleness bound of the
-    trained policies (:func:`~platoon.train.policy.spec.horizon_bound`); and, for a run under a group admission rule,
-    its rules beside it (the source's ``admissions``, :class:`~platoon.train.admissions.AdmissionSet`), whose cap the
-    dispatcher counts its steps by."""
+    trained policies (:func:`~platoon.train.policy.spec.horizon_bound`), or each one's own when they step independently
+    (the source's ``horizons``); and, for a run under a group admission rule, its rules beside it (the source's
+    ``admissions``, :class:`~platoon.train.admissions.AdmissionSet`), whose cap the dispatcher counts its steps by."""
 
     config = source.config
     batch_size = config.train.batch_size
@@ -112,6 +113,7 @@ def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch:
         start = recorder.start
     else:  # the statistics did not start: number this start's draws as they would have
         start = next_start(read_checkpoint_records(source.run_dir))
+    independent: dict[str, Any] = {"horizons": source.horizons} if source.horizons is not None else {}
     return Dispatcher(
         rows=rows,
         samplers=samplers,
@@ -132,6 +134,7 @@ def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch:
         step=start_batch,
         groups_per_step=source.admissions.cap if source.admissions is not None else None,
         permit_release=config.train.permit_release,
+        **independent,
     )
 
 

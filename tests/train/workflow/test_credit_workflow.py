@@ -446,6 +446,7 @@ def _run_training_group(estimator: _Settling, dispatcher: _Dispatcher) -> None:
         workflow=workflow,
         recorder=None,
         admissions=None,
+        ledger=None,  # its policies step in lockstep
         episode_row=lambda draw: draw.row,  # no draw provenance: the group runs on the draw's own row
     )
     draw: Any = SimpleNamespace(row={"task_id": "task"}, task_id="task", entry="default", label=None, key=(0, 1))

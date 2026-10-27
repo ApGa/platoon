@@ -23,13 +23,16 @@ class StepGeometry:
     tasks_per_microbatch: int
 
     @classmethod
-    def of(cls, config: Any) -> "StepGeometry":
-        """The split of a step under ``config``; an ``AssertionError`` when a count does not divide the one above it."""
+    def of(cls, config: Any, batch_size: int | None = None) -> "StepGeometry":
+        """The split of a step under ``config``, of ``batch_size`` groups (default: ``train.batch_size``; a policy's own
+        batch of shares when the policies step independently); an ``AssertionError`` when a count does not divide the
+        one above it."""
 
-        assert config.train.batch_size % config.train.num_minibatches == 0, (
-            f"batch_size {config.train.batch_size} must be divisible by num_minibatches {config.train.num_minibatches}"
+        batch_size = config.train.batch_size if batch_size is None else batch_size
+        assert batch_size % config.train.num_minibatches == 0, (
+            f"batch_size {batch_size} must be divisible by num_minibatches {config.train.num_minibatches}"
         )
-        tasks_per_minibatch = config.train.batch_size // config.train.num_minibatches
+        tasks_per_minibatch = batch_size // config.train.num_minibatches
 
         assert tasks_per_minibatch % config.train.num_microbatches == 0, (
             f"tasks_per_minibatch {tasks_per_minibatch} must be divisible by "

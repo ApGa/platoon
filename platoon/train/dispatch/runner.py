@@ -80,9 +80,10 @@ async def _run_training_group(source: "RolloutSource", draw: BoundDraw, lease: D
     (calling ``lease``), settle its credit estimator's state (:func:`~platoon.train.credit.runtime.settle_credit`),
     record the group in the run's per-task statistics, and hand its output to the step that dequeues it
     (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group admission rule, the group
-    is decided first (:func:`_settle_under_rule`).  Nothing is awaited from the settling of its credit to its hand-over,
-    so a full checkpoint, which takes the estimators' state where it takes the groups it keeps, holds both or
-    neither."""
+    is decided first (:func:`_settle_under_rule`).  Nothing is awaited from the settling of its credit to its hand-over
+    (:func:`_settle_group`), so a full checkpoint, which takes the estimators' state where it takes the groups it keeps,
+    holds both or neither; under independent stepping that section takes the commit lock, which a commit's capture
+    takes too."""
 
     dispatcher, tracker, watchdog = source.dispatcher, source.tracker, source.watchdog
     assert dispatcher is not None and tracker is not None  # the source started it
@@ -93,6 +94,20 @@ async def _run_training_group(source: "RolloutSource", draw: BoundDraw, lease: D
     finally:
         lease()
     _group_done(rollout, time.perf_counter() - start_time, draw.task_id, tracker, watchdog)
+    if source.ledger is None:
+        _settle_group(source, draw, rollout)
+        return
+    async with source.ledger.lock:  # independent stepping: a commit captures the group wholly settled, or not at all
+        _settle_group(source, draw, rollout)
+
+
+def _settle_group(source: "RolloutSource", draw: BoundDraw, rollout: Any) -> None:
+    """The settle section of a group, with no await: its credit estimator's state settled, its record in the per-task
+    statistics, and the group handed to the step that dequeues it (under a group admission rule, decided first); when
+    the run's policies step independently, to the share ledger, which splits it into shares."""
+
+    dispatcher = source.dispatcher
+    assert dispatcher is not None  # the source started it
     settle_credit(rollout)
     recorder = source.recorder
     record = (

@@ -22,7 +22,10 @@ What is never deleted (:func:`plan_deletions`):
 * in a run of several trained policies, a row of another policy than the leader that a leader row a resume may take
   names: the leader's newest, or one of its newest ``keep_recovery`` recovery rows
   (:func:`platoon.train.checkpoints.barrier.named_state_paths`). Each such policy has a pruner of its own, in its own
-  directory, on a session of its own on its own service.
+  directory, on a session of its own on its own service;
+* when the run's policies step independently, any policy's row that a commit names: one in flight, or the newest in
+  some policy's file (the pins, :meth:`platoon.train.checkpoints.commits.Commits.pinned`), checked again just before
+  each delete, so that no commit names a row deleted while its save ran.
 
 A deleted recovery checkpoint's files in the run's ``tasks`` directory go with it: the snapshot of the run's per-task
 statistics (``tasks``), and the state of the dispatcher's draws with the groups it kept (``dispatch``,
@@ -85,6 +88,7 @@ def recovery_pruning_problems(
     max_staleness: int | None,
     *,
     bound: str = "train.max_staleness",
+    every_key: str = "checkpoint.recovery_every",
 ) -> list[str]:
     """What stops ``checkpoint.keep_recovery`` from keeping its promise, one entry each, with the keys' dotted paths;
     checked when a training config loads.
@@ -95,6 +99,8 @@ def recovery_pruning_problems(
     newest ``keep_recovery`` recovery checkpoints must span more than it (``keep_recovery × recovery_every >
     max_staleness``): otherwise the checkpoints within reach of rollouts outnumber ``keep_recovery``, and more stay
     than it keeps. Without ``recovery_every`` the only recovery checkpoints are the ones each start writes.
+    ``every_key`` names the key that sets ``recovery_every``: a policy's own
+    (``policies.<id>.checkpoint.recovery_every``) when the run's policies step independently.
     """
 
     if keep_recovery is None:
@@ -109,33 +115,50 @@ def recovery_pruning_problems(
         return []
     largest = ", the run's largest staleness bound" if bound.startswith("environments[") else ""
     return [
-        f"checkpoint.keep_recovery: {keep_recovery} × checkpoint.recovery_every: {recovery_every} = "
+        f"checkpoint.keep_recovery: {keep_recovery} × {every_key}: {recovery_every} = "
         f"{keep_recovery * recovery_every} must exceed {bound}: {max_staleness}{largest}: a recovery checkpoint "
         f"within {max_staleness} policy versions may still serve rollouts and is never deleted, so more would stay "
         f"than keep_recovery keeps; raise checkpoint.keep_recovery to {max_staleness // recovery_every + 1} or "
-        f"checkpoint.recovery_every to {max_staleness // keep_recovery + 1}, or lower {bound}"
+        f"{every_key} to {max_staleness // keep_recovery + 1}, or lower {bound}"
     ]
 
 
 def config_pruning_problems(config: Any) -> list[str]:
     """The :func:`recovery_pruning_problems` of a training config, against the largest staleness bound of the run and
     its environment entries (:func:`platoon.train.entry_settings.largest_staleness`): a slow entry's group may still
-    sample from an old checkpoint; and against each trained ``policies:`` entry's own bound, which its own pruner
-    keeps.  None under a trainer that rolls nothing out, which no rollout samples."""
+    sample from an old checkpoint; and for each trained ``policies:`` entry, what its own pruner keeps: its own bound
+    (else that largest one), at the run's ``recovery_every``, or, when the run's policies step independently
+    (``train.stepping``), at its own (``policies.<id>.checkpoint.recovery_every``), counted in its own steps and so in
+    its own versions.  None under a trainer that rolls nothing out, which no rollout samples."""
 
     from platoon.train.entry_settings import largest_staleness
     from platoon.train.trainer.registry import rolls_out
 
-    checkpoint = getattr(config, "checkpoint", None)
-    if getattr(config, "train", None) is None or not rolls_out(config):
+    checkpoint, train = getattr(config, "checkpoint", None), getattr(config, "train", None)
+    if train is None or not rolls_out(config):
         return []
     keep, every = getattr(checkpoint, "keep_recovery", None), getattr(checkpoint, "recovery_every", None)
     largest, bound = largest_staleness(config)
     problems = recovery_pruning_problems(keep, every, largest, bound=bound)
+    if largest is None:  # refused above: keep_recovery without a staleness limit
+        return problems
+    # A policy's own cadence is read under independent stepping only: stepping together, loading refuses it.
+    independent = getattr(train, "stepping", None) == "independent"
     for policy_id, policy in (getattr(config, "policies", None) or {}).items():
+        if not getattr(policy, "trainable", True):
+            continue
         own = getattr(policy, "max_staleness", None)
-        if getattr(policy, "trainable", True) and own is not None and largest is not None:
-            problems += recovery_pruning_problems(keep, every, own, bound=f"policies.{policy_id}.max_staleness")
+        own_every = getattr(getattr(policy, "checkpoint", None), "recovery_every", None) if independent else None
+        if own is None and own_every is None:
+            continue  # its pruner keeps the run's largest bound at the run's cadence, checked above
+        own_key = f"policies.{policy_id}.checkpoint.recovery_every"
+        problems += recovery_pruning_problems(
+            keep,
+            every if own_every is None else own_every,
+            largest if own is None else own,
+            bound=bound if own is None else f"policies.{policy_id}.max_staleness",
+            every_key="checkpoint.recovery_every" if own_every is None else own_key,
+        )
     return problems
 
 
@@ -326,13 +349,16 @@ class RecoveryCheckpointPruner:
         max_staleness: int | None,
         service_client_factory: Callable[[], Any],
         named: Callable[[], Collection[str]] | None = None,
+        pinned: Callable[[], Collection[str]] | None = None,
     ) -> None:
         """``max_staleness`` is the run's largest staleness bound, or None when no rollout samples the policy (an sft
         run: ``k = 0``, and since its version never moves, none of this start's checkpoints is kept for a sampling
         client either).  ``service_client_factory`` opens the Tinker session the deletes go through (a
         ``tinker.ServiceClient`` of the training service): pruning calls it once, in a worker thread, before its first
         delete.  ``named``, for the pruner of another trained policy than the leader: the state paths of its rows that
-        a leader row a resume may take names, read at each pass, which it never deletes."""
+        a leader row a resume may take names, read at each pass, which it never deletes.  ``pinned``, when the run's
+        policies step independently: the state paths of its rows that a commit names, read at each pass and again
+        before each delete, which it never deletes."""
 
         if keep < 1:
             raise ValueError("keep must be at least 1")
@@ -341,6 +367,7 @@ class RecoveryCheckpointPruner:
         self.max_staleness = max_staleness
         self._service_client_factory = service_client_factory
         self._named = named
+        self._pinned = pinned
         self._rest_client: Any = None
         self._deleted = read_deleted_paths(run_dir)
         self._this_start: set[str] = set()
@@ -433,6 +460,9 @@ class RecoveryCheckpointPruner:
 
     async def _prune(self) -> None:
         records = read_checkpoint_records(self.run_dir)
+        named = self._named() if self._named is not None else ()
+        if self._pinned is not None:  # independent stepping: the rows the commits name
+            named = {*named, *self._pinned()}
         doomed = plan_deletions(
             records,
             keep=self.keep,
@@ -440,11 +470,13 @@ class RecoveryCheckpointPruner:
             policy_version=self._policy_version,
             max_staleness=self.max_staleness,
             this_start=self._this_start,
-            named=self._named() if self._named is not None else (),
+            named=named,
         )
         for checkpoint, path in doomed:
             if self._stopped:
                 break
+            if self._pinned is not None and checkpoint.paths[0] in self._pinned():
+                continue  # a commit captured since the pass began names it
             await self._delete(checkpoint, path)
         self._recovery_kept = len(live_recovery_checkpoints(recorded_checkpoints(records), self._deleted))
 
