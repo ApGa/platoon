@@ -20,6 +20,15 @@ a block of the draw's lease (:class:`RolloutLease`, which :func:`rollout_lease` 
 under ``train.permit_release: rollout`` each permit comes back as its rollout ends.
 ``docs/extending/rollout-leases.md`` is the guide.
 
+And trainers (RFC 0021): what ``platoon train`` runs (:class:`Trainer`), built from what it prepared
+(:class:`TrainerSetup`: the config, each policy's :class:`PolicySpec` by its id, :data:`MAIN` for ``train:``'s, the
+run's :class:`TaskSources` and how its :class:`Workflows` are built), saying what it asks of the run
+(:class:`TrainerNeeds`) and where its steps end (:class:`StepPlan`).  :class:`TrainerBase` takes a trainer through the
+lifecycle every trainer shares, calling its hooks in order, and ``platoon.testing.check_trainer`` checks one.  What
+every full checkpoint of the run holds besides its counters comes from its participants
+(:class:`CheckpointParticipant`), and a policy's rows train under an :class:`Objective`.  ``trainer:`` selects the
+trainer; this release has one, ``rl``.
+
 This module imports neither ``tinker`` nor ``datasets``.
 """
 
@@ -31,7 +40,10 @@ from platoon.train.admission_api import (
     GroupAdmission,
     group_admission,
 )
+from platoon.train.checkpoints.participants import CheckpointParticipant
 from platoon.train.leases import RolloutLease, rollout_lease
+from platoon.train.objectives.api import Objective
+from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.train.sampler_api import (
     Draw,
     Sampler,
@@ -52,6 +64,15 @@ from platoon.train.task_stats import (
     TaskStatsStore,
     informative_at,
     pass_at,
+)
+from platoon.train.trainer.api import (
+    StepPlan,
+    TaskSources,
+    Trainer,
+    TrainerBase,
+    TrainerNeeds,
+    TrainerSetup,
+    Workflows,
 )
 
 __all__ = [
@@ -84,4 +105,16 @@ __all__ = [
     # rollout leases (RFC 0020)
     "RolloutLease",
     "rollout_lease",
+    # trainers (RFC 0021)
+    "Trainer",
+    "TrainerBase",
+    "TrainerNeeds",
+    "TrainerSetup",
+    "TaskSources",
+    "Workflows",
+    "StepPlan",
+    "PolicySpec",
+    "MAIN",
+    "CheckpointParticipant",
+    "Objective",
 ]

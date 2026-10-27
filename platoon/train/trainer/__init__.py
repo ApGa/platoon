@@ -1,7 +1,10 @@
-"""One start of training, from opening the training service to the last save (``PlatoonTinkerRLTrainer``).
+"""The trainers, and one start of training through them, from opening the training service to the last save.
 
-``rl`` is the trainer and its ``train()``; ``loops`` the training loop, its step (``TrainStep``) and stopping the loops;
-``state`` what the train and evaluation loops share, the policy they train among it; ``signals`` the signal handlers,
-the watchdog and the exceptions that end the loops; ``waiting`` awaiting with heartbeats and deadlines.  The policy
-itself, its training service among it, is :mod:`platoon.train.policy`.
+``api`` is the trainer API (RFC 0021, experimental): the ``Trainer`` protocol ``platoon train`` runs, what it is built
+with, and ``TrainerBase``, whose hooks the lifecycle calls; ``run`` the lifecycle every trainer goes through
+(``TrainerRun``: one start's phases, in order) and the run's step clock; ``registry`` the ``trainer:`` key's check.
+``rl`` is the rl trainer (``PlatoonTinkerRLTrainer``), with its ``train()``; ``loops`` its training loop, its step
+(``TrainStep``) and stopping the loops; ``state`` what its train and evaluation loops share, the policy they train among
+it; ``signals`` the signal handlers, the watchdog and the exceptions that end the loops; ``waiting`` awaiting with
+heartbeats and deadlines.  The policy itself, its training service among it, is :mod:`platoon.train.policy`.
 """

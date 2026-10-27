@@ -24,6 +24,15 @@ a block of the draw's lease (`RolloutLease`, which `rollout_lease` reads in the 
 under `train.permit_release: rollout` each permit comes back as its rollout ends.
 `docs/extending/rollout-leases.md` is the guide.
 
+And trainers (RFC 0021): what `platoon train` runs (`Trainer`), built from what it prepared
+(`TrainerSetup`: the config, each policy's `PolicySpec` by its id, `MAIN` for `train:`'s, the
+run's `TaskSources` and how its `Workflows` are built), saying what it asks of the run
+(`TrainerNeeds`) and where its steps end (`StepPlan`).  `TrainerBase` takes a trainer through the
+lifecycle every trainer shares, calling its hooks in order, and `platoon.testing.check_trainer` checks one.  What
+every full checkpoint of the run holds besides its counters comes from its participants
+(`CheckpointParticipant`), and a policy's rows train under an `Objective`.  `trainer:` selects the
+trainer; this release has one, `rl`.
+
 This module imports neither `tinker` nor `datasets`.
 
 ```python
@@ -59,6 +68,17 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`group_admission`](#platoon-experimental-group-admission) | Register a group admission rule class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`group_admission: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`all`, `informative`) are reserved whatever was imported first, and so is any name that reads as one of them whatever its case and its `-` or `_` (`Informative`, which a config that misspells core's name would otherwise pick up); a name registered twice is an error. |
 | [`RolloutLease`](#platoon-experimental-rolloutlease) | The rollout permits of the training draw whose workflow runs in this asyncio context (`rollout_lease`). |
 | [`rollout_lease`](#platoon-experimental-rollout-lease) | The lease of the training draw whose workflow runs in this asyncio context (`RolloutLease`). |
+| [`Trainer`](#platoon-experimental-trainer) | What `platoon train` runs: a trainer is resolved from the config's `trainer:` (`platoon.train.trainer.registry`), built from its setup, entered with `async with`, and run once per start. Supervising the run, its restarts, the reaping of what a dead start left, the run's lock, its config snapshot and its identity check stay `platoon train`'s. |
+| [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. |
+| [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it trains on rollouts of the run's training tasks (then the run lists them, and builds the training workflow). |
+| [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`): the loaded and checked config, read-only, whose `log_path`, `stats.experiment_name` and `stats.trial_name` name the run directory (`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares (`platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's policies (`workflow_builder`, which `build_workflows` calls). Building the setup does no I/O. |
+| [`TaskSources`](#platoon-experimental-tasksources) | The run's tasks as `platoon train` lists them: the training tasks (`train_dataset`, a weighted order's first epoch or the listing a dataloader shuffles), the order they are drawn in epoch by epoch and the task samplers that draw them (None: the dataset as it is), and the evaluation's (None when the run evaluates nothing). |
+| [`Workflows`](#platoon-experimental-workflows) | A start's rollout workflows: training's, and the evaluation's (None when the start evaluates nothing). |
+| [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it). |
+| [`PolicySpec`](#platoon-experimental-policyspec) | One policy, as the config declares it: the model, how its prompts are rendered and sampled, its Tinker service, how a new run trains it (its adapter's rank, the weights it starts from), and how each step updates it (its optimizer, and the loss its rows train under). |
+| [`MAIN`](#platoon-experimental-main) | The policy that `train:` declares. The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format. |
+| [`CheckpointParticipant`](#platoon-experimental-checkpointparticipant) | Part of the run's state that every full checkpoint saves, and that a start which resumes from one takes up. |
+| [`Objective`](#platoon-experimental-objective) | What a policy's rows train under: one of the Tinker service's built-in losses (`loss_fn`, such as `cispo`) with its keyword arguments, the loss inputs the datums carry for the trainer only, and the training metrics of each microbatch. |
 
 ## Task samplers
 
@@ -1009,6 +1029,335 @@ The lease of the training draw whose workflow runs in this asyncio context (`Rol
 Outside a training draw (evaluation, a test, a direct call) a lease of size 0 whose blocks enter at once and hold
 nothing, so a workflow runs its rollouts the same way everywhere.  Read it in the workflow's own task: a thread of
 `loop.run_in_executor` does not see it unless the context is copied.
+
+## Trainers
+
+The trainer API: what platoon train runs, what it builds a trainer with, the base class whose lifecycle calls a trainer's hooks, the policies' specs, the parts of the run's state every full checkpoint holds, and what a policy's rows train under.
+
+<a id="platoon-experimental-trainer"></a>
+
+### `platoon.experimental.Trainer`
+
+```python
+class Trainer(Protocol)
+```
+
+What `platoon train` runs: a trainer is resolved from the config's `trainer:`
+(`platoon.train.trainer.registry`), built from its setup, entered with `async with`, and run once per start.
+Supervising the run, its restarts, the reaping of what a dead start left, the run's lock, its config snapshot and
+its identity check stay `platoon train`'s.
+
+#### `Trainer.needs`
+
+```python
+@classmethod
+def needs(config: Any, options: Any) -> platoon.train.trainer.api.TrainerNeeds
+```
+
+#### `Trainer.from_setup`
+
+```python
+@classmethod
+def from_setup(setup: platoon.train.trainer.api.TrainerSetup) -> Self
+```
+
+#### `Trainer.run`
+
+```python
+async def run() -> None
+```
+
+<a id="platoon-experimental-trainerbase"></a>
+
+### `platoon.experimental.TrainerBase`
+
+```python
+class TrainerBase
+```
+
+An optional base of trainers.  `run()` takes the trainer through the lifecycle every trainer shares
+(`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every
+hook has a default but `prepare` and `run_steps`, which a subclass writes.  `async with` opens what every
+start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train
+tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `setup` | `platoon.train.trainer.api.TrainerSetup \| None` | What the trainer was built with; None for a trainer built with a constructor of its own, outside platoon train. |
+| `config` | `Any` |  |
+| `options` | `Any` |  |
+| `policies` | `PolicySet` | The run's policies, registered as the trainer is built. |
+| `run_log_path` | `str` | The run directory, `log_path/<stats.experiment_name>/<stats.trial_name>`, where the run writes everything: its checkpoints, its rollouts and its logs. Read-only. |
+
+#### `TrainerBase.needs`
+
+```python
+@classmethod
+def needs(config: Any, options: Any) -> platoon.train.trainer.api.TrainerNeeds
+```
+
+What the trainer asks of the run: by default, nothing to roll out.
+
+#### `TrainerBase.from_setup`
+
+```python
+@classmethod
+def from_setup(setup: platoon.train.trainer.api.TrainerSetup) -> Self
+```
+
+#### `TrainerBase.run`
+
+```python
+async def run() -> None
+```
+
+Run this start of the run: the lifecycle every trainer shares, with this trainer's hooks.
+
+#### `TrainerBase.check`
+
+```python
+def check(run: TrainerRun) -> None
+```
+
+1. Before any service opens: raise `ConfigError` for what the trainer cannot run.  Participants of the
+run's checkpoints registered here take up the start point before any training client opens.
+
+#### `TrainerBase.prepare`
+
+```python
+async def prepare(run: TrainerRun, start: StartPoint) -> platoon.train.trainer.api.StepPlan
+```
+
+5. The policies are open at `start`: prepare the steps, and say where they end.
+
+#### `TrainerBase.started`
+
+```python
+async def started(run: TrainerRun) -> None
+```
+
+6. The launch save is done (`run.launch_save`), before each policy's first sampler.
+
+#### `TrainerBase.ready`
+
+```python
+async def ready(run: TrainerRun) -> None
+```
+
+7. Just before the steps: the run's clock starts (`platoon.train.trainer.run.TrainerRun.start_clock`),
+which a trainer that overrides this hook starts too.
+
+#### `TrainerBase.run_steps`
+
+```python
+async def run_steps(run: TrainerRun) -> None
+```
+
+8. The steps, from `run.clock.step` to `run.clock.end`, stopping at a step boundary once a stop is asked
+for (`run.shutdown`).  Steps that the stop request stopped short of the end were interrupted: the run then
+saves `<step>_interrupted`, also when they did not set `run.interrupted`, which an interrupt of their own
+sets.
+
+#### `TrainerBase.close`
+
+```python
+async def close(run: TrainerRun) -> None
+```
+
+10. After the save at exit: close what the trainer opened.
+
+<a id="platoon-experimental-trainerneeds"></a>
+
+### `platoon.experimental.TrainerNeeds`
+
+```python
+class TrainerNeeds
+```
+
+What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it
+trains on rollouts of the run's training tasks (then the run lists them, and builds the training workflow).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `rollouts` | `bool` | `False` |  |
+
+<a id="platoon-experimental-trainersetup"></a>
+
+### `platoon.experimental.TrainerSetup`
+
+```python
+class TrainerSetup
+```
+
+What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`): the loaded and checked
+config, read-only, whose `log_path`, `stats.experiment_name` and `stats.trial_name` name the run directory
+(`TrainerBase.run_log_path`); the trainer's options (None: it takes none); the policies the config declares
+(`platoon.train.policy.spec.policy_specs`), which the trainer's constructor registers, as a trainer always
+did; the run's tasks, when the trainer rolls them out; and how the start's workflows are built on the trainer's
+policies (`workflow_builder`, which `build_workflows` calls).  Building the setup does no I/O.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `config` | `Any` | required |  |
+| `policy_specs` | `Mapping[str, platoon.train.policy.spec.PolicySpec]` | required |  |
+| `options` | `Any` | `None` |  |
+| `tasks` | `platoon.train.trainer.api.TaskSources \| None` | `None` |  |
+| `workflow_builder` | `Callable[[PolicySet], Workflows] \| None` | `None` | Launch's builder of the start's workflows, on the trainer's policies; None: the setup builds none. |
+
+#### `TrainerSetup.build_workflows`
+
+```python
+def build_workflows(policies: PolicySet) -> platoon.train.trainer.api.Workflows
+```
+
+The start's training and evaluation workflows, which roll out on `policies`.
+
+<a id="platoon-experimental-tasksources"></a>
+
+### `platoon.experimental.TaskSources`
+
+```python
+class TaskSources
+```
+
+The run's tasks as `platoon train` lists them: the training tasks (`train_dataset`, a weighted order's first
+epoch or the listing a dataloader shuffles), the order they are drawn in epoch by epoch and the task samplers that
+draw them (None: the dataset as it is), and the evaluation's (None when the run evaluates nothing).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `train_dataset` | `Any` | required |  |
+| `eval_dataset` | `Any` | `None` |  |
+| `train_order` | `Any` | `None` |  |
+| `train_sampling` | `Any` | `None` |  |
+
+<a id="platoon-experimental-workflows"></a>
+
+### `platoon.experimental.Workflows`
+
+```python
+class Workflows
+```
+
+A start's rollout workflows: training's, and the evaluation's (None when the start evaluates nothing).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `train` | `Any` | required |  |
+| `eval` | `Any \| None` | `None` |  |
+
+<a id="platoon-experimental-stepplan"></a>
+
+### `platoon.experimental.StepPlan`
+
+```python
+class StepPlan
+```
+
+Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `end_step` | `int` | required |  |
+
+<a id="platoon-experimental-policyspec"></a>
+
+### `platoon.experimental.PolicySpec`
+
+```python
+class PolicySpec
+```
+
+One policy, as the config declares it: the model, how its prompts are rendered and sampled, its Tinker service,
+how a new run trains it (its adapter's rank, the weights it starts from), and how each step updates it (its
+optimizer, and the loss its rows train under).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | `str` | required |  |
+| `model_name` | `str` | required |  |
+| `renderer_name` | `str` | required |  |
+| `renderer_kwargs` | `dict[str, Any]` | `{}` | The config's, as the renderer takes them. A dict does not hash, so the spec's hash leaves it out. |
+| `context_window_length` | `int \| None` | `None` |  |
+| `sample_timeout_seconds` | `float \| None` | `None` |  |
+| `tinker_base_url` | `str \| None` | `None` | Its Tinker service; None: TINKER_BASE_URL, else hosted Tinker. |
+| `lora_rank` | `int` | `32` |  |
+| `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from (not its optimizer's state); None: the base model's. |
+| `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments; each None: the run's train.optimizer, train.loss_fn or train.loss_fn_config, which policy_specs puts in its place, so that the trainer reads them from the spec alone. |
+| `loss_fn` | `str \| None` | `None` |  |
+| `loss_fn_config` | `dict[str, Any] \| None` | `None` |  |
+
+<a id="platoon-experimental-main"></a>
+
+### `platoon.experimental.MAIN`
+
+```python
+MAIN: Final[PolicyId] = task_stats.MAIN
+```
+
+The policy that `train:` declares.  The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format.
+
+<a id="platoon-experimental-checkpointparticipant"></a>
+
+### `platoon.experimental.CheckpointParticipant`
+
+```python
+class CheckpointParticipant(Protocol)
+```
+
+Part of the run's state that every full checkpoint saves, and that a start which resumes from one takes up.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `keys` | `tuple[str, ...]` | Its keys of a row's loop_state. |
+
+#### `CheckpointParticipant.checkpoint_state`
+
+```python
+async def checkpoint_state(name: str) -> Mapping[str, Any]
+```
+
+Its `loop_state` entries of full checkpoint `name`, as JSON; it may write files of its own beside the
+row, which its entries name.  An entry it could not write is left out.
+
+#### `CheckpointParticipant.resume`
+
+```python
+def resume(start: StartPoint) -> None
+```
+
+Take up what the checkpoint row that the start resumes from saved: its entries are in `start.loop_state`
+(empty on a fresh run, when `start.record` is None), and the start begins at `start.step`.
+
+<a id="platoon-experimental-objective"></a>
+
+### `platoon.experimental.Objective`
+
+```python
+class Objective(Protocol)
+```
+
+What a policy's rows train under: one of the Tinker service's built-in losses (`loss_fn`, such as `cispo`)
+with its keyword arguments, the loss inputs the datums carry for the trainer only, and the training metrics of
+each microbatch.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `loss_fn` | `str` |  |
+| `loss_fn_config` | `dict[str, Any]` |  |
+| `side_channels` | `frozenset[str]` | The loss inputs that only the trainer reads, which the datums sent to forward_backward leave out. |
+
+#### `Objective.metrics`
+
+```python
+def metrics(
+    originals: list['tinker.Datum'],
+    result: tinker.ForwardBackwardOutput,
+) -> dict[str, float]
+```
+
+A microbatch's training metrics, from its datums as they trained (with their side channels) and the result
+of their forward_backward.
 
 ## The types these take and return
 

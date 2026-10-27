@@ -24,6 +24,7 @@ from platoon.train.components import (
     _sampler_checks,
     normalize_environment_configs,
 )
+from platoon.train.trainer.registry import trainer_problems
 from platoon.utils.config import ConfigError, value_hint
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
@@ -821,6 +822,7 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
             "whole batches"
         )
     # Loading checks these too, but a config class whose __post_init__ skips this class's loads without them.
+    problems.extend(trainer_problems(config))
     problems.extend(entry_settings.problems(config))
     problems.extend(config_pruning_problems(config))
     problems.extend(task_sampler_problems(config))
@@ -867,6 +869,9 @@ class PlatoonTinkerRLTrainerConfig:
     train: TrainConfig
     # Evaluation during training; a config without the section does not evaluate (``eval.every`` is 0).
     eval: EvalConfig = field(default_factory=EvalConfig, kw_only=True)
+    # The trainer: rl, GRPO-style training on the rollouts of the training tasks, with ``train:``'s settings (the one
+    # trainer of this release; sft and interleaved are reserved for trainers platoon adds).
+    trainer: str = field(default="rl", kw_only=True)
     # Root of the run directories; a run writes to ``log_path/<stats.experiment_name>/<stats.trial_name>``. A config
     # without one takes the site profile's ``runs`` (platoon.site), and then ``stats.experiment_name`` defaults to the
     # config file's name. A relative one is relative to the working directory.
@@ -885,6 +890,7 @@ class PlatoonTinkerRLTrainerConfig:
         # Each entry's own training settings, laid over the run's (platoon.train.entry_settings), and recovery
         # pruning, which keeps the checkpoints within the largest staleness bound of the run and its entries.
         if problems := [
+            *trainer_problems(self),
             *entry_settings.problems(self),
             *config_pruning_problems(self),
             *task_sampler_problems(self),

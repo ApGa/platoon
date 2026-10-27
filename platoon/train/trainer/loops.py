@@ -70,6 +70,7 @@ from platoon.train.step.publish import _no_update_reason, publish_policy
 from platoon.train.step.staleness import StaleFilter, StaleWatch
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
+from platoon.train.trainer.run import StepClock
 from platoon.train.trainer.signals import TerminateTrainLoop, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.train.workflow.protocol import RolloutWorkflow
@@ -157,9 +158,10 @@ class StepContext:
     shared state; the training workflow, the queue its groups settle into and the dispatcher that starts them; the
     start's first and end batch; the labels the metrics break down by (``column``'s values, and each one's metric
     prefix) and the labels' limits; the run's per-task statistics (``recorder``) and group admission rules, when it
-    keeps them; the stale filter; and the learner that updates the policy the steps train, under its objective.  Two
-    of them count as the steps go: what the straggler policy censors (``censoring``, of each step until its metrics
-    are logged), and the staleness warning, over the last steps (``stale_watch``)."""
+    keeps them; the stale filter; the learner that updates the policy the steps train, under its objective; and the
+    run's clock, which each step's end advances.  Two of them count as the steps go: what the straggler policy censors
+    (``censoring``, of each step until its metrics are logged), and the staleness warning, over the last steps
+    (``stale_watch``)."""
 
     trainer: "PlatoonTinkerRLTrainer"
     state: TrainLoopSharedState
@@ -178,6 +180,7 @@ class StepContext:
     stale_filter: StaleFilter
     stale_watch: StaleWatch
     learner: Learner
+    clock: "StepClock | _StateClock"
 
     @classmethod
     def build(
@@ -230,8 +233,7 @@ class StepContext:
             # The stale filter's bound for each entry's groups: its own max_staleness, else the run's.
             stale_filter=StaleFilter(run_bound, {label: own.max_staleness for label, own in settings.items()}),
             stale_watch=StaleWatch(run_bound),
-            # What updates the policy, once per minibatch: through its training client, with its optimizer, under its
-            # objective, each result awaited under its train.*_timeout_seconds deadline.
+            # What updates the policy once per minibatch, under its objective, each result under its train.* deadline.
             learner=Learner(
                 policy,
                 objective=_objective(policy.spec),
@@ -239,6 +241,7 @@ class StepContext:
                 wait=_update_waiter(trainer, shared_state.watchdog),
                 tracker=shared_state.train_tracker,
             ),
+            clock=_step_clock(shared_state),
         )
 
     def version(self) -> int:
@@ -586,19 +589,11 @@ class TrainStep:
         state.train_tracker.scalar(update_weights_time=update_elapsed)
 
     def advance(self) -> None:
-        """The next step starts: the dispatcher's horizon moves on, the evaluation loop and the watchdog hear of it."""
+        """The next step starts: the run's clock advances (:meth:`~platoon.train.trainer.run.StepClock.advance`), the
+        dispatcher's horizon moves on, and the evaluation loop and the watchdog hear of it.  Evaluation's cadence counts
+        consumed batches, zero-signal ones included, whose sampler may be unchanged."""
 
-        state = self.state
-        state.train_step += 1
-        self.context.dispatch.step_started()  # its policy published: the horizon moves one batch on
-
-        # Evaluation cadence remains based on consumed batches, including
-        # zero-signal ones; the sampler itself may be unchanged.
-        state.sampling_client_updated_event.set()
-
-        # Heartbeat after completing a train step
-        if state.watchdog:
-            state.watchdog.heartbeat()
+        self.context.clock.advance(consumed=self.context.dispatch)
 
     # --- log: the step's metrics, then its line ----------------------------------------------------------------------
 
@@ -706,6 +701,33 @@ def _test_state_policy(shared_state: Any, config: Any) -> Any:
         loss_fn_config=getattr(train, "loss_fn_config", {}) if spec.loss_fn_config is None else spec.loss_fn_config,
     )
     return policy
+
+
+def _step_clock(shared_state: Any) -> "StepClock | _StateClock":
+    """The clock each step's end advances: the loops' (the run's); for a state that a test made as platoon 0.4.0 did,
+    without one, a clock over that state's own fields (:class:`_StateClock`)."""
+
+    clock = getattr(shared_state, "clock", None)
+    return clock if clock is not None else _StateClock(shared_state)
+
+
+class _StateClock:
+    """The clock of a state that a test made as platoon 0.4.0 did, without the run's clock (a ``SimpleNamespace`` with
+    ``train_step``, ``sampling_client_updated_event`` and ``watchdog``): it advances those fields, in the order
+    :meth:`~platoon.train.trainer.run.StepClock.advance` does.  It goes with the shared state's 0.4.0 fields, once the
+    tests make their states with a clock."""
+
+    def __init__(self, state: Any) -> None:
+        self.state = state
+
+    def advance(self, *, consumed: StepDispatch | None = None) -> None:
+        state = self.state
+        state.train_step += 1
+        if consumed is not None:
+            consumed.step_started()
+        state.sampling_client_updated_event.set()
+        if state.watchdog:
+            state.watchdog.heartbeat()
 
 
 def _update_waiter(trainer: "PlatoonTinkerRLTrainer", watchdog: Watchdog | None) -> "Waiter":

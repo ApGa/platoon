@@ -1,10 +1,16 @@
-"""The run's policies (:class:`PolicySet`), built where the trainer is, each with its model gateway."""
+"""The run's policies (:class:`PolicySet`), built where the trainer is, each with its model gateway, and opened as each
+start begins."""
 
+import asyncio
 from collections.abc import Iterable, Iterator, Mapping
+from typing import TYPE_CHECKING
 
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.spec import PolicyId, PolicySpec
 from platoon.train.tinker.proxy import register_tinker_llm
+
+if TYPE_CHECKING:
+    from platoon.train.checkpoints.resume import StartPoint
 
 
 class PolicySet(Mapping[PolicyId, Policy]):
@@ -47,6 +53,16 @@ class PolicySet(Mapping[PolicyId, Policy]):
 
         for policy in self._policies.values():
             policy.connect()
+
+    async def open(self, start: "StartPoint", *, stop: asyncio.Event | None = None) -> bool:
+        """Open each policy's training client at its start point (``start.policies``, :meth:`Policy.open`), one after
+        another; False when ``stop`` was set before the service accepted one.  A run has one policy until several
+        train, which will open concurrently then."""
+
+        for policy in self._policies.values():
+            if not await policy.open(start.policies[policy.id], stop=stop):
+                return False
+        return True
 
     def __getitem__(self, policy: PolicyId) -> Policy:
         return self._policies[policy]

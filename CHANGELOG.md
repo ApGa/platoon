@@ -234,6 +234,19 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   that runs locally gets `[]`, and reaches only the servers that the env's tools serve. A session gives them as
   `task_mcp_servers`, an optional attribute ([Placeholders](docs/tutorials/cli-harness.md#placeholders)).
 
+- **One lifecycle for every trainer, and the trainer API (experimental).** Each start of training goes through
+  `platoon.train.trainer.run.TrainerRun`, in the order a start always ran: the trainer's checks, the signal
+  handlers, the policies' service clients and the start point, their training clients, the trainer's preparation,
+  the launch save, the trainer's readying, its steps, the save at exit and its closing; a trainer's part of each phase
+  is a hook of `platoon.experimental.TrainerBase` (`check`, `prepare`, `started`, `ready`, `run_steps`, `close`),
+  and `PlatoonTinkerRLTrainer` is one. `platoon.experimental` exports `Trainer`, `TrainerBase`, `TrainerSetup`,
+  `TrainerNeeds`, `TaskSources`, `Workflows`, `StepPlan`, `PolicySpec`, `MAIN`,
+  `CheckpointParticipant` (a part of the run's state that every full checkpoint holds, after the run's counters, in
+  the order the parts registered) and `Objective`, and `platoon.testing.check_trainer` checks a trainer: it trains a
+  run of two steps on a fake Tinker service, stops one at a step boundary and resumes it. The config's `trainer:`
+  selects the trainer; this release has one, `rl`, the default (`sft` and `interleaved` are reserved). Nothing a run
+  does changes.
+
 ### Changes
 
 - A `process` sandbox whose working directory is `/` runs in its own `/tmp`, since no path maps to the host's root; the
@@ -339,6 +352,13 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `dataclasses.fields()` lists `policies` in their place. It is made with keyword arguments only, and still takes
   those six instead of `policies`, but not beside it: given both, it raises `TypeError`, and so does
   `dataclasses.replace()` of it. A `copy.copy()` of it shares the original's policies.
+- `TrainLoopSharedState` holds the run's step clock (`clock`), and `train_step` and `sampling_client_updated_event`
+  are properties of it, so `dataclasses.fields()` lists `clock` in their place; it still takes those two instead of
+  `clock`, but not beside it. `PlatoonTinkerRLTrainer` saves its launch, interrupted and final checkpoints through the
+  run's checkpoints, whose lines (`Saving recovery checkpoint ... at launch`, `Saving permanent checkpoint ...`,
+  `Training complete successfully!`) come from `platoon.train.trainer.run`, and its `run_log_path`, `async with` and
+  `_await_with_heartbeat` are `TrainerBase`'s, whose lines (`This run labels its sandboxes ...`) come from
+  `platoon.train.trainer.api`.
 - **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
   format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
   `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),

@@ -1,8 +1,8 @@
-"""Saving: the cadence after a step (a permanent or a recovery checkpoint, else the weights only), the one full
-checkpoint of the run that every save of a start writes (:func:`save_run_checkpoint`: at launch, by the cadence, when
-training is interrupted and at its end), which is its ``loop_state`` and then the policy's own save
-(:func:`~platoon.train.policy.checkpoints.save_full_checkpoint`), and a full checkpoint's ``loop_state``, with the
-per-task statistics' snapshot and the dispatcher's state.
+"""Saving: the cadence after a step (a permanent or a recovery checkpoint, else the weights only), and what a full
+checkpoint of the rl trainer's run holds besides the run's counters (``_checkpoint_state``: the per-task statistics'
+snapshot and the dispatcher's state).  The save itself is the run's (:class:`~platoon.train.checkpoints.participants.
+RunCheckpoints`), which the trainer's draws take part in, and the policy's
+(:meth:`~platoon.train.policy.policy.Policy.save`).
 
 ``_save_checkpoint_and_get_sampling_client`` and ``_checkpoint_state`` take the trainer first and are its methods still:
 ``PlatoonTinkerRLTrainer`` keeps each under its name, so to replace one, replace the method, on the class or an
@@ -18,11 +18,12 @@ import tinker
 
 from platoon.train.checkpoints.dispatch_state import save_state
 from platoon.train.checkpoints.pruning import RECOVERY_CHECKPOINT_PREFIX
-from platoon.train.policy.checkpoints import Waiter, sampler_from, save_full_checkpoint, save_weights_only
+from platoon.train.policy.checkpoints import Waiter, sampler_from
 from platoon.train.task_stats import DISPATCH_KEY
 from platoon.train.trainer.signals import Watchdog
 
 if TYPE_CHECKING:
+    from platoon.train.checkpoints.resume import StartPoint
     from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
 
 logger = logging.getLogger(__name__)
@@ -32,34 +33,6 @@ logger = logging.getLogger(__name__)
 # stood (the dispatcher's next position), so that a resume that cannot read the dispatcher's state goes on from there:
 # a step under a rule draws up to its cap's worth of positions, so the checkpoint's batch no longer says where.
 ORDER_POSITION_KEY = "next_position"
-
-
-async def save_run_checkpoint(
-    trainer: "PlatoonTinkerRLTrainer",
-    training_client: tinker.TrainingClient,
-    name: str,
-    *,
-    batch: int,
-    policy_version: int,
-    optimizer_steps: int,
-    wait: Waiter,
-) -> dict[str, str]:
-    """Save full checkpoint ``name`` of the trainer's run (:func:`save_full_checkpoint`, into its ``run_log_path``),
-    whose ``loop_state`` holds ``batch``, the step a resume from it starts at; the W&B run, so that a resume goes on
-    with it (tinker_cookbook's own save leaves it out); ``policy_version`` and ``optimizer_steps``; in that order, then
-    what ``_checkpoint_state`` adds, which runs before the save starts.  The paths the save wrote."""
-
-    log_path = trainer.run_log_path
-    loop_state = await trainer._checkpoint_state(
-        name,
-        {
-            "batch": batch,
-            "wandb_run_id": trainer._stats_logger.wandb_run_id,
-            "policy_version": policy_version,
-            "optimizer_steps": optimizer_steps,
-        },
-    )
-    return await save_full_checkpoint(training_client, name, log_path=log_path, loop_state=loop_state, wait=wait)
 
 
 def _feeding(trainer: "PlatoonTinkerRLTrainer", watchdog: Watchdog | None) -> Waiter:
@@ -108,15 +81,17 @@ async def _save_checkpoint_and_get_sampling_client(
     optimizer_steps: int | None = None,
 ) -> tinker.SamplingClient:
     """Save after step ``i_batch`` as the cadence says (:func:`checkpoint_kind_for_step`; ``steps_completed`` counts
-    steps since ``start_batch``), and return the new sampling client: a full checkpoint's
-    (:func:`save_run_checkpoint`, then :func:`sampler_from`), whose name and batch are ``i_batch + 1`` because the
-    weights are the ones *after* training on ``i_batch``, so a resume starts from ``i_batch + 1``, and whose
-    ``policy_version`` and ``optimizer_steps`` are those given, else that batch; or a weights-only save's
-    (:func:`save_weights_only`).  A recovery checkpoint goes to the pruner once ``checkpoints.jsonl`` records it."""
+    steps since ``start_batch``), and return the new sampling client: a full checkpoint's (the run's save, then
+    :func:`sampler_from`), named and at batch ``i_batch + 1``, since its weights are the ones *after* training on
+    ``i_batch``, with the ``policy_version`` and ``optimizer_steps`` given, else that batch; or a weights-only save's.
+    The leader of the trainer's checkpoints (``_checkpoints``), which trains with ``training_client``, saves.  A
+    recovery checkpoint goes to the pruner once ``checkpoints.jsonl`` records it."""
 
     # Count steps completed since start_batch (1-indexed for human intuition)
     steps_completed = i_batch - start_batch + 1
     next_batch = i_batch + 1
+    checkpoints = trainer._checkpoints(training_client)
+    policy = checkpoints.policies[checkpoints.policies.leader]
     checkpoint_kind = checkpoint_kind_for_step(steps_completed, save_every, recovery_every)
     if checkpoint_kind is None:
         logger.info(
@@ -124,7 +99,7 @@ async def _save_checkpoint_and_get_sampling_client(
             f"(steps_completed={steps_completed}, save_every={save_every}, "
             f"recovery_every={recovery_every})"
         )
-        return await save_weights_only(training_client)
+        return await policy.save_for_sampler()
 
     # Save a full (weights + optimizer) checkpoint with loop state.
     checkpoint_name = (
@@ -139,11 +114,9 @@ async def _save_checkpoint_and_get_sampling_client(
     optimizer_steps = next_batch if optimizer_steps is None else optimizer_steps
     try:
         # A full-parameter save_state takes minutes; keep the watchdog fed.
-        path_dict = await save_run_checkpoint(
-            trainer,
-            training_client,
+        saved = await checkpoints.save(
             checkpoint_name,
-            batch=next_batch,
+            step=next_batch,
             policy_version=policy_version,
             optimizer_steps=optimizer_steps,
             wait=_feeding(trainer, watchdog),
@@ -151,6 +124,7 @@ async def _save_checkpoint_and_get_sampling_client(
     except Exception as e:
         logger.exception(f"save_checkpoint_async failed: {e}")
         raise
+    path_dict = saved[policy.id]
     if checkpoint_kind == "recovery":
         trainer._recovery_saved(path_dict, policy_version)
     return sampler_from(training_client, path_dict)
@@ -165,7 +139,9 @@ async def _checkpoint_state(
     taken at the same point, before anything else runs; the dispatcher's files are written in a thread, since the
     groups they keep can take seconds to encode.  Each record is left out when it was not written: the statistics are
     not kept or stopped, or a file could not be written.  Under a group admission rule, the row also records where the
-    order stands (``next_position``), which a resume that cannot read the dispatcher's state goes on from."""
+    order stands (``next_position``), which a resume that cannot read the dispatcher's state goes on from.  The run's
+    checkpoints call it with an empty ``loop_state``: they hold the counters themselves
+    (:class:`~platoon.train.checkpoints.participants.RunCheckpoints`)."""
 
     loop_state = dict(loop_state)
     recorder = getattr(trainer, "_recorder", None)
@@ -179,3 +155,24 @@ async def _checkpoint_state(
         if (record := await asyncio.to_thread(save_state, trainer.run_log_path, checkpoint, state, kept)) is not None:
             loop_state[DISPATCH_KEY] = record
     return loop_state
+
+
+class Draws:
+    """The rl trainer's draws as a participant of the run's full checkpoints: the per-task statistics' snapshot
+    (``tasks``), where the order stands under a group admission rule (``next_position``) and the dispatcher's state
+    (``dispatch``), which ``_checkpoint_state`` records; and, as a start resumes, the draws the checkpoint left
+    outstanding, which the dispatcher takes up (``_restore_dispatch``)."""
+
+    keys: tuple[str, ...] = ("tasks", ORDER_POSITION_KEY, DISPATCH_KEY)
+
+    def __init__(self, trainer: "PlatoonTinkerRLTrainer") -> None:
+        self.trainer = trainer
+
+    async def checkpoint_state(self, name: str) -> dict[str, Any]:
+        return await self.trainer._checkpoint_state(name, {})
+
+    def resume(self, start: "StartPoint") -> None:
+        dispatcher = self.trainer._dispatcher
+        assert dispatcher is not None  # the trainer's prepare() starts it before its draws take part
+        if start.record is not None:
+            self.trainer._restore_dispatch(dispatcher, start.record, start.policy_version)

@@ -1,11 +1,11 @@
-"""Moved: platoon 0.5.0 split this module into :mod:`platoon.train.trainer.rl`, :mod:`platoon.train.trainer.loops`,
-:mod:`platoon.train.policy.service`, :mod:`platoon.train.policy.policy`, :mod:`platoon.train.policy.set`,
-:mod:`platoon.train.policy.checkpoints`, :mod:`platoon.train.policy.learner`,
-:mod:`platoon.train.objectives.policy_gradient`, :mod:`platoon.train.trainer.signals`,
-:mod:`platoon.train.trainer.state`, :mod:`platoon.train.trainer.waiting`, :mod:`platoon.train.step.collect`,
-:mod:`platoon.train.step.datums`, :mod:`platoon.train.step.metrics`, :mod:`platoon.train.step.publish`,
-:mod:`platoon.train.dispatch.permits`, :mod:`platoon.train.dispatch.runner`, :mod:`platoon.train.dispatch.settled`,
-:mod:`platoon.train.dispatch.setup`, :mod:`platoon.train.checkpoints.saving`,
+"""Moved: platoon 0.5.0 split this module into :mod:`platoon.train.trainer.rl`, :mod:`platoon.train.trainer.api`,
+:mod:`platoon.train.trainer.run`, :mod:`platoon.train.trainer.loops`, :mod:`platoon.train.policy.service`,
+:mod:`platoon.train.policy.policy`, :mod:`platoon.train.policy.set`, :mod:`platoon.train.policy.checkpoints`,
+:mod:`platoon.train.policy.learner`, :mod:`platoon.train.objectives.policy_gradient`,
+:mod:`platoon.train.trainer.signals`, :mod:`platoon.train.trainer.state`, :mod:`platoon.train.trainer.waiting`,
+:mod:`platoon.train.step.collect`, :mod:`platoon.train.step.datums`, :mod:`platoon.train.step.metrics`,
+:mod:`platoon.train.step.publish`, :mod:`platoon.train.dispatch.permits`, :mod:`platoon.train.dispatch.runner`,
+:mod:`platoon.train.dispatch.settled`, :mod:`platoon.train.dispatch.setup`, :mod:`platoon.train.checkpoints.saving`,
 :mod:`platoon.train.checkpoints.resume`, :mod:`platoon.train.evaluation.loop`, :mod:`platoon.train.evaluation.plan`,
 :mod:`platoon.train.dataloader`.  Its names still import from here, and so do the names it imported, each with a
 ``PlatoonDeprecationWarning`` that names its new module, until platoon 0.6.0 removes this module."""
@@ -61,6 +61,8 @@ __getattr__, __dir__ = _moved(
     },
     homes=(
         "platoon.train.trainer.rl",
+        "platoon.train.trainer.api",
+        "platoon.train.trainer.run",
         "platoon.train.trainer.loops",
         "platoon.train.policy.service",
         "platoon.train.policy.policy",
