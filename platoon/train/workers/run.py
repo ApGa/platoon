@@ -364,7 +364,8 @@ class _RolloutRun:
         self, llm: Any, reward_processor: Callable[[dict], tuple[float, dict]], workload: RolloutWorkload
     ) -> tuple[Any, RolloutWorkload]:
         """The rollout's trajectories as datums, stamped with :func:`rollout_version` (each datum's own version beside
-        them, ``own_versions``), and its workload with the conversion's funnel."""
+        them, ``own_versions``), each tagged with the agent that produced it when the request asks (protocol 3's
+        ``tag_datums``), and its workload with the conversion's funnel."""
 
         conversion_started = time.monotonic()
         checkpoint_version = rollout_version(llm, self.request)
@@ -379,6 +380,7 @@ class _RolloutRun:
             include_traj_depth=self.request.conversion.include_traj_depth,
             include_traj_start=self.request.conversion.include_traj_start,
             subagent_datum_sampler=self.request.conversion.subagent_datum_sampler,
+            tag_datums=getattr(self.request, "tag_datums", False),
         )
         workload = add_datum_funnel(workload, result)
         self.conversion_seconds = time.monotonic() - conversion_started

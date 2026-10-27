@@ -13,7 +13,8 @@ A source holds one start's draws:
 It runs the training workflow's ``arun_episode`` for each draw, on the draw's row, with the draw's provenance in it
 when the trainer asks for it (:meth:`RolloutSource.episode_row`).  It remembers the draws each step committed, with
 their fates (``consumed``), until the next step starts.  It takes part in every full checkpoint of the run
-(``loop_state``'s ``tasks``, ``next_position`` and ``dispatch``), which a start that resumes takes up.
+(``loop_state``'s ``tasks``, ``next_position`` and ``dispatch``, and ``credit``, the state of the workflow's credit
+estimators that have state, taken with the groups the dispatcher keeps), which a start that resumes takes up.
 
 Each part is a module function that takes the source:
 
@@ -36,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from platoon.programs import DRAW_KEY, DrawInfo
 from platoon.train.checkpoints import resume, saving
 from platoon.train.checkpoints.pruning import read_checkpoint_records
+from platoon.train.credit.runtime import CREDIT_KEY, load_credit_states
 from platoon.train.dataloader import PlatoonTinkerDataloader, _run_steps
 from platoon.train.dispatch import setup
 from platoon.train.dispatch.settled import _Settled, _settled
@@ -65,7 +67,7 @@ class RolloutSource:
     (``leader``'s).  It opens nothing until :meth:`open`."""
 
     # Its entries of a full checkpoint row's loop_state, as a participant of the run's checkpoints.
-    keys: tuple[str, ...] = ("tasks", saving.ORDER_POSITION_KEY, DISPATCH_KEY)
+    keys: tuple[str, ...] = ("tasks", saving.ORDER_POSITION_KEY, DISPATCH_KEY, CREDIT_KEY)
 
     def __init__(
         self,
@@ -162,11 +164,13 @@ class RolloutSource:
 
     def resume(self, start: "StartPoint") -> None:
         """Take up the draws that the checkpoint the start resumes from left outstanding (a fresh run has none):
-        :meth:`restore`, into the dispatcher :meth:`open` built."""
+        :meth:`restore`, into the dispatcher :meth:`open` built; and the state its row saved of the workflow's credit
+        estimators that have state (:func:`~platoon.train.credit.runtime.load_credit_states`)."""
 
         assert self.dispatcher is not None  # open() built it: the source registers once it is open
         if start.record is not None:
             self.restore(self.dispatcher, start.record, start.policy_version)
+            load_credit_states(self.workflow, start.loop_state.get(CREDIT_KEY))
 
     def restore(self, dispatcher: "Dispatcher", record: Any, policy_version: int) -> None:
         """Take up what checkpoint ``record`` saved of the draws: the groups it kept, the draws to draw again and the

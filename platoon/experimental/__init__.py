@@ -42,6 +42,13 @@ workflow class can do beyond it (:class:`WorkflowCapabilities`, read through :fu
 group's output is read: its report (:class:`OutputReport`, :func:`report_of`) and its rows by policy
 (:class:`RolloutOutput`, :func:`rows_by_policy`).  A trainer that rolls out draws the run's groups through
 ``run.rollouts()``.
+And credit estimators (RFC 0021): how an environment entry's training groups turn rewards into advantages
+(:class:`CreditEstimator`, or a subclass of :class:`CreditEstimatorBase`), built per entry with a :class:`CreditSetup`
+and checked at load (:class:`CreditCheckContext`); its ``assign`` sees a :class:`CreditGroup` of
+:class:`MemberRollout` members, each agent an :class:`AgentRun` (role, policy, own reward, rows), each row a
+:class:`TrainingSample`, and the run's policies as :class:`PolicyView` views.  It is registered with
+:func:`credit_estimator` or named as ``module:Class``, and ``platoon.testing.check_credit_estimator`` checks it.
+``docs/extending/credit-estimators.md`` is the guide.
 
 This module imports neither ``tinker`` nor ``datasets``.
 """
@@ -56,6 +63,18 @@ from platoon.train.admission_api import (
     group_admission,
 )
 from platoon.train.checkpoints.participants import CheckpointParticipant
+from platoon.train.credit.api import (
+    AgentRun,
+    CreditCheckContext,
+    CreditEstimator,
+    CreditEstimatorBase,
+    CreditGroup,
+    CreditSetup,
+    MemberRollout,
+    PolicyView,
+    TrainingSample,
+)
+from platoon.train.credit.registry import credit_estimator
 from platoon.train.leases import RolloutLease, rollout_lease
 from platoon.train.objectives.api import Objective
 from platoon.train.policy.snapshot import PolicyMoved, PolicySnapshot
@@ -162,4 +181,15 @@ __all__ = [
     "OutputReport",
     "report_of",
     "rows_by_policy",
+    # credit estimators (RFC 0021)
+    "CreditEstimator",
+    "CreditEstimatorBase",
+    "CreditSetup",
+    "CreditCheckContext",
+    "CreditGroup",
+    "MemberRollout",
+    "AgentRun",
+    "TrainingSample",
+    "PolicyView",
+    "credit_estimator",
 ]

@@ -166,6 +166,8 @@ entry's `package` registers.
 | `task_sampler_options` | dict[str, Any] | `{}` | Options of the entry's task_sampler, checked against its options when the config loads (pass_rate's: explore, max_draws_per_epoch, max_outstanding_per_task, candidates, seed); `uniform` takes none. |
 | `group_admission` | str \| None | `null` | Which of the entry's settled training groups count toward the batch (experimental; null: the run's, `train.group_admission`, with its options): `all`, `informative`, a name the entry's `package` registers with `@group_admission`, or `module:Class`. Once any entry's rule is not `all`, every entry's groups are counted as train.group_admission says (a stale or failed group of an entry at `all` no longer counts toward the batch), and train.refill's cap is the run's. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
 | `group_admission_options` | dict[str, Any] | `{}` | Options of the entry's own group_admission, which they go with (an entry that sets none inherits the run's rule and options); `all` takes none. |
+| `credit` | str \| None | `null` | How the entry's training groups turn rewards into advantages (experimental; null: the workflow's own credit, each rollout's datums centered on the group's completed-root baseline): `group` (that credit, as an estimator), `keyed` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), a name the entry's `package` registers with `@credit_estimator`, or `module:Class`. Its estimator runs once per group in the trainer, never in an evaluation. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
+| `credit_options` | dict[str, Any] | `{}` | Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key, leave_one_out); `group` takes none. |
 | `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's own training settings, laid over `train.workflow_config` for its training groups: the keys that act on one group or one rollout (EntryWorkflowSettings), such as `group_size`, `min_successful_group_size`, `leave_one_out_baseline` and `rollout_config.max_steps`. A key it leaves out keeps the run's; `null` unsets it. Its rollout settings are also its evaluation's defaults, below the phase's section (eval.workflow_config, inference.workflow), and `eval_overrides.workflow_config` sets what its evaluation rollouts change. `platoon config show` prints each entry's effective settings and where each came from. |
 | `max_staleness` | int \| None | `null` | How many policy versions old the entry's training groups may be and still train (null: the run's, `train.max_staleness`): the stale filter's bound for its groups. At least the run's, which stays the bound on how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning keeps the checkpoints within the largest bound of the run and its entries. |
 | `success_threshold` | float | `1.0` | The lowest reward that counts a training rollout of the entry as a pass, in the per-task statistics and their metrics (platoon.train.task_stats), judged as platoon eval judges success: on the reward the entry's environment scored, before any reward processor. A partial-credit environment sets its own. |
@@ -771,3 +773,25 @@ long, and how each conversation is cut and which of its turns train.
 | `max_length` | int \| None | `null` | Tokens a rendered conversation is cut to, as LLaMA-Factory's cutoff_len cuts it: turn by turn from the first (from the last with mask_history), each prompt and reply sharing what is left; null: no cut. |
 | `mask_history` | bool | `false` | Train on the last model turn of each conversation only (LLaMA-Factory's mask_history), not on every one. |
 | `seed` | int | `42` | Seeds each epoch's order of the conversations, and which rows a dataset's num_samples takes. |
+
+<a id="credit-estimators"></a>
+
+## Credit estimators
+
+`environments[].credit` chooses how an entry's training groups turn rewards into advantages (experimental), with its options beside it (`credit_options`); an entry that sets none keeps the workflow's own credit. Its estimator runs once per group in the trainer, never in an evaluation. Core's estimators are below; a package an entry names may register others with `@credit_estimator`, and `module:Class` names one ([Write a credit estimator](../extending/credit-estimators.md)).
+
+| Estimator | What it does | Options |
+|---|---|---|
+| `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards (the group mean, or with the entry's `leave_one_out_baseline` the leave-one-out mean), value for value. An entry without `credit` gets the same credit from the workflow itself. | none |
+| `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, `policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the subagents'. Reads agents: the rollout workers tag each row with its agent. | [below](#keyed-options) |
+
+<a id="keyed-options"></a>
+
+### `keyed`'s options
+
+`platoon.train.credit.keyed.KeyedOptions`: the keys of `credit_options` under `credit: keyed`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `key` | list[str] | `["task", "policy", "role"]` | What an agent's baseline is keyed by: one or more of task, policy, role and depth, each once. A group holds one task, so task alone keys every agent of the group together. |
+| `leave_one_out` | bool | `false` | Center each agent on the mean of the others of its key, not of all of them (an agent alone in its key gets 0). |

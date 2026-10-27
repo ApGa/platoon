@@ -184,10 +184,49 @@ platoon.experimental.AdmissionSetup.entry: field str | None
 platoon.experimental.AdmissionSetup.label_column: field str
 platoon.experimental.AdmissionSetup.level: field Level
 platoon.experimental.AdmissionSetup.name: field str
+platoon.experimental.AgentRun: @dataclass class AgentRun
+platoon.experimental.AgentRun.agent_id: field str
+platoon.experimental.AgentRun.depth: field int
+platoon.experimental.AgentRun.parent_id: field str | None
+platoon.experimental.AgentRun.policy: field PolicyId
+platoon.experimental.AgentRun.reward: field float | None
+platoon.experimental.AgentRun.role: field str
+platoon.experimental.AgentRun.samples: field list[TrainingSample] = <factory list>
+platoon.experimental.AgentRun.trajectory_id: field str
 platoon.experimental.CheckpointParticipant: class CheckpointParticipant(Protocol)
 platoon.experimental.CheckpointParticipant.checkpoint_state: async def checkpoint_state(name: str) -> Mapping[str, Any]
 platoon.experimental.CheckpointParticipant.keys: attribute tuple[str, ...]
 platoon.experimental.CheckpointParticipant.resume: def resume(start: StartPoint) -> None
+platoon.experimental.CreditCheckContext: @dataclass(frozen=True) class CreditCheckContext
+platoon.experimental.CreditCheckContext.config: field Any
+platoon.experimental.CreditCheckContext.entry: field str
+platoon.experimental.CreditCheckContext.policies: field tuple[PolicyId, ...]
+platoon.experimental.CreditEstimator: class CreditEstimator(Protocol)
+platoon.experimental.CreditEstimator.assign: async def assign(group: CreditGroup) -> None
+platoon.experimental.CreditEstimator.needs_agents: attribute ClassVar[bool]
+platoon.experimental.CreditEstimatorBase: class CreditEstimatorBase
+platoon.experimental.CreditEstimatorBase.__init__: def __init__(setup: CreditSetup, options: Any = None) -> None
+platoon.experimental.CreditEstimatorBase.assign: async def assign(group: CreditGroup) -> None
+platoon.experimental.CreditEstimatorBase.assign_timeout_seconds: constant float = 600.0
+platoon.experimental.CreditEstimatorBase.check: staticmethod def check(options: Any, ctx: CreditCheckContext) -> None
+platoon.experimental.CreditEstimatorBase.needs_agents: constant bool = False
+platoon.experimental.CreditEstimatorBase.options_schema: constant NoneType = None
+platoon.experimental.CreditGroup: @dataclass class CreditGroup
+platoon.experimental.CreditGroup.agents: def agents() -> list[AgentRun]
+platoon.experimental.CreditGroup.entry: field str | None
+platoon.experimental.CreditGroup.label: field str | None
+platoon.experimental.CreditGroup.members: field list[MemberRollout]
+platoon.experimental.CreditGroup.policies: field Mapping[PolicyId, PolicyView]
+platoon.experimental.CreditGroup.samples: def samples() -> list[TrainingSample]
+platoon.experimental.CreditGroup.settings: field WorkflowConfig
+platoon.experimental.CreditGroup.stats: field DeferredStats | StatsTracker
+platoon.experimental.CreditGroup.task_id: field str
+platoon.experimental.CreditGroup.versions: field Mapping[PolicyId, int]
+platoon.experimental.CreditSetup: @dataclass(frozen=True) class CreditSetup
+platoon.experimental.CreditSetup.entry: field str
+platoon.experimental.CreditSetup.name: field str
+platoon.experimental.CreditSetup.policies: field tuple[PolicyId, ...]
+platoon.experimental.CreditSetup.settings: field WorkflowConfig
 platoon.experimental.Draw: @dataclass(frozen=True) class Draw
 platoon.experimental.Draw.reason: field str = "order"
 platoon.experimental.Draw.score: field float | None = None
@@ -258,6 +297,13 @@ platoon.experimental.MemberResult.steps: field int | None
 platoon.experimental.MemberResult.to_json: def to_json() -> dict[str, Any]
 platoon.experimental.MemberResult.valid: field bool
 platoon.experimental.MemberResult.versions: field Mapping[str, tuple[int, int]] = <factory dict>
+platoon.experimental.MemberRollout: @dataclass class MemberRollout
+platoon.experimental.MemberRollout.agents: field list[AgentRun]
+platoon.experimental.MemberRollout.index: field int
+platoon.experimental.MemberRollout.result: field TrajectoryCollectionResult
+platoon.experimental.MemberRollout.samples: field list[TrainingSample]
+platoon.experimental.MemberRollout.task_reward: field float
+platoon.experimental.MemberRollout.task_reward_valid: field bool
 platoon.experimental.Objective: class Objective(Protocol)
 platoon.experimental.Objective.loss_fn: attribute str
 platoon.experimental.Objective.loss_fn_config: attribute dict[str, Any]
@@ -303,6 +349,9 @@ platoon.experimental.PolicySpec.renderer_kwargs: field dict[str, Any] = <factory
 platoon.experimental.PolicySpec.renderer_name: field str
 platoon.experimental.PolicySpec.sample_timeout_seconds: field float | None = None
 platoon.experimental.PolicySpec.tinker_base_url: field str | None = None
+platoon.experimental.PolicyView: @dataclass(frozen=True) class PolicyView
+platoon.experimental.PolicyView.id: field PolicyId
+platoon.experimental.PolicyView.renderer: field Any = None
 platoon.experimental.RolloutLease: class RolloutLease(Protocol)
 platoon.experimental.RolloutLease.rollout: def rollout(index: int) -> AbstractAsyncContextManager[float]
 platoon.experimental.RolloutLease.size: property int
@@ -485,7 +534,20 @@ platoon.experimental.TrainerSetup.options: field Any = None
 platoon.experimental.TrainerSetup.policy_specs: field Mapping[str, platoon.train.policy.spec.PolicySpec]
 platoon.experimental.TrainerSetup.tasks: field platoon.train.trainer.api.TaskSources | None = None
 platoon.experimental.TrainerSetup.workflow_builder: field Callable[[PolicySet], Workflows] | None = None
+platoon.experimental.TrainingSample: @dataclass(eq=False) class TrainingSample
+platoon.experimental.TrainingSample.advantages: property torch.Tensor
+platoon.experimental.TrainingSample.agent_id: field str | None = None
+platoon.experimental.TrainingSample.datum: field tinker.Datum
+platoon.experimental.TrainingSample.depth: field int | None = None
+platoon.experimental.TrainingSample.mask: property torch.Tensor
+platoon.experimental.TrainingSample.member: field int
+platoon.experimental.TrainingSample.policy: field PolicyId
+platoon.experimental.TrainingSample.role: field str | None = None
+platoon.experimental.TrainingSample.set_advantage: def set_advantage(value: float) -> None
+platoon.experimental.TrainingSample.set_advantages: def set_advantages(values: torch.Tensor | Sequence[float]) -> None
+platoon.experimental.TrainingSample.trajectory_id: field str | None = None
 platoon.experimental.WorkflowCapabilities: @dataclass(frozen=True) class WorkflowCapabilities
+platoon.experimental.WorkflowCapabilities.applies_credit: field bool = False
 platoon.experimental.WorkflowCapabilities.applies_entry_settings: field bool = False
 platoon.experimental.WorkflowCapabilities.binds_policies: field bool = False
 platoon.experimental.WorkflowCapabilities.gives_verdicts: field bool = False
@@ -496,6 +558,7 @@ platoon.experimental.WorkflowCapabilities.takes_start_limit: field bool = False
 platoon.experimental.WorkflowSetup: @dataclass(frozen=True) class WorkflowSetup
 platoon.experimental.WorkflowSetup.config: field Any
 platoon.experimental.WorkflowSetup.entry_configs: field Mapping[str, Any] | None
+platoon.experimental.WorkflowSetup.entry_credit: field Mapping[str, Any] = <factory dict>
 platoon.experimental.WorkflowSetup.filter_errors: field bool
 platoon.experimental.WorkflowSetup.get_task_fn: field Callable[[str], Any]
 platoon.experimental.WorkflowSetup.label_by: field str | None = None
@@ -511,6 +574,7 @@ platoon.experimental.Workflows: @dataclass(frozen=True) class Workflows
 platoon.experimental.Workflows.eval: field Any | None = None
 platoon.experimental.Workflows.train: field Any
 platoon.experimental.capabilities_of: def capabilities_of(workflow: object) -> platoon.train.workflow.protocol.WorkflowCapabilities
+platoon.experimental.credit_estimator: def credit_estimator(name: str, *, options: Any = None, check: Callable[[Any, CreditCheckContext], None] | None = None) -> Callable[[R], R]
 platoon.experimental.group_admission: def group_admission(name: str, *, options: Any = None, check: Callable[[Any, AdmissionCheckContext], None] | None = None) -> Callable[[R], R]
 platoon.experimental.informative_at: def informative_at(alpha: float, beta: float, k: int) -> float
 platoon.experimental.pass_at: def pass_at(alpha: float, beta: float, k: int) -> float
@@ -574,6 +638,7 @@ platoon.testing.ScriptedPolicy.tokens: def tokens(completion: Completion) -> lis
 platoon.testing.TOY_MODEL_NAME: constant str = "platoon/toy"
 platoon.testing.TOY_RENDERER_NAME: constant str = "qwen3_instruct"
 platoon.testing.TOY_TOKENIZER_DIR: constant Path
+platoon.testing.check_credit_estimator: def check_credit_estimator(estimator: type | str, *, options: Mapping[str, Any] | None = None) -> None
 platoon.testing.check_group_admission: def check_group_admission(rule: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('run', 'entry'), budget_ms: float | None = 2.0) -> None
 platoon.testing.check_task_sampler: def check_task_sampler(sampler: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('entry', 'run'), budget_ms: float | None = 20.0) -> None
 platoon.testing.check_trainer: def check_trainer(trainer: type[Trainer], *, options: Any = None, options_for_steps: Callable[[int], Any] | None = None) -> None

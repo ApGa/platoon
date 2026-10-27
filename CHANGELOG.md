@@ -320,12 +320,12 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 - **The rules of a run's checkpoints and close.** A participant's keys are its own: `run.checkpoints.register` refuses
   the counters', those kept for several policies, the fields that a `checkpoints.jsonl` row holds itself (`name`,
   `epoch`, `final`, `state_path` and `sampler_path`, read from tinker_cookbook's `CheckpointRecord`, which an entry of
-  the same name would replace or be replaced by), a step hook's of the draws (`tasks`, `next_position`, `dispatch`) and
-  another participant's, with a `ConfigError` (exit 78) that names the participant and the key. Those registered in
-  `check()` take up the start point before any training client opens, and a key of the resumed row that nothing claims
-  stops the start (exit 78). The trainer's `close` now runs in `finally`, also after a failure (`run.ended` tells them
-  apart), then each hook's and participant's `aclose`, in reverse order of registration; a start that failed raises its
-  error as it was, the close's errors noted on it.
+  the same name would replace or be replaced by), a step hook's of the draws (`tasks`, `next_position`, `dispatch`,
+  `credit`) and another participant's, with a `ConfigError` (exit 78) that names the participant and the key. Those
+  registered in `check()` take up the start point before any training client opens, and a key of the resumed row that
+  nothing claims stops the start (exit 78). The trainer's `close` now runs in `finally`, also after a failure
+  (`run.ended` tells them apart), then each hook's and participant's `aclose`, in reverse order of registration; a start
+  that failed raises its error as it was, the close's errors noted on it.
 - **What a trainer asks of the run (rule 10).** `TrainerNeeds` gains `atomic_steps` (an interrupt inside a step that
   sent training work saves no `<step>_interrupted` checkpoint of it, and the resume starts from the last full one),
   `fail_closed_updates` (an optimizer step that the service skipped, or whose metrics are not finite, raises
@@ -349,6 +349,30 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   (RFC 0020's P5; [Per-datum stale masks](docs/how-to/train-and-eval.md#per-datum-stale-masks-experimental)). Under
   `group` nothing a run does changes, but the staleness warning's last advice, which named the masks as planned, now
   names `train.stale_filter: datum`.
+- **Credit estimators, chosen per environment entry (experimental).** `environments[].credit` (with `credit_options`)
+  chooses how an entry's training groups turn rewards into advantages, in place of the workflow's own credit:
+  `group` (that credit, as an estimator, value for value), `keyed` (each agent's rows centered on the mean reward of
+  the group's agents that share its key, any of `task`, `policy`, `role` and `depth`, optionally leave-one-out: under
+  `[task, role]` a subagent is centered on the group's subagents, not on its rollout's root baseline), a name an entry's
+  `package` registers with `@credit_estimator`, or `module:Class`. The training workflow awaits the entry's estimator
+  once per group, in the trainer, after every member has settled; evaluation never runs one. An estimator that reads
+  agents (`needs_agents`) has the rollout workers tag each row with the agent that produced it (worker protocol 3,
+  `PolicyRolloutWorkerRequest`, sent only then), and sees every agent of every member with its role, policy, depth,
+  parent, own reward and rows; the group's output is then `PolicyGroupOutput`, its rows with their tags, which a full
+  checkpoint keeps whole. An estimator with state changes it in `settle(group)` as the run files each group, and each
+  full checkpoint saves it (`loop_state.credit`) with the groups it keeps. An estimator that raises, or whose `assign`
+  does not return within its `assign_timeout_seconds` (600 by default), stops the run with a `CreditEstimatorError`
+  that names it and its entry. Loading resolves each estimator, checks its
+  options and runs its `check` (exit 78), refuses one beside a workflow that does not apply it (the new capability
+  `applies_credit`; a `GroupRolloutWorkflow` subclass that overrides `compute_baselines` or `assign_advantages` keeps
+  crediting with them), and `lock.json` records it (`kind: credit`). `platoon.experimental` exports the credit API
+  (`CreditEstimator`, `CreditEstimatorBase`, `CreditSetup`, `CreditCheckContext`, `CreditGroup`, `MemberRollout`,
+  `AgentRun`, `TrainingSample`, `PolicyView`, `credit_estimator`), and `platoon.testing.check_credit_estimator` checks
+  an estimator: advantages on action tokens only, and a resume that credits as the run would have
+  ([Credit each environment's groups](docs/how-to/train-and-eval.md#credit-each-environments-groups-experimental),
+  [Write a credit estimator](docs/extending/credit-estimators.md);
+  [`examples/credit-by-role`](examples/credit-by-role/README.md) gives each role of a delegating rollout a baseline of
+  its own). A run whose entries set no `credit` runs as before, request for request.
 
 ### Changes
 

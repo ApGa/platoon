@@ -225,6 +225,7 @@ group is kept.
 | `train.workflow_config.filter_errors` | `true` | Suppress positive-advantage error tokens |
 | `train.workflow_config.filter_zero_advantage_datums` | `true` | Skip the model pass for all-zero-advantage datums. A step whose every advantage is zero takes no optimizer update either way, under the `cispo`, `ppo` and `importance_sampling` losses with no `loss_fn_config` keys but their clip thresholds |
 | `train.workflow_config.min_successful_group_size` | `1` | Fewest trainable rollouts (completed, `scored` roots) a group needs to train |
+| `environments[].credit`, `credit_options` | null: step 5 above | An entry's credit estimator (experimental): `group`, `keyed` (each agent centered on the group's agents of its task, policy, role or depth), a registered name or `module:Class` |
 
 The keys that act on one group (`group_size`, `leave_one_out_baseline`, `min_successful_group_size`, `filter_errors`,
 `filter_message_actions` and the subagent datum sampling) may differ by environment: an entry's own `workflow_config`
@@ -232,9 +233,14 @@ sets them for its groups, laid over `train.workflow_config`
 ([Settings per environment](../how-to/train-and-eval.md#settings-per-environment)). Depth weighting and the
 zero-advantage filter act on microbatches, which mix entries' groups, so they stay the run's.
 
-To estimate advantages another way, subclass
-`platoon.train.workflow.GroupRolloutWorkflow`, override `compute_baselines` or
-`assign_advantages`, and select the class with `environments[0].workflow: package.module.MyWorkflow`. Inside an
+To estimate advantages another way, give the entry a credit estimator (`environments[].credit`): `keyed` centers
+each agent on the group's agents of its key, so that under `credit_options: {key: [task, role]}` a subagent is centered
+on the group's subagents and not on its rollout's root baseline, and an estimator of your own sees every member's
+agents, with their roles and their own rewards
+([Credit each environment's groups](../how-to/train-and-eval.md#credit-each-environments-groups-experimental),
+[Write a credit estimator](../extending/credit-estimators.md)). A subclass of
+`platoon.train.workflow.GroupRolloutWorkflow` that overrides `compute_baselines` or `assign_advantages`, selected with
+`environments[0].workflow: package.module.MyWorkflow`, still works, and credits with its overrides. Inside an
 override, `self.config` holds the settings of the group's environment entry, and
 `platoon.train.workflow.current_entry()` names that entry.
 

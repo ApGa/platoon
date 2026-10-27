@@ -760,6 +760,62 @@ environments[slow-tasks], evaluation during training:
   ...
 ```
 
+## Credit each environment's groups (experimental)
+
+A group's rewards become its advantages through its credit. Without a setting, every rollout's datums, the root's and
+each subagent's alike, are centered on the group's mean completed-root reward (or the leave-one-out mean with
+`leave_one_out_baseline`), as [Credit assignment](../tutorials/credit-assignment.md) describes. An environment entry may
+choose a credit estimator instead, with its options beside it:
+
+```yaml
+environments:
+  - name: delegate
+    service: python://vault_env:VaultEnvironment
+    harness: example-delegator
+    credit: keyed                              # null, the default: the workflow's own credit
+    credit_options: {key: [task, role], leave_one_out: true}
+  - name: solo                                 # no credit key: the workflow's own credit
+    service: python://guess:GuessTheNumber
+    harness: platoon-react
+```
+
+| Estimator | What it does | Options |
+|---|---|---|
+| `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards, value for value | none |
+| `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key: under `[task, role]` the roots on the roots' mean and the subagents on the subagents', where `group` centers every agent on its rollout's root baseline | `key`: one or more of `task`, `policy`, `role` and `depth` (default `[task, policy, role]`); `leave_one_out` (default false): the mean of the other agents of its key, an agent alone in its key getting 0 |
+| a name an entry's `package` registers with `@credit_estimator`, or `module:Class` | yours ([Write a credit estimator](../extending/credit-estimators.md); [`examples/credit-by-role`](../../examples/credit-by-role/README.md) is one of about 40 lines) | its own |
+
+**Where it runs.** The training workflow awaits the entry's estimator once per group, in the trainer process, after
+every member of the group has settled; the error-token filter, the group's verdict and its output come after it, as
+without one. Under `train.permit_release: rollout`, the default, the members have returned their rollout permits by
+then; under `group` the group holds them, and in both modes its label slot, until the estimator returns. Evaluation never runs an
+estimator, so an evaluation's rollouts cost nothing more. An estimator that reads agents (`keyed`, `by_role`) has the
+rollout workers tag each row with the agent that produced it (worker protocol 3), and sees each member's agents: each
+agent's role (the root's is `policy`, a subagent's the role its harness minted it with, `subagent` for
+`ctx.agents.spawn`), its depth and parent, its rows, and its own reward, the processed reward of its trajectory, as
+the converter loaded it onto its action tokens. An agent that was not scored, interrupted or a child whose verifier
+gave no verdict (a judge error, an unparseable or a pending one), has no reward: it enters no baseline, and it has no
+rows. A row that reaches such an estimator without its tags (a workflow subclass that runs its members another way)
+fails its group, with an error that says why. An estimator that raises, or whose `assign` does not return within its
+`assign_timeout_seconds` (600 by default), stops the run with an error that names it and its entry.
+
+**What loads.** The estimator resolves when the config loads (core's names, then names the entries' packages register,
+then `module:Class`), its options are checked against its schema and its `check` runs: an unknown name, an option it
+does not take or a refused check stops `platoon train` and `platoon config validate` with exit code 78. So does an
+estimator beside a workflow class that does not apply it (one that is no `GroupRolloutWorkflow` and does not declare
+`applies_credit = True`, or a subclass that overrides `compute_baselines` or `assign_advantages`, which keeps
+crediting with them), and options without an estimator. A named environment (`env:`) cannot choose one. `lock.json`
+records each estimator with the entries that use it and their options, defaults included (`kind: credit`); a run whose
+entries set none records nothing new, and runs as before, request for request.
+
+**What a resume does.** A group's credit is final when the group settles: a checkpoint that keeps a settled group
+keeps its advantages, and the resume trains it with them. An estimator with state (a running baseline, say) changes it
+as each group is filed, and each full checkpoint saves it with the groups it keeps (`loop_state.credit`), so a resume
+takes up both; a resume whose entry names another estimator than the one that saved the state starts it afresh, with a
+warning. Credit metrics go with the group, recorded in the step that trains it: `keyed` logs
+`credit/keyed/baselines` (the keys a group's agents fell into) and `credit/agent_advantage/abs_avg`, beside the
+`credit/baseline/*` of the workflow's own credit.
+
 ## Label tasks by a column
 
 Each task of a run is a dataset row: its `task_id` and the columns its environment gives it. A mixture gives each

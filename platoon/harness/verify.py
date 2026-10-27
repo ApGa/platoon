@@ -41,6 +41,8 @@ from platoon.utils.judges import JUDGES_OFF, VERIFIER_ROLE, judges_enabled
 from platoon.utils.trajectory_status import (
     EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY,
     EXCLUDE_FROM_TRAINING_MISC_KEY,
+    SUBAGENT_REWARD_JUDGMENT_MISC_KEY,
+    SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY,
     SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
     TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY,
     trajectory_has_forced_zero_reward,
@@ -52,12 +54,10 @@ if TYPE_CHECKING:
     from platoon.harness.agent import AgentResult
     from platoon.trajectory import Trajectory, TrajectoryCollection
 
-SUBAGENT_REWARD_JUDGMENT_MISC_KEY = "subagent_reward_judgment"
 SUBAGENT_OUTCOME_JUDGMENT_MISC_KEY = "subagent_outcome_judgment"
 SUBAGENT_BEHAVIOR_JUDGMENT_MISC_KEY = "subagent_behavior_judgment"
 SUBAGENT_PARENT_USAGE_JUDGMENT_MISC_KEY = "subagent_parent_usage_judgment"
 SUBAGENT_REWARD_VERIFIES_TRAJECTORY_ID_MISC_KEY = "subagent_reward_verifies_trajectory_id"
-SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY = "training_eligible"
 
 DEFAULT_VERIFIER_MAX_STEPS = 20
 

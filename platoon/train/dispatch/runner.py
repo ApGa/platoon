@@ -12,6 +12,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from platoon.train.admissions import AdmissionSet
+from platoon.train.credit.runtime import CreditEstimatorError, settle_credit
 from platoon.train.dispatch.dispatcher import BoundDraw
 from platoon.train.dispatch.permits import DrawLease
 from platoon.train.dispatch.settled import _Settled, carries_datums, emptied
@@ -54,11 +55,14 @@ async def _run_group(
     """Run the group of ``row`` and return its workflow's output; None for a workflow that raised, or whose own
     await was cancelled while this group was not (an inner task it awaited was cancelled): the group failed,
     which ``tracker`` records at once (``rollout_completion/failed_rollouts``), no group output carrying it to the
-    step that consumes the group.  A cancellation of the group itself goes on."""
+    step that consumes the group.  A cancellation of the group itself goes on, and so does the error of a credit
+    estimator (:class:`~platoon.train.credit.runtime.CreditEstimatorError`), which stops the run."""
 
     task_id = row.get("task_id", "unknown")
     try:
         return await _await_rollout_with_heartbeat(workflow.arun_episode(row), watchdog=watchdog)
+    except CreditEstimatorError:
+        raise
     except asyncio.CancelledError:
         current = asyncio.current_task()
         if current is None or current.cancelling():
@@ -73,9 +77,12 @@ async def _run_group(
 async def _run_training_group(source: "RolloutSource", draw: BoundDraw, lease: DrawLease) -> None:
     """Run the group of one of the source's draws, whose label slot and rollout permits are taken, with the draw's
     ``lease`` as its workflow's :func:`~platoon.train.leases.rollout_lease`: release them once its workflow returns
-    (calling ``lease``), record the group in the run's per-task statistics, and hand its output to the step that
-    dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group admission
-    rule, the group is decided first (:func:`_settle_under_rule`)."""
+    (calling ``lease``), settle its credit estimator's state (:func:`~platoon.train.credit.runtime.settle_credit`),
+    record the group in the run's per-task statistics, and hand its output to the step that dequeues it
+    (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group admission rule, the group
+    is decided first (:func:`_settle_under_rule`).  Nothing is awaited from the settling of its credit to its hand-over,
+    so a full checkpoint, which takes the estimators' state where it takes the groups it keeps, holds both or
+    neither."""
 
     dispatcher, tracker, watchdog = source.dispatcher, source.tracker, source.watchdog
     assert dispatcher is not None and tracker is not None  # the source started it
@@ -86,6 +93,7 @@ async def _run_training_group(source: "RolloutSource", draw: BoundDraw, lease: D
     finally:
         lease()
     _group_done(rollout, time.perf_counter() - start_time, draw.task_id, tracker, watchdog)
+    settle_credit(rollout)
     recorder = source.recorder
     record = (
         recorder.settle(draw.row, entry=draw.entry, label=draw.label, output=rollout) if recorder is not None else None

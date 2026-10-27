@@ -79,12 +79,12 @@ from platoon.train.components import RUN_LEVEL_FIELDS
 logger = logging.getLogger(__name__)
 
 # Keys a named environment may not set: what identifies or weighs an entry in a run (``env``, ``name``,
-# ``weight``), how a run draws its tasks (``task_sampler``, ``task_sampler_options``) and which of its groups count
-# (``group_admission``, ``group_admission_options``), its staleness bound (``max_staleness``, training strategy too),
-# the options of one harness (``harness_options``: use ``harness_defaults``, keyed by harness), the tasks a run leaves
-# out (``exclude_tasks``: an entry's own list would replace the environment's, not add to it, and bring its tasks back
-# unnoticed), and the run-level settings, which are the run's to choose.  Of ``workflow_config`` it may set
-# ``rollout_config`` only (:data:`SHIPPED_SETTINGS`).
+# ``weight``), how a run draws its tasks (``task_sampler``, ``task_sampler_options``), which of its groups count
+# (``group_admission``, ``group_admission_options``) and how they are credited (``credit``, ``credit_options``), its
+# staleness bound (``max_staleness``, training strategy too), the options of one harness (``harness_options``: use
+# ``harness_defaults``, keyed by harness), the tasks a run leaves out (``exclude_tasks``: an entry's own list would
+# replace the environment's, not add to it, and bring its tasks back unnoticed), and the run-level settings, which are
+# the run's to choose.  Of ``workflow_config`` it may set ``rollout_config`` only (:data:`SHIPPED_SETTINGS`).
 FORBIDDEN_KEYS = frozenset(
     {
         "env",
@@ -94,6 +94,8 @@ FORBIDDEN_KEYS = frozenset(
         "task_sampler_options",
         "group_admission",
         "group_admission_options",
+        "credit",
+        "credit_options",
         "max_staleness",
         "harness_options",
         "exclude_tasks",
@@ -116,11 +118,12 @@ class EnvironmentEntry:
     keys of an ``environments`` entry (``service``, ``service_kwargs``, ``harness``, ``program``,
     ``reward_processor``, ``agents``, ``dataset_kwargs``, ...), checked against the config schema when the entry
     is built.  A run chooses the rest (:data:`FORBIDDEN_KEYS`): ``env``, ``name``, ``weight``, ``task_sampler`` and
-    ``task_sampler_options``, ``group_admission`` and ``group_admission_options``, ``max_staleness``, the run-level
-    settings, the tasks it leaves out (``exclude_tasks``; an environment that should not offer a task leaves it out of
-    its own task lists, in a new version), ``harness_options``, for which ``harness_defaults`` maps a harness name to
-    the options the environment needs from that harness, of ``workflow_config`` all but the rollout settings
-    (``rollout_config``) its tasks were measured with, and ``eval_overrides.workflow_config``.
+    ``task_sampler_options``, ``group_admission`` and ``group_admission_options``, ``credit`` and ``credit_options``,
+    ``max_staleness``, the run-level settings, the tasks it leaves out (``exclude_tasks``; an environment that should
+    not offer a task leaves it out of its own task lists, in a new version), ``harness_options``, for which
+    ``harness_defaults`` maps a harness name to the options the environment needs from that harness, of
+    ``workflow_config`` all but the rollout settings (``rollout_config``) its tasks were measured with, and
+    ``eval_overrides.workflow_config``.
     """
 
     # The environment's name, ``<owner>-<name>``.

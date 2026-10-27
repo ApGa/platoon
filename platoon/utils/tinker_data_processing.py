@@ -28,6 +28,7 @@ from platoon.utils.trajectory_status import (
     EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY,
     EXCLUDE_FROM_TRAINING_MISC_KEY,
     SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY,
+    trajectory_lacks_verdict,
     trajectory_was_interrupted,
 )
 
@@ -189,6 +190,28 @@ class SubagentDatumSamplingStats:
         return metrics
 
 
+# The trajectory misc key under which the gateway records the agent that ran a trajectory: its ``agent_id`` and its
+# ``role`` (platoon.gateway.trace.AGENT_MISC_KEY), and the role of a trajectory that records none.
+AGENT_MISC_KEY = "agent"
+DEFAULT_ROLE = "policy"
+
+
+@dataclass(frozen=True)
+class AgentTag:
+    """Who produced one trajectory of a rollout, for a credit estimator that reads agents (``tag_datums``): the agent
+    the gateway recorded (a trajectory that records none, which a rollout run outside the gateway writes, is its own
+    agent, of the root's default role), its parent's trajectory (None for the root), its depth in the tree, and its
+    processed reward, None when it is no score: the trajectory was interrupted, or it is a child whose verifier gave
+    no verdict; its rows then train nothing."""
+
+    trajectory_id: str
+    agent_id: str
+    role: str
+    parent_id: str | None
+    depth: int
+    reward: float | None
+
+
 @dataclass
 class TrajectoryCollectionResult:
     """Result from processing a trajectory collection."""
@@ -202,6 +225,10 @@ class TrajectoryCollectionResult:
     # Interrupted roots may carry a partial reward which is useful for metrics,
     # but must not participate in group advantage centering.
     task_reward_valid: bool = True
+    # With ``tag_datums``: every trajectory's agent, and each datum's trajectory, aligned with ``datums`` as converted.
+    # None without it.
+    agents: tuple[AgentTag, ...] | None = None
+    datum_trajectories: tuple[str, ...] | None = None
     # Each datum's own policy version, in the order of ``datums`` as the conversion returned them: the oldest version
     # its merged calls sampled, or its rollout's (its ``checkpoint_version``) when a call recorded none.  Empty from a
     # conversion that gives none (and in a result pickled before the field, by this class default).  Whatever changes
@@ -561,6 +588,7 @@ def get_train_data_for_trajectory_collection(
     include_traj_start: bool = False,
     subagent_datum_sampler: SubagentDatumSampler | None = None,
     filter_message_actions: bool = False,
+    tag_datums: bool = False,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -579,6 +607,9 @@ def get_train_data_for_trajectory_collection(
         reward_processor: Function to process trajectory rewards.
         subagent_datum_sampler: Optional deterministic sampler applied to each
             non-root trajectory after its steps have been merged into datums.
+        tag_datums: Also give every trajectory's agent and each datum's
+            trajectory (``agents``, ``datum_trajectories``), for a credit
+            estimator that reads agents.
 
     Returns:
         TrajectoryCollectionResult with datums and per-trajectory statistics.
@@ -595,7 +626,9 @@ def get_train_data_for_trajectory_collection(
     task_reward_valid = True
     if root_trajectory_id is not None:
         task_reward_valid = not trajectory_was_interrupted(trajectories[root_trajectory_id])
-    need_depths = include_traj_depth or subagent_datum_sampler is not None
+    need_depths = include_traj_depth or subagent_datum_sampler is not None or tag_datums
+    agents: list[AgentTag] = []
+    datum_trajectories: list[str] = []
     depth_map = _compute_trajectory_depths(trajectory_collection) if need_depths else {}
 
     # Process every trainable trajectory's reward before sampling any datums.
@@ -692,6 +725,9 @@ def get_train_data_for_trajectory_collection(
                 datum.loss_fn_inputs.pop("traj_start", None)
 
         train_data.extend(retained_datums)
+        if tag_datums:
+            agents.append(_agent_tag(trajectory_id, trajectory, depth, trajectory_reward))
+            datum_trajectories.extend([trajectory_id] * len(retained_datums))
 
         # Record per-trajectory stats
         trajectory_stats.append(
@@ -721,7 +757,29 @@ def get_train_data_for_trajectory_collection(
         subagent_sampling_stats=sampling_stats,
         num_policy_excluded_datums=num_policy_excluded_datums,
         task_reward_valid=task_reward_valid,
+        agents=tuple(agents) if tag_datums else None,
+        datum_trajectories=tuple(datum_trajectories) if tag_datums else None,
         own_versions=tuple(own_versions),
+    )
+
+
+def _agent_tag(trajectory_id: str, trajectory: dict, depth: int, reward: float) -> AgentTag:
+    """The :class:`AgentTag` of one converted trajectory: its agent as the gateway recorded it in its misc, its parent
+    (``parent_info``), its depth and its processed ``reward``, None when it was interrupted or its verifier gave no
+    verdict."""
+
+    misc = trajectory.get("misc")
+    agent = misc.get(AGENT_MISC_KEY) if isinstance(misc, dict) else None
+    agent = agent if isinstance(agent, dict) else {}
+    parent = trajectory.get("parent_info")
+    scored = not trajectory_was_interrupted(trajectory) and not trajectory_lacks_verdict(trajectory)
+    return AgentTag(
+        trajectory_id=trajectory_id,
+        agent_id=str(agent.get("agent_id") or trajectory_id),
+        role=str(agent.get("role") or DEFAULT_ROLE),
+        parent_id=parent.get("id") if isinstance(parent, dict) else None,
+        depth=depth,
+        reward=float(reward) if scored else None,
     )
 
 

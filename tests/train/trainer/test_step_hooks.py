@@ -785,7 +785,7 @@ def test_no_participant_holds_a_key_that_the_checkpoint_row_holds_itself(key):
     assert checkpoints.participants == [] and len(hooks) == 0  # refused whole, as it registers
 
 
-@pytest.mark.parametrize("key", ["tasks", "next_position", "dispatch"])
+@pytest.mark.parametrize("key", ["tasks", "next_position", "dispatch", "credit"])
 def test_a_hook_holds_none_of_the_draws_keys_which_a_trainer_s_participant_may(key):
     policies: Any = SimpleNamespace()
     checkpoints = RunCheckpoints("unused", policies, wandb_run_id=lambda: None)

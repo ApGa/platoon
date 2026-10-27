@@ -9,7 +9,8 @@
   (``PlatoonTinkerRLTrainerConfig``) and the evaluation config (``PlatoonEvalConfig``): each key's type,
   default and description.
   It ends with core's task samplers, the levels each serves, and ``pass_rate``'s options, core's group admission
-  rules, with ``informative``'s options, and core's trainers, with the options of each that takes some.
+  rules, with ``informative``'s options, core's trainers, with the options of each that takes some, and core's
+  credit estimators, with ``keyed``'s options.
 * ``api.md``: every name ``platoon`` exports (``platoon.__all__``), with its signature and docstring.
 * ``experimental.md``: every name ``platoon.experimental`` exports, the same way.
 
@@ -503,6 +504,7 @@ def render_config() -> str:
     lines += _task_samplers(links)
     lines += _group_admissions(links)
     lines += _trainers(links)
+    lines += _credit_estimators(links)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -690,6 +692,62 @@ def _trainer_options(name: str, options: type, links: Mapping[type, str]) -> lis
         "|---|---|---|---|",
     ]
     for item in config_fields(options):
+        type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
+        lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
+    return lines
+
+
+# What each of core's credit estimators does.  config.md's "Credit estimators" table has a row for each name of
+# platoon.train.credit.registry.BUILTIN_CREDIT_ESTIMATORS; a name without its text here stops the generation, so that a
+# new core estimator cannot go missing from the page.
+CREDIT_ESTIMATOR_TEXT: dict[str, str] = {
+    "group": "The workflow's own credit, as an estimator: each member's datums centered on its baseline from the "
+    "group's completed root rewards (the group mean, or with the entry's `leave_one_out_baseline` the leave-one-out "
+    "mean), value for value. An entry without `credit` gets the same credit from the workflow itself.",
+    "keyed": "Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, "
+    "`policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the "
+    "subagents'. Reads agents: the rollout workers tag each row with its agent.",
+}
+
+
+def _credit_estimators(links: Mapping[type, str]) -> list[str]:
+    from platoon.train.credit.keyed import KeyedOptions
+    from platoon.train.credit.registry import BUILTIN_CREDIT_ESTIMATORS
+
+    lines = [
+        "",
+        '<a id="credit-estimators"></a>',
+        "",
+        "## Credit estimators",
+        "",
+        "`environments[].credit` chooses how an entry's training groups turn rewards into advantages (experimental), "
+        "with its options beside it (`credit_options`); an entry that sets none keeps the workflow's own credit. Its "
+        "estimator runs once per group in the trainer, never in an evaluation. Core's estimators are below; a package "
+        "an entry names may register others with `@credit_estimator`, and `module:Class` names one ([Write a credit "
+        "estimator](../extending/credit-estimators.md)).",
+        "",
+        "| Estimator | What it does | Options |",
+        "|---|---|---|",
+    ]
+    for name in BUILTIN_CREDIT_ESTIMATORS:
+        if name not in CREDIT_ESTIMATOR_TEXT:
+            raise ValueError(
+                f"core's credit estimator {name!r} has no text in scripts/gen_reference.py's CREDIT_ESTIMATOR_TEXT"
+            )
+        options = "[below](#keyed-options)" if name == "keyed" else "none"
+        lines.append(f"| `{name}` | {cell(CREDIT_ESTIMATOR_TEXT[name])} | {options} |")
+    lines += [
+        "",
+        '<a id="keyed-options"></a>',
+        "",
+        "### `keyed`'s options",
+        "",
+        f"`{KeyedOptions.__module__}.{KeyedOptions.__qualname__}`: the keys of `credit_options` under `credit: keyed`.",
+        "",
+        "| Key | Type | Default | Description |",
+        "|---|---|---|---|",
+    ]
+    for item in config_fields(KeyedOptions):
         type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
         lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
     return lines
@@ -1073,16 +1131,23 @@ def render_experimental() -> str:
             "calls a trainer's hooks, the policies' specs, the parts of the run's state every full checkpoint holds, "
             "and what a policy's rows train under.",
         ),
+        (
+            "Credit estimators",
+            "The credit API: what an estimator is and its base class, what it is built with and what its check sees, "
+            "the group it credits with its members, agents and rows, and the decorator that registers it "
+            "([Write a credit estimator](../extending/credit-estimators.md)).",
+        ),
     )
     names = experimental.__all__
     statistics, admission, leases = names.index("EntryInfo"), names.index("Admission"), names.index("RolloutLease")
-    trainers = names.index("Trainer")
+    trainers, credit = names.index("Trainer"), names.index("CreditEstimator")
     groups = (
         names[:statistics],
         names[statistics:admission],
         names[admission:leases],
         names[leases:trainers],
-        names[trainers:],
+        names[trainers:credit],
+        names[credit:],
     )
     lines = [
         GENERATED,
