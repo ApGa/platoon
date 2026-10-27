@@ -130,11 +130,11 @@ def test_rollout_workers_are_warmed_up_and_follow_the_policy_only_in_process_mod
 
 
 async def _holds_the_startup_gate(workflow: Any) -> bool:
-    admission = await workflow._admit_group(4)
+    startup_pass = await workflow._enter_startup_gate(4)
     try:
-        return admission._semaphore is not None and admission._timer is not None
+        return startup_pass._semaphore is not None and startup_pass._timer is not None
     finally:
-        admission.release()
+        startup_pass.release()
 
 
 def test_only_process_mode_holds_the_startup_gate(tmp_path):

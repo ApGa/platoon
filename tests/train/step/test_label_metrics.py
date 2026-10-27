@@ -12,12 +12,13 @@ import torch
 from fakes.config import make_config
 from fakes.loop import loop_state, loop_trainer
 
-from platoon.train.workflow.output import _TaskRolloutOutput
+from platoon.train.evaluation.loop import _eval_completion_monitor, _eval_loop
+from platoon.train.workflow.output import GroupOutput
 from platoon.utils.rollout_stats import OUTCOME_STATUSES, outcome_counts, summarize_rollout_group
 from platoon.utils.rollout_workload import RolloutWorkload
 
 
-def _output(reward: float, label: str, status: str = "scored") -> _TaskRolloutOutput:
+def _output(reward: float, label: str, status: str = "scored") -> GroupOutput:
     stats = summarize_rollout_group({"task_reward": [reward]})
     stats.counts.update(outcome_counts([status]))
     datum = tinker.Datum(
@@ -27,7 +28,7 @@ def _output(reward: float, label: str, status: str = "scored") -> _TaskRolloutOu
             for name, values in {"advantages": [0.0, 0.0], "mask": [1.0, 1.0], "target_tokens": [2, 3]}.items()
         },
     )
-    return _TaskRolloutOutput(
+    return GroupOutput(
         [datum],
         workload=RolloutWorkload(),
         requested_rollouts=1,
@@ -37,6 +38,16 @@ def _output(reward: float, label: str, status: str = "scored") -> _TaskRolloutOu
         rollout_stats=stats,
         label=label,
     )
+
+
+class _Outputs:
+    """A workflow whose group of each task is the output ``outputs`` gives it (None: the group failed)."""
+
+    def __init__(self, outputs: dict) -> None:
+        self.outputs = outputs
+
+    async def arun_episode(self, row: dict):
+        return self.outputs[row["task_id"]]
 
 
 class _Batches:
@@ -67,13 +78,6 @@ def test_an_evaluation_logs_every_label_of_its_tasks_also_at_zero():
     trainer = loop_trainer(config, eval_dataset=tasks)
     logged: list[dict] = []
 
-    async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
-        while True:
-            data = await queue.get()
-            results.put_nowait(outputs[data["task_id"]])
-
-    trainer._rollout_workflow_worker_loop = worker
-
     async def run() -> None:
         state = loop_state(trainer, batches_per_epoch=1)
         state.eval_dataloader = _Batches(tasks)
@@ -81,11 +85,11 @@ def test_an_evaluation_logs_every_label_of_its_tasks_also_at_zero():
         def log(*, step, stats, force=False):
             logged.append(stats)
             state.shutdown_event.set()  # one evaluation is enough
-            state.sampling_client_updated_event.set()
+            state.step_ended.set()
 
         state.stats_logger = SimpleNamespace(log=log)
-        state.sampling_client_updated_event.set()  # as at launch: the starting policy's evaluation (at_start)
-        await asyncio.wait_for(trainer._eval_loop(state, object()), timeout=30)
+        state.step_ended.set()  # as at launch: the starting policy's evaluation (at_start)
+        await asyncio.wait_for(_eval_loop(trainer, state, _Outputs(outputs)), timeout=30)
 
     asyncio.run(run())
 
@@ -103,19 +107,18 @@ def test_an_evaluation_group_without_statistics_counts_in_no_label():
     """A workflow's plain list of datums carries no rollout statistics: its label's metrics take nothing of it, and the
     evaluation goes on to its other groups."""
 
-    from platoon.train.dispatch.settled import _Settled
+    from platoon.train.dispatch.settled import SettledGroup
     from platoon.train.trainer.signals import TerminateEvalLoop
     from platoon.utils.rollout_stats import RolloutStats
 
-    trainer = loop_trainer(make_config())
     label_stats = {"a": RolloutStats()}
 
     async def run() -> None:
         queue: asyncio.Queue = asyncio.Queue()
-        queue.put_nowait(_Settled(None, "a", []))
-        queue.put_nowait(_Settled(None, "a", _output(1.0, "a")))
+        queue.put_nowait(SettledGroup(None, "a", []))
+        queue.put_nowait(SettledGroup(None, "a", _output(1.0, "a")))
         try:
-            await trainer._eval_completion_monitor(2, queue, tracker=None, label_stats=label_stats)
+            await _eval_completion_monitor(2, queue, tracker=None, label_stats=label_stats)
         except TerminateEvalLoop:
             pass
 

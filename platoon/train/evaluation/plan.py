@@ -1,9 +1,6 @@
-"""When a start evaluates: whether an evaluation loop runs beside training, and the log line that says when it
-evaluates first.
-
-The functions here that take the trainer first are its methods still: ``PlatoonTinkerRLTrainer`` keeps each under its
-name, so to replace one, replace the method, on the class or an instance, not the function.  What they read of the
-trainer and of the loops' shared state is :mod:`platoon.train.evaluation.protocol`'s.
+"""When a start evaluates: whether an evaluation loop runs beside training (:func:`_evaluates_during_training`), and
+the log line that says when it evaluates first (:func:`_evaluation_plan`).  What they read of the trainer and of the
+loops' shared state is :mod:`platoon.train.evaluation.protocol`'s.
 """
 
 import logging

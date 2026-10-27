@@ -23,7 +23,7 @@ from platoon.train import launch
 from platoon.train.checkpoints import saving
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig
 from platoon.train.dispatch import runner
-from platoon.train.dispatch.settled import _Settled, _settled
+from platoon.train.dispatch.settled import SettledGroup, as_settled_group
 from platoon.train.dispatch.source import RolloutSource
 from platoon.train.objectives.policy_gradient import PolicyGradient
 from platoon.train.policy.policy import Policy
@@ -79,7 +79,7 @@ class _Drawing(px.TrainerBase):
     async def _step(self, run: TrainerRun) -> None:
         groups = await self._take(run.config.train.batch_size, run.shutdown)
         policy = run.policies[run.policies.leader]
-        rows = [datum for group in groups for datum in px.rows_by_policy(group.rollout, policy.id)[policy.id]]
+        rows = [datum for group in groups for datum in px.rows_by_policy(group.output, policy.id)[policy.id]]
         client: Any = policy.training_client  # the fake service's
         run.clock.step_open = True
         await (await client.forward_backward_async(rows, "cispo")).result_async()
@@ -88,13 +88,13 @@ class _Drawing(px.TrainerBase):
         self.source.committed([group.key for group in groups])
         await run.end_step()  # the step hooks, the publication, the horizon of the run's draws
 
-    async def _take(self, n: int, stop: asyncio.Event) -> list[_Settled]:
+    async def _take(self, n: int, stop: asyncio.Event) -> list[SettledGroup]:
         if not self.direct:
             return await self.source.take(n, stop=stop)
         source: Any = self.source
         groups = []
         for _ in range(n):  # as a step that reads the source's queue itself, the rl trainer's, does
-            groups.append(_settled(await source.results.get()))
+            groups.append(as_settled_group(await source.results.get()))
             source.dispatcher.dequeued()
         return groups
 
@@ -373,18 +373,19 @@ def test_only_a_trainer_that_rolls_out_has_the_run_s_draws(tmp_path):
 
 
 class _RLRecording(PlatoonTinkerRLTrainer):
-    """An rl trainer that records each of its methods of the start's draws as the start calls it, and whether its draws
-    are the run's."""
+    """An rl trainer that records each step of the start's draws as the start takes it, and whether its draws are the
+    run's."""
 
     calls: ClassVar[list[str]] = []
-    SEAMS = (
-        "_begin_task_records",
-        "_training_tasks",
-        "_new_dispatcher",
-        "_task_records_started",
-        "_checkpoint_state",
-        "_restore_dispatch",
-        "_dispatch",
+    # The draws' steps of opening, starting, saving and taking up the draws, as the run's rollout source has them.
+    STEPS = (
+        "begin_task_records",
+        "training_tasks",
+        "new_dispatcher",
+        "started",
+        "checkpoint_state",
+        "restore",
+        "start",
     )
 
     async def prepare(self, run: TrainerRun, start: Any) -> px.StepPlan:
@@ -394,26 +395,26 @@ class _RLRecording(PlatoonTinkerRLTrainer):
 
 
 def _recorded(name: str) -> Any:
-    seam = getattr(PlatoonTinkerRLTrainer, name)
+    step = getattr(RolloutSource, name)
 
     def recorded(self: Any, *args: Any, **kwargs: Any) -> Any:
         _RLRecording.calls.append(name)
-        return seam(self, *args, **kwargs)
+        return step(self, *args, **kwargs)
 
     return recorded
 
 
-def test_the_rl_trainer_s_draws_are_the_run_s_and_each_of_their_steps_goes_through_its_methods(tmp_path, monkeypatch):
+def test_the_rl_trainer_s_draws_are_the_run_s_rollout_source_as_any_trainer_s(tmp_path, monkeypatch):
     monkeypatch.setattr(_RLRecording, "calls", [])
-    for name in _RLRecording.SEAMS:
-        monkeypatch.setattr(_RLRecording, name, _recorded(name))
+    for name in _RLRecording.STEPS:
+        monkeypatch.setattr(RolloutSource, name, _recorded(name))
     stopped = _start(monkeypatch, tmp_path, _RLRecording, stop_at=checks.STOP_AT)
     resumed = _start(monkeypatch, tmp_path, _RLRecording)
 
     assert stopped.error is None and resumed.error is None
-    assert set(_RLRecording.calls) == {*_RLRecording.SEAMS, "the run's draws: True"}
-    # Each start's statistics, dispatcher and task samplers read the trainer's tasks, as its loop does.
-    assert _RLRecording.calls.count("_training_tasks") >= 3 * 2
+    assert set(_RLRecording.calls) == {*_RLRecording.STEPS, "the run's draws: True"}
+    # Each start's statistics and task samplers read the trainer's tasks through its draws.
+    assert _RLRecording.calls.count("training_tasks") >= 2 * 2
 
 
 def _policy(version: int) -> Policy:
@@ -464,10 +465,10 @@ class _Recorder:
 
 def test_a_commit_gives_each_group_the_fate_the_step_decided_else_consumed_or_failed():
     groups = {
-        (0, 0): _Settled(None, None, ["datum"], "record-0", (0, 0)),
-        (0, 1): _Settled(None, None, ["datum"], "record-1", (0, 1)),
-        (0, 3): _Settled(None, None, ["datum"], "record-3", (0, 3)),
-        (0, 4): _Settled(None, None, None, None, (0, 4)),  # failed, kept after the statistics stopped: no record
+        (0, 0): SettledGroup(None, None, ["datum"], "record-0", (0, 0)),
+        (0, 1): SettledGroup(None, None, ["datum"], "record-1", (0, 1)),
+        (0, 3): SettledGroup(None, None, ["datum"], "record-3", (0, 3)),
+        (0, 4): SettledGroup(None, None, None, None, (0, 4)),  # failed, kept after the statistics stopped: no record
     }
     committed: list[Any] = []
     source, recorder = _source(), _Recorder()
@@ -489,7 +490,7 @@ def test_a_commit_gives_each_group_the_fate_the_step_decided_else_consumed_or_fa
 
 
 def test_a_step_tells_its_draws_what_it_committed_and_without_a_dispatcher_only_their_statistics():
-    groups = {(0, 0): _Settled(None, None, ["datum"], "record-0", (0, 0))}
+    groups = {(0, 0): SettledGroup(None, None, ["datum"], "record-0", (0, 0))}
     told: list[Any] = []
     source, recorder = _source(), _Recorder()
     dispatcher: Any = SimpleNamespace(

@@ -24,7 +24,7 @@ from platoon.train.credit.runtime import Credit
 from platoon.train.labels import task_label
 from platoon.train.policy.spec import MAIN, PolicyId
 from platoon.train.workflow.context import current_entry
-from platoon.train.workflow.output import PolicyGroupOutput, _TaskRolloutOutput
+from platoon.train.workflow.output import GroupOutput, PolicyGroupOutput
 from platoon.train.workflow.protocol import capabilities_of
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult
 
@@ -133,15 +133,15 @@ def agent_runs(result: TrajectoryCollectionResult, policy: PolicyId) -> dict[str
 
 
 def _credited_output(
-    workflow: "GroupRolloutWorkflow", output: _TaskRolloutOutput, credit: Credit, kept: Sequence[int]
-) -> _TaskRolloutOutput | PolicyGroupOutput:
+    workflow: "GroupRolloutWorkflow", output: GroupOutput, credit: Credit, kept: Sequence[int]
+) -> GroupOutput | PolicyGroupOutput:
     """The group's output once its estimator credited it: when its rows carry tags (:func:`tags_rows`), the rows the
     error-token filter kept (``kept``, their places among the group's rows as they were handed to the estimator,
     ``credit.samples``) with their tags (:class:`~platoon.train.workflow.output.PolicyGroupOutput`), else ``output`` as
     it is; carrying the credit (its ``credit``) when the estimator has a ``settle``, which the run calls as it files the
     group (:func:`~platoon.train.credit.runtime.settle_credit`)."""
 
-    credited: _TaskRolloutOutput | PolicyGroupOutput = output
+    credited: GroupOutput | PolicyGroupOutput = output
     if tags_rows(workflow, credit.estimator):
         credited = PolicyGroupOutput(tuple(credit.samples[index] for index in kept), output.report)
     if callable(getattr(credit.estimator, "settle", None)):

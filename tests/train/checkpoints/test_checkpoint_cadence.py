@@ -22,9 +22,10 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
 from fakes.config import make_config  # noqa: E402
-from fakes.trainer import make_trainer  # noqa: E402
+from fakes.trainer import checkpointing_trainer  # noqa: E402
 from tinker_cookbook import checkpoint_utils  # noqa: E402
 
+from platoon.train.checkpoints.saving import _save_checkpoint_and_get_sampling_client  # noqa: E402
 from platoon.train.config_defs import CheckpointConfig  # noqa: E402
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer  # noqa: E402
 from platoon.utils.jsonl import read_jsonl  # noqa: E402
@@ -66,9 +67,11 @@ class _FakeTrainingClient:
         return f"sampler-from:{sampler_path}"
 
 
-def _trainer(tmp_path) -> PlatoonTinkerRLTrainer:
+def _trainer(tmp_path, client: _FakeTrainingClient) -> PlatoonTinkerRLTrainer:
+    """A trainer whose steps save through a start of it, with ``client`` as its policy's training client."""
+
     config = make_config(log_path=str(tmp_path), stats={"experiment_name": "exp", "trial_name": "trial"})
-    trainer, _saves, logged = make_trainer(config)
+    trainer, logged = checkpointing_trainer(config, client)
     logged.wandb_run_id = "run-abc"
     os.makedirs(trainer.run_log_path, exist_ok=True)
     return trainer
@@ -89,7 +92,8 @@ def _saves(trainer, client) -> list[tuple[str, str, dict]]:
 def _run_steps(trainer, client, *, num_steps: int, save_every: int | None, recovery_every: int | None):
     async def run():
         for i_batch in range(num_steps):
-            await trainer._save_checkpoint_and_get_sampling_client(
+            await _save_checkpoint_and_get_sampling_client(
+                trainer,
                 training_client=client,
                 i_batch=i_batch,
                 save_every=save_every,
@@ -102,8 +106,8 @@ def _run_steps(trainer, client, *, num_steps: int, save_every: int | None, recov
 
 
 def test_recovery_cadence_saves_a_full_checkpoint_every_step(tmp_path):
-    trainer = _trainer(tmp_path)
     client = _FakeTrainingClient()
+    trainer = _trainer(tmp_path, client)
 
     _run_steps(trainer, client, num_steps=6, save_every=3, recovery_every=1)
     saves = _saves(trainer, client)
@@ -127,8 +131,8 @@ def test_recovery_cadence_saves_a_full_checkpoint_every_step(tmp_path):
 
 
 def test_without_recovery_every_the_cadence_is_unchanged(tmp_path):
-    trainer = _trainer(tmp_path)
     client = _FakeTrainingClient()
+    trainer = _trainer(tmp_path, client)
 
     _run_steps(trainer, client, num_steps=6, save_every=3, recovery_every=None)
     saves = _saves(trainer, client)
@@ -140,8 +144,8 @@ def test_without_recovery_every_the_cadence_is_unchanged(tmp_path):
 
 def test_every_0_saves_no_permanent_checkpoint(tmp_path):
     """``checkpoint.every: 0`` (``save_every`` None) leaves only the recovery cadence."""
-    trainer = _trainer(tmp_path)
     client = _FakeTrainingClient()
+    trainer = _trainer(tmp_path, client)
 
     _run_steps(trainer, client, num_steps=4, save_every=None, recovery_every=2)
     saves = _saves(trainer, client)
@@ -151,8 +155,8 @@ def test_every_0_saves_no_permanent_checkpoint(tmp_path):
 
 
 def test_permanent_cadence_wins_when_both_trigger(tmp_path):
-    trainer = _trainer(tmp_path)
     client = _FakeTrainingClient()
+    trainer = _trainer(tmp_path, client)
 
     _run_steps(trainer, client, num_steps=4, save_every=2, recovery_every=2)
     saves = _saves(trainer, client)
@@ -162,12 +166,13 @@ def test_permanent_cadence_wins_when_both_trigger(tmp_path):
 
 
 def test_recovery_cadence_counts_from_start_batch_after_a_resume(tmp_path):
-    trainer = _trainer(tmp_path)
     client = _FakeTrainingClient()
+    trainer = _trainer(tmp_path, client)
 
     async def run():
         for i_batch in range(10, 14):
-            await trainer._save_checkpoint_and_get_sampling_client(
+            await _save_checkpoint_and_get_sampling_client(
+                trainer,
                 training_client=client,
                 i_batch=i_batch,
                 save_every=3,

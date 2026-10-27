@@ -3,8 +3,8 @@ microbatches (:class:`StepGeometry`), a microbatch as the step collects it (:cla
 and as it prepares it to send (:class:`Prepared`, the second), and what the zero-advantage filter dropped of one
 (:func:`zero_advantage_filter_metrics`).
 
-The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, fills each microbatch, runs the batch transforms
-and the zero-advantage filter on it, and sends it.
+The step itself, :class:`~platoon.train.step.step.TrainStep`, fills each microbatch, runs the batch transforms and the
+zero-advantage filter on it, and sends it.
 """
 
 from dataclasses import dataclass, field
@@ -16,11 +16,11 @@ import tinker
 @dataclass(frozen=True)
 class StepGeometry:
     """How a step splits its ``batch_size`` groups: ``num_minibatches`` optimizer updates, each of
-    ``num_microbatches`` microbatches of ``tasks_per_microbatch`` groups."""
+    ``num_microbatches`` microbatches of ``groups_per_microbatch`` groups."""
 
     num_minibatches: int
     num_microbatches: int
-    tasks_per_microbatch: int
+    groups_per_microbatch: int
 
     @classmethod
     def of(cls, config: Any, batch_size: int | None = None) -> "StepGeometry":
@@ -32,18 +32,18 @@ class StepGeometry:
         assert batch_size % config.train.num_minibatches == 0, (
             f"batch_size {batch_size} must be divisible by num_minibatches {config.train.num_minibatches}"
         )
-        tasks_per_minibatch = batch_size // config.train.num_minibatches
+        groups_per_minibatch = batch_size // config.train.num_minibatches
 
-        assert tasks_per_minibatch % config.train.num_microbatches == 0, (
-            f"tasks_per_minibatch {tasks_per_minibatch} must be divisible by "
+        assert groups_per_minibatch % config.train.num_microbatches == 0, (
+            f"groups_per_minibatch {groups_per_minibatch} must be divisible by "
             f"num_microbatches {config.train.num_microbatches}"
         )
 
-        tasks_per_microbatch = tasks_per_minibatch // config.train.num_microbatches
+        groups_per_microbatch = groups_per_minibatch // config.train.num_microbatches
         return cls(
             num_minibatches=config.train.num_minibatches,
             num_microbatches=config.train.num_microbatches,
-            tasks_per_microbatch=tasks_per_microbatch,
+            groups_per_microbatch=groups_per_microbatch,
         )
 
 

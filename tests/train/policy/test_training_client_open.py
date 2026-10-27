@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -15,6 +17,8 @@ import tinker
 from fakes.config import make_config
 from fakes.trainer import fake_policies
 
+from platoon.eval.config_defs import TinkerKeyRefusedError
+from platoon.train.checkpoints.resume import PolicyStart, StartPoint
 from platoon.train.policy import service as service_module
 from platoon.train.policy.spec import MAIN
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
@@ -39,14 +43,15 @@ def _unretrievable(code: int) -> ValueError:
 
 class Opener:
     """A training service that refuses a new run's training client with ``errors`` in turn, then opens one; and a
-    trainer on it (``trainer``), whose policy's session (``session``) it is."""
+    trainer on it (``trainer``), whose policy's (``policy``) session it is."""
 
     def __init__(self, *errors: BaseException) -> None:
         self.errors = list(errors)
         self.asks = 0
         config = make_config()
         self.trainer = PlatoonTinkerRLTrainer(config, [], policies=fake_policies(config, lambda: self))
-        self.session = self.trainer.policies[MAIN].new_service_client()
+        self.policy = self.trainer.policies[MAIN]
+        self.policy.connect()
 
     async def create_lora_training_client_async(self, base_model, rank=32, **kwargs):
         self.asks += 1
@@ -54,8 +59,19 @@ class Opener:
             raise self.errors.pop(0)
         return "training-client"
 
+    async def ask(self, stop: asyncio.Event | None = None):
+        """A new run's training client (resuming no checkpoint), asked for as a start asks for it (the trainer's
+        ``_open_policies``, the lifecycle's phase 4); None when ``stop`` ended the asking first."""
+
+        shutdown = stop if stop is not None else asyncio.Event()
+        run: Any = SimpleNamespace(policies=self.trainer.policies, shutdown=shutdown)
+        fresh = PolicyStart(MAIN, record=None, version=0, optimizer_steps=0)
+        start = StartPoint(None, step=0, policy_version=0, optimizer_steps=0, loop_state={}, policies={MAIN: fresh})
+        opened = await self.trainer._open_policies(run, start)
+        return self.policy.training_client if opened else None
+
     def open(self):
-        return asyncio.run(self.trainer._open_training_client(self.session, None))
+        return asyncio.run(self.ask())
 
 
 @pytest.fixture(autouse=True)
@@ -91,11 +107,15 @@ def test_refusals_are_asked_again_and_logged_until_the_service_accepts(caplog):
 
 @pytest.mark.parametrize("error", [_status(401), _status(403), _status(404), _status(422), _unretrievable(404)])
 def test_an_answer_that_asking_again_cannot_change_is_raised_at_once(error):
-    opener = Opener(error)
+    """A refusal of the key (401, 403) is raised as the configuration error that names the key, from the answer."""
 
-    with pytest.raises(type(error)):
+    opener = Opener(error)
+    key_refused = isinstance(error, tinker.APIStatusError) and error.status_code in (401, 403)
+
+    with pytest.raises(TinkerKeyRefusedError if key_refused else type(error)) as raised:
         opener.open()
 
+    assert (raised.value.__cause__ if key_refused else raised.value) is error
     assert opener.asks == 1
 
 
@@ -130,7 +150,7 @@ def test_a_stop_while_waiting_ends_the_asking_without_a_client(monkeypatch, capl
     async def open_and_stop():
         stop = asyncio.Event()
         asyncio.get_running_loop().call_later(0.2, stop.set)
-        return await opener.trainer._open_training_client(opener.session, None, stop=stop)
+        return await opener.ask(stop=stop)
 
     began = time.monotonic()
     assert asyncio.run(open_and_stop()) is None

@@ -4,7 +4,6 @@ and the training metrics of each microbatch (:func:`compute_training_metrics`: K
 clipping).
 """
 
-from collections.abc import Callable
 from typing import Any
 
 import tinker
@@ -98,12 +97,8 @@ def compute_training_metrics(
 
 class PolicyGradient:
     """A policy's rows train under the policy-gradient loss ``loss_fn`` with ``loss_fn_config`` (``train.loss_fn``
-    and ``train.loss_fn_config``).  Each microbatch's training metrics are :func:`compute_training_metrics`'s, or those
-    of ``training_metrics`` in its place, called with the same keyword arguments.
-
-    ``training_metrics`` is a test seam: the RL step passes the function by which its module's
-    ``compute_training_metrics`` is read at each call, where tests patch it.  It goes once the tests run the step on
-    fakes they inject, and the step then takes this default."""
+    and ``train.loss_fn_config``).  Each microbatch's training metrics are :func:`compute_training_metrics`'s, looked
+    up in this module at each call, so that a patch of the module's name reaches them."""
 
     # The loss inputs that only the trainer reads, which the datums sent to forward_backward leave out: the action
     # mask (redundant there, since the advantages of masked tokens are 0), the sampler version the datum came from,
@@ -111,22 +106,15 @@ class PolicyGradient:
     # they keep for the loss's normalization.  The metrics read the mask from the originals.
     side_channels = frozenset({"mask", "checkpoint_version", "traj_depth", "traj_start", LOSS_NORMALIZATION_TOKENS_KEY})
 
-    def __init__(
-        self,
-        loss_fn: str,
-        loss_fn_config: dict[str, Any],
-        *,
-        training_metrics: Callable[..., dict[str, float]] | None = None,
-    ) -> None:
+    def __init__(self, loss_fn: str, loss_fn_config: dict[str, Any]) -> None:
         self.loss_fn = loss_fn
         self.loss_fn_config = loss_fn_config
-        self._training_metrics = compute_training_metrics if training_metrics is None else training_metrics
 
     def metrics(self, originals: list[tinker.Datum], result: tinker.ForwardBackwardOutput) -> dict[str, float]:
         """A microbatch's training metrics: the KL between the sampler and the trained policy, the entropy, the
         importance weights and, for ``cispo`` and ``ppo``, how many of them were clipped."""
 
-        return self._training_metrics(
+        return compute_training_metrics(
             datums=originals,
             forward_backward_result=result,
             loss_fn=self.loss_fn,

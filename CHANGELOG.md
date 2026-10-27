@@ -630,11 +630,12 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   start of training: the trainer, the training loop, signals and the watchdog), `policy` (the model training samples
   and steps: its spec, its state, its training client, its own saves and its learner, through which a step updates
   it), `objectives` (what its rows train under: the loss, the loss inputs only the trainer reads and the training
-  metrics), `step` (one training step: its metrics, the staleness warning, the batch transforms), `dispatch` (what
-  starts the training groups: the dispatcher, the rollout permits, running and settling a group), `workflow` (one group
-  of rollouts: `GroupRolloutWorkflow` and its parts), `credit` (a group's baselines and error-token filter), `workers`
-  (process-per-rollout), `checkpoints` (what a full checkpoint saves, and resuming) and `evaluation` (evaluation during
-  training); the config schema is `platoon.train.config_defs`, and `platoon train`'s start `platoon.train.launch`.
+  metrics), `step` (one training step: the step itself, its metrics, the staleness warning, the batch transforms),
+  `dispatch` (what starts the training groups: the dispatcher, the rollout permits, running and settling a group),
+  `workflow` (one group of rollouts: `GroupRolloutWorkflow` and its parts), `credit` (a group's baselines and
+  error-token filter), `workers` (process-per-rollout), `checkpoints` (what a full checkpoint saves, and resuming) and
+  `evaluation` (evaluation during training); the config schema is `platoon.train.config_defs`, and `platoon train`'s
+  start `platoon.train.launch`. `docs/training-code.md` maps them.
   Nothing a run does changes: the same datums train in the same order, and the metrics, config keys, messages,
   checkpoints and the files a resume reads are as before. `platoon.train.tinker` keeps the policy client (`proxy`), its
   renderers, `key_refusal` and `rollout_metrics`, until a later release moves them, and the shims of the old paths
@@ -644,30 +645,65 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `train.loss_fn_config` and `checkpoint.load_checkpoint_path` from the config when `PlatoonTinkerRLTrainer` is made,
   where it registered its model gateway before: setting one of them in the config after that and before `train()` no
   longer reaches its training client, its updates and their `optim/lr` metric, or its recovery pruner.
-  `TrainLoopSharedState` holds the run's policies (`policies`), and `model_info`, `service_client`, `training_client`,
-  `sampling_client`, `optimizer_params` and `optimizer_steps` are properties of the policy it trains, so
-  `dataclasses.fields()` lists `policies` in their place. It is made with keyword arguments only, and still takes
-  those six instead of `policies`, but not beside it: given both, it raises `TypeError`, and so does
-  `dataclasses.replace()` of it. A `copy.copy()` of it shares the original's policies.
-- `TrainLoopSharedState` holds the run's step clock (`clock`), and `train_step` and `sampling_client_updated_event`
-  are properties of it, so `dataclasses.fields()` lists `clock` in their place; it still takes those two instead of
-  `clock`, but not beside it. `PlatoonTinkerRLTrainer` saves its launch, interrupted and final checkpoints through the
-  run's checkpoints, whose lines (`Saving recovery checkpoint ... at launch`, `Saving permanent checkpoint ...`,
-  `Training complete successfully!`) come from `platoon.train.trainer.run`, and its `run_log_path`, `async with` and
-  `_await_with_heartbeat` are `TrainerBase`'s, whose lines (`This run labels its sandboxes ...`) come from
-  `platoon.train.trainer.api`.
-- The rl trainer's draws are a rollout source too, which the run opens, starts and closes as it does any trainer's:
-  `PlatoonTinkerRLTrainer` keeps `_recorder`, `_dispatcher` and `_admissions` as properties of its source, its steps
-  commit their groups and move the horizon on through the source, and the source's steps of opening, saving and taking
-  up the draws go through the trainer's methods of their names (`_begin_task_records`, `_training_tasks`,
-  `_new_dispatcher`, `_task_records_started`, `_checkpoint_state`, `_restore_dispatch`; `_dispatch` starts them).
-  Those call the source's parts, in `platoon.train.dispatch.source`, `.setup`, `.runner` and
-  `platoon.train.checkpoints.saving`, `.resume`, which take the source in place of the trainer, and call what they need
-  as module functions, no longer through the trainer: replacing its `_samplers`, `_run_group` or
-  `_await_rollout_with_heartbeat` changes no training group (`_run_group` still runs an evaluation's groups), and the
-  trainer has no `_run_training_group`, `_settle_under_rule`, `_read_kept_groups`, `_saved_samplings` or
-  `_resume_position` any more. The lines of the per-task statistics' start (`This start keeps no per-task statistics
-  ...`) come from `platoon.train.dispatch.source`.
+  `TrainLoopSharedState` holds the run's policies (`policies`), and `model_info`, `training_client`,
+  `sampling_client`, `optimizer_params` and `optimizer_steps` are properties of the policy it trains (the first two
+  read-only), so `dataclasses.fields()` lists `policies` in their place. It is made with keyword arguments only, with
+  the policies in place of those fields. It no longer has `service_client` (the policy's own) or
+  `sampling_client_step`, which nothing read. A `copy.copy()` of it shares the original's policies.
+- `TrainLoopSharedState` holds the run's step clock (`clock`), and `train_step` and `step_ended` are read-only
+  properties of it, so `dataclasses.fields()` lists `clock` in their place; it is made with the clock in place of those
+  two. `step_ended` is platoon 0.4.0's `sampling_client_updated_event`, renamed for what it is: the event each step's
+  end sets, a step's that published no policy too, and the loops' stop. `PlatoonTinkerRLTrainer` saves its launch,
+  interrupted and final checkpoints through the run's checkpoints, whose lines (`Saving recovery checkpoint ... at
+  launch`, `Saving permanent checkpoint ...`, `Training complete successfully!`) come from `platoon.train.trainer.run`,
+  and its `run_log_path`, `async with` and `_await_with_heartbeat` are `TrainerBase`'s, whose lines (`This run labels
+  its sandboxes ...`) come from `platoon.train.trainer.api`.
+- The rl trainer's draws are the run's rollout source (`TrainerRun.rollouts`, over the trainer's tasks, with
+  `bind_workers=False`: its loop and step give the rollout workers each sampler themselves), the trainer's
+  `_rollouts`, which the run opens, starts and closes as it does any trainer's: the per-task statistics, the dispatcher
+  and the group admission rules are the source's `recorder`, `dispatcher` and `admissions` (the trainer no longer has
+  `_recorder`, `_dispatcher` and `_admissions`), its steps commit their groups and move the horizon on through the
+  source, and its `_dispatch` starts it. The source's steps of opening, saving and taking up the draws are its own
+  methods (`begin_task_records`, `training_tasks`, `new_dispatcher`, `started`, `checkpoint_state`, `restore`), whose
+  parts are in `platoon.train.dispatch.source`, `.setup`, `.runner` and `platoon.train.checkpoints.saving`, `.resume`.
+  The lines of the per-task statistics' start (`This start keeps no per-task statistics ...`) come from
+  `platoon.train.dispatch.source`.
+- **`PlatoonTinkerRLTrainer` keeps no methods for the code that moved to the stage packages.** Platoon 0.4.0's
+  trainer had them as methods; the code now calls the module functions, so replacing one of these on the trainer's
+  class or an instance changes nothing, and the trainer no longer has them:
+  - its loops and their stop: `_train_loop` and `shutdown_loops` (`platoon.train.trainer.loops`, the latter without a
+    trainer argument), a group's wait, `_await_rollout_with_heartbeat` (`platoon.train.trainer.waiting`), and the
+    step's wait for a group, `_next_rollout`, which is `platoon.train.trainer.waiting._next_group`;
+  - the evaluation: `_eval_loop`, `_eval_completion_monitor`, `_wait_for_starting_policy_evaluation`,
+    `_wait_for_last_step_evaluation` (`platoon.train.evaluation.loop`, all but `_eval_loop` without a trainer
+    argument), `_evaluates_during_training` (`.plan`), and `_rollout_workflow_worker_loop`, which is
+    `platoon.train.evaluation.loop.eval_worker`, without a trainer argument;
+  - a group's run, `_run_group`, which is `platoon.train.dispatch.runner.run_group_guarded`;
+  - the step's save, `_save_checkpoint_and_get_sampling_client` (`platoon.train.checkpoints.saving`, which takes the
+    trainer first), and the publication of each new sampler to the rollout workers, `_publish_worker_binding`
+    (`platoon.train.policy.binding`);
+  - the training client's open, `_open_training_client` and `_create_training_client` (`TrainerBase._open_policies`,
+    which opens each policy's: `Policy.open`, `Policy.create_training_client`), the steps of the draws
+    that only called the rollout source's (`_begin_task_records`, `_training_tasks`, `_new_dispatcher`, `_samplers`,
+    `_task_records_started`, `_checkpoint_state`, `_restore_dispatch`), `_model_info` (`model_info` is the trained
+    policy's) and `_new_stats_logger`, which is `TrainerBase`'s and makes the stats logger of the
+    `platoon.train.trainer.api` module's `StatsLogger`.
+
+  Its steps save only through the start that `train()` or `run()` runs: a trainer outside one refuses to save.
+- The rl trainer's training step is `platoon.train.step.step.TrainStep`, beside what its steps share (`StepContext`);
+  `platoon.train.trainer.loops` keeps the training loop.
+- Names that misled are renamed, and the old module paths read the old names (below):
+  - a settled group, `_Settled`, is a `SettledGroup` (`platoon.train.dispatch.settled`), made by `as_settled_group`
+    (`_settled`), and its field `rollout` is `output`: an object that stands in for one has an `output`;
+  - a group's output and a member's outcome, `_TaskRolloutOutput` and `_SingleRolloutOutcome`, are `GroupOutput` and
+    `MemberOutcome` (`platoon.train.workflow.output`); what a step reads of a group's workload,
+    `_TaskWorkloadPayload` and `_get_task_workload_payload`, is `_GroupWorkload` and `_group_workload`
+    (`platoon.train.step.collect`);
+  - `GroupRolloutWorkflow`'s startup gate: `_admit_group` is `_enter_startup_gate` and `_admission_semaphore` is
+    `_startup_semaphore`, and the `_GroupAdmission` the gate gives is a `StartupPass`, which `_run_group_member` takes
+    as `startup_pass` (was `admission`). The workflow no longer calls a subclass's `_admit_group` or
+    `_admission_semaphore`: defining one warns (`PlatoonDeprecationWarning`), until platoon 0.6.0; override the new
+    name.
 - `platoon.train.components` no longer defines `DatasetLoader`, `TaskLoader`, `RolloutFn`, `RewardProcessor`,
   `WorkflowFactory`, `TrainerConfigClass` and `LossFn`, which nothing used. `ClientThroughputMonitor` no longer has
   `record_dequeue_to_first_model_call`, which nothing called.
@@ -690,7 +726,7 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   (`run.ended`), as before, and does nothing after a failure.
 - **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
   format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
-  `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),
+  `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.step.step` (a step's line),
   `platoon.train.trainer.rl` (a start's), `platoon.train.workflow.members` (a group's stragglers) or
   `platoon.train.workflow.telemetry` (a rollout worker's). A filter or a level set on `platoon.train.tinker` no longer
   reaches them: set it on `platoon.train`.
@@ -719,22 +755,27 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
 ### Deprecations
 
-- **The module paths under `platoon.train.tinker` that moved.** Each still imports, and each name read through it
-  warns once with a `PlatoonDeprecationWarning` that names its new module, until platoon 0.6.0 removes them. A name
-  read through an old path is the moved object itself, so `isinstance` checks, pickles and the `module:Class` a config
-  names keep working. Importing an old module imports the trainer, as it did before (`platoon.train.tinker` itself no
-  longer does: above), so that no module of the trainer is first imported while a patch made through an old path is
-  active. A module that was split still has the names it imported, `from <old path> import *` binds what the new
-  module exports (a split module's public names that moved), the submodules that an old package's init imported are
-  its attributes, and a name set or deleted through an old path, as `monkeypatch` and `mock.patch` do, is set or
-  deleted where the moved code reads it, and undoing the patch puts back what was there, also for a `mock.patch` made
-  with `create=True` or nested in another patch, by unittest.mock or by the `mock` package. A method of
-  `PlatoonTinkerRLTrainer` or `GroupRolloutWorkflow` that moved is a module function that its class keeps under its
-  name: patch the class or an instance, as before, not the module function. What stays different through an old
-  path: a patch through `platoon.train.tinker.rl` also reaches the moved code of `.permits` and `.censoring`, and one
-  through either of them reaches rl's, as they share new modules. Patching an old module's namespace
-  (`mock.patch.dict(vars(module))`, `monkeypatch.setitem(vars(module), ...)`) does not reach the moved code: patch the
-  attribute instead. An old module's `__all__` is computed when it is read, not held in the module. Where each went:
+- **The module paths under `platoon.train.tinker` that moved.** Each still imports, and each name read through it warns
+  once with a `PlatoonDeprecationWarning` that names its new module, until platoon 0.6.0 removes them. A name read
+  through an old path is the moved object itself, so `isinstance` checks, pickles and the `module:Class` a config names
+  keep working. Importing an old module imports the trainer, as it did before (`platoon.train.tinker` itself no longer
+  does: above), so that no module of the trainer is first imported while a patch made through an old path is active. A
+  module that was split still has the names it imported, `from <old path> import *` binds what the new module exports (a
+  split module's public names that moved), the submodules that an old package's init imported are its attributes, and a
+  name set or deleted through an old path, as `monkeypatch` and `mock.patch` do, is set or deleted where the moved code
+  reads it, and undoing the patch puts back what was there, also for a `mock.patch` made with `create=True` or nested in
+  another patch, by unittest.mock or by the `mock` package. A name that platoon 0.5.0 also renamed reads as the renamed
+  object, and its warning names its new name: `platoon.train.tinker.rl`'s `_Settled`, `_settled`, `_TaskWorkloadPayload`
+  and `_get_task_workload_payload` (`SettledGroup`, `as_settled_group`, `_GroupWorkload`, `_group_workload`), and
+  `.workflows.group_rollout_workflow`'s `_SingleRolloutOutcome`, `_TaskRolloutOutput` and `_GroupAdmission`
+  (`MemberOutcome`, `GroupOutput`, `StartupPass`). A method of `GroupRolloutWorkflow` that moved is a module function
+  that its class keeps under its name, but for the startup gate's two that platoon 0.5.0 renamed (above): patch the
+  class or an instance, as before, not the module function (`PlatoonTinkerRLTrainer` keeps none: above). What stays
+  different through an old path: a patch through `platoon.train.tinker.rl` also reaches the moved code of `.permits` and
+  `.censoring`, and one through either of them reaches rl's, as they share new modules. Patching an old module's
+  namespace (`mock.patch.dict(vars(module))`, `monkeypatch.setitem(vars(module), ...)`) does not reach the moved code:
+  patch the attribute instead. An old module's `__all__` is computed when it is read, not held in the module. Where each
+  went:
   - `platoon.train.tinker`'s names (`PlatoonTinkerRLTrainer`, `Watchdog`, the config classes, the batch transforms):
     `platoon.train`;
   - `platoon.train.tinker.rl`: by stage, `PlatoonTinkerRLTrainer` and `Watchdog` to `platoon.train` (they live in

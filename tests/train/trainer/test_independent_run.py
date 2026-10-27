@@ -469,7 +469,7 @@ class LedgerTrainer(px.TrainerBase):
             if trained:
                 update = run.learner(policy).update()
                 for index, group in enumerate(trained):
-                    datums = list(group.rollout)
+                    datums = list(group.output)
                     await update.submit(datums, datums, minibatch=0, microbatch=index)
                 await update.apply()
             async with ledger.lock:
@@ -528,10 +528,10 @@ class StaleLedgerTrainer(LedgerTrainer):
     def _fates(self, ledger: px.ShareLedger, policy: str, groups: list[Any]) -> dict[Any, str]:
         fates = {}
         for group in groups:
-            stamps = [int(datum.loss_fn_inputs["checkpoint_version"].to_torch()[0]) for datum in group.rollout]
+            stamps = [int(datum.loss_fn_inputs["checkpoint_version"].to_torch()[0]) for datum in group.output]
             if ledger.judge_version(policy, group) - min(stamps) > self.bounds[policy]:
                 fates[group.key] = "stale"
-                self.dropped.setdefault(policy, []).append(group.rollout[0].model_input.to_ints()[0])
+                self.dropped.setdefault(policy, []).append(group.output[0].model_input.to_ints()[0])
         return fates
 
 

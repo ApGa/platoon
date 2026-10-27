@@ -93,6 +93,8 @@ Generated from the code by `scripts/gen_reference.py`; `tests/docs/test_referenc
 
 - [Architecture](architecture.md): how environments, harnesses, the model gateway, episode programs and the
   trainer fit together, and why.
+- [The training code](training-code.md): a map of `platoon/train` for contributors, from `platoon train` to one
+  training step, with a link to the code of each part.
 
 ## RFCs
 

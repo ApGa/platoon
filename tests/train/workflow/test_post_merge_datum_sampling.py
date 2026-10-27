@@ -545,7 +545,7 @@ def test_tinker_empty_task_output_carries_exact_workload_and_task_distributions(
     workflow.config = types.SimpleNamespace(group_size=3)
     workflow.tracker = tracker
     outcomes = [
-        workflow_module._SingleRolloutOutcome(
+        workflow_module.MemberOutcome(
             result=None,
             workload=workflow_module.RolloutWorkload(
                 environment_steps=2,
@@ -559,7 +559,7 @@ def test_tinker_empty_task_output_carries_exact_workload_and_task_distributions(
             ),
             observed=True,
         ),
-        workflow_module._SingleRolloutOutcome(
+        workflow_module.MemberOutcome(
             result=None,
             workload=workflow_module.RolloutWorkload(
                 environment_steps=5,
@@ -573,7 +573,7 @@ def test_tinker_empty_task_output_carries_exact_workload_and_task_distributions(
             ),
             observed=True,
         ),
-        workflow_module._SingleRolloutOutcome(
+        workflow_module.MemberOutcome(
             result=None,
             workload=workflow_module.RolloutWorkload(),
             observed=False,

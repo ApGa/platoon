@@ -5,15 +5,18 @@ cancellation, the straggler cut), and it comes back by the group's end even when
 override of ``_run_group_member``), not on its timer.
 
 ``test_group_rollout_isolation.py`` checks that whole groups are admitted, and that the readiness a worker reports
-gives the permit back."""
+gives the permit back.  A subclass that overrides the gate's methods under their names before platoon 0.5.0, which the
+workflow no longer calls, is warned of."""
 
 from __future__ import annotations
 
 import asyncio
+import warnings
 
 import pytest
 from fakes.members import ScriptedMembers, scripted_group, until
 
+from platoon.deprecations import PlatoonDeprecationWarning
 from platoon.train.config_defs import WorkflowConfig
 from platoon.train.dispatch.dispatcher import POSITION_COLUMN
 from platoon.utils.stats_tracker import get as get_tracker
@@ -40,7 +43,7 @@ def _config(**straggler_policy) -> WorkflowConfig:
 
 
 def _permit_held(workflow) -> bool:
-    return workflow._admission_semaphore().locked()
+    return workflow._startup_semaphore().locked()
 
 
 @pytest.mark.parametrize("end", list(ENDS))
@@ -87,7 +90,7 @@ class _Unreported(ScriptedMembers):
     """Overrides ``_run_group_member`` and runs the member itself, without ``super()``, reporting nothing to the group's
     startup permit: neither readiness nor an end."""
 
-    async def _run_group_member(self, data, rollout_number, admission):
+    async def _run_group_member(self, data, rollout_number, startup_pass):
         return await self.arun_episode_single(data, rollout_number)
 
 
@@ -115,3 +118,30 @@ def test_a_group_whose_members_report_nothing_gives_the_permit_back_at_its_end(s
 
     assert asyncio.run(run()) is False
     get_tracker(scope).export(reset=True)
+
+
+def _never_called(old: str, new: str) -> str:
+    """The warning of a subclass that defines ``old``, which platoon 0.5.0 renamed ``new``."""
+
+    return rf"\.{old} is never called: platoon 0\.5\.0 renamed GroupRolloutWorkflow\.{old} to {new}, so override {new}"
+
+
+def test_an_override_of_the_gate_under_its_name_before_platoon_0_5_0_is_warned_of_since_nothing_calls_it():
+    with pytest.warns(PlatoonDeprecationWarning, match=_never_called("_admit_group", "_enter_startup_gate")):
+
+        class Old(ScriptedMembers):
+            async def _admit_group(self, group_size):
+                return await self._enter_startup_gate(group_size)
+
+    with pytest.warns(PlatoonDeprecationWarning, match=_never_called("_admission_semaphore", "_startup_semaphore")):
+
+        class Older(ScriptedMembers):
+            def _admission_semaphore(self):
+                return self._startup_semaphore()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+
+        class New(ScriptedMembers):  # the names the workflow calls: no warning
+            async def _enter_startup_gate(self, group_size):
+                return await super()._enter_startup_gate(group_size)

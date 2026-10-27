@@ -13,9 +13,9 @@ directory>/config.resolved.yaml``) and starts it again when it fails (:func:`sup
   it, which the recovery checkpoint every start saves at launch does not.  So a crash that every start meets stops
   after three.  ``platoon train`` then exits with the last start's exit code.
 * **Each start** resumes from the newest checkpoint, as any start of a run does.  It asks the training service for
-  its training client until the service accepts it, for up to 20 minutes, logging each refusal (the trainer's
-  ``_open_training_client``), so no delay is waited between starts: a service may hold the dead start's session, and
-  with it the only model it trains at once, until the session's lease expires.
+  its training client until the service accepts it, for up to 20 minutes, logging each refusal
+  (:func:`~platoon.train.policy.service.open_training_client`), so no delay is waited between starts: a service may
+  hold the dead start's session, and with it the only model it trains at once, until the session's lease expires.
 * **Leftovers.**  Before the first start, before each restart and when ``platoon train`` exits, the rollout workers
   whose trainer is gone are killed and the sandboxes labelled with the run are reaped, with a count logged
   (:mod:`platoon.train.reaping`).

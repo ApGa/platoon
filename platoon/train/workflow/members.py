@@ -10,7 +10,7 @@ members then start as permits free, each member's straggler deadline carrying it
 start limit (``start_limit``, :mod:`platoon.train.workflow.start_limit`).
 
 Seven of these functions are ``GroupRolloutWorkflow``'s methods, which the class keeps under the same names:
-``_admission_semaphore``, ``_admit_group``, ``_run_group_member``, ``_member_start_slot``, ``_run_group_rollouts``,
+``_startup_semaphore``, ``_enter_startup_gate``, ``_run_group_member``, ``_member_start_slot``, ``_run_group_rollouts``,
 ``_cancel_late_members`` and ``arun_episode_single``.  To replace one, replace the method, on the class or an instance,
 not the function.  The others are the steps those methods take.
 """
@@ -26,7 +26,7 @@ from platoon.train.labels import task_label
 from platoon.train.leases import holding, rollout_lease
 from platoon.train.workers.run import run_rollout_request
 from platoon.train.workflow.context import _group_ready_callback
-from platoon.train.workflow.output import _SingleRolloutOutcome
+from platoon.train.workflow.output import MemberOutcome
 from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import NO_START_SLOT, START_SLOT_GRACE_SECONDS, StartSlot, held_slot
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -65,8 +65,8 @@ async def _finish_cleanups(cleanups: CleanupScope | None, data: dict, rollout_nu
         )
 
 
-class _GroupAdmission:
-    """What a group's members share: one startup permit held for the whole
+class StartupPass:
+    """A group's pass through the startup gate, which its members share: one startup permit held for the whole
     group until its members are up, and when each member started (``starts``).
 
     The permit is released when every member has signalled readiness or exited,
@@ -148,20 +148,20 @@ class _MemberStarts:
         return max(0.0, now - self.created - min(self._waited.values(), default=0.0))
 
 
-def _admission_semaphore(workflow: "GroupRolloutWorkflow") -> asyncio.Semaphore:
+def _startup_semaphore(workflow: "GroupRolloutWorkflow") -> asyncio.Semaphore:
     """The semaphore of the startup gate, of ``worker_launch_concurrent_groups`` groups (at least 1), made again when
     that setting changed."""
 
     limit = max(1, GroupSettings(workflow.config).worker_launch_concurrent_groups)
-    semaphore = workflow._admission
-    if semaphore is None or workflow._admission_limit != limit:
+    semaphore = workflow._startup_semaphore_cache
+    if semaphore is None or workflow._startup_semaphore_limit != limit:
         semaphore = asyncio.Semaphore(limit)
-        workflow._admission = semaphore
-        workflow._admission_limit = limit
+        workflow._startup_semaphore_cache = semaphore
+        workflow._startup_semaphore_limit = limit
     return semaphore
 
 
-async def _admit_group(workflow: "GroupRolloutWorkflow", group_size: int) -> "_GroupAdmission":
+async def _enter_startup_gate(workflow: "GroupRolloutWorkflow", group_size: int) -> "StartupPass":
     """Take one startup permit for the WHOLE group, not one per rollout.
 
     Two things make this the right granularity.  A per-rollout permit
@@ -187,17 +187,17 @@ async def _admit_group(workflow: "GroupRolloutWorkflow", group_size: int) -> "_G
     """
 
     if workflow._isolation != "process":
-        return _GroupAdmission(None, group_size, 0.0)
-    semaphore = workflow._admission_semaphore()
+        return StartupPass(None, group_size, 0.0)
+    semaphore = workflow._startup_semaphore()
     with workflow._monitor().startup_gate_wait():  # rollout_client/startup_gate_waiting_mean
         await semaphore.acquire()
     budget = GroupSettings(workflow.config).worker_startup_budget_seconds + 60.0
-    return _GroupAdmission(semaphore, group_size, budget)
+    return StartupPass(semaphore, group_size, budget)
 
 
 async def _run_group_member(
-    workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int, admission: "_GroupAdmission"
-) -> _SingleRolloutOutcome:
+    workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int, startup_pass: "StartupPass"
+) -> MemberOutcome:
     """Run one member on one of its draw's rollout permits, reporting its readiness to the group's startup permit.
 
     The lease block covers the member's whole rollout.  With ``rollout_isolation: process``, ``arun_episode_single``
@@ -215,9 +215,9 @@ async def _run_group_member(
     rollout runs with no lease (``holding(None)``): a group it runs in turn takes no permits of its own and no start
     slots, as its child agents take none."""
 
-    ready = admission.member_slot()
+    ready = startup_pass.member_slot()
     token = _group_ready_callback.set(ready)
-    starts = admission.starts
+    starts = startup_pass.starts
     starts.waiting.add(rollout_number)
     try:
         block = rollout_lease().rollout(rollout_number)
@@ -297,18 +297,18 @@ async def _run_group_rollouts(workflow: "GroupRolloutWorkflow", data: dict) -> l
     # The policy of the task's label (train.label_by).
     label = task_label(data, workflow.label_by)
     policy = GroupStragglerPolicy.of(workflow.config, label)
-    admission = await workflow._admit_group(group_size)
-    tasks = [asyncio.ensure_future(workflow._run_group_member(data, i, admission)) for i in range(group_size)]
+    startup_pass = await workflow._enter_startup_gate(group_size)
+    tasks = [asyncio.ensure_future(workflow._run_group_member(data, i, startup_pass)) for i in range(group_size)]
     if policy is None:  # no straggler timeout: no member is cut
-        return await gather_members(tasks, admission)
-    late = await await_members(workflow, data, tasks, policy, admission)  # those cut at their own deadlines
+        return await gather_members(tasks, startup_pass)
+    late = await await_members(workflow, data, tasks, policy, startup_pass)  # those cut at their own deadlines
     stragglers = await cancel_stragglers(data, tasks, policy)
     workflow.tracker.scalar(straggler_cancelled=float(len(stragglers) + len(late)))
-    admission.release()
+    startup_pass.release()
     return member_outcomes(tasks)
 
 
-async def gather_members(tasks: Sequence[asyncio.Task], admission: _GroupAdmission) -> list:
+async def gather_members(tasks: Sequence[asyncio.Task], startup_pass: StartupPass) -> list:
     """Every member's outcome, without a straggler cut, as ``asyncio.gather`` returns them.  Once a member raises, or
     the group is cancelled, it cancels the members still running, each once, and raises only once they have ended.  The
     group's startup permit comes back either way."""
@@ -324,7 +324,7 @@ async def gather_members(tasks: Sequence[asyncio.Task], admission: _GroupAdmissi
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
     finally:
-        admission.release()
+        startup_pass.release()
 
 
 async def await_members(
@@ -332,7 +332,7 @@ async def await_members(
     data: dict,
     tasks: Sequence[asyncio.Task],
     policy: GroupStragglerPolicy,
-    admission: _GroupAdmission,
+    startup_pass: StartupPass,
 ) -> list[asyncio.Future]:
     """Wait for the quorum (``policy.quorum`` members settled), then for the grace: when every member started with the
     group, for the members still running until one deadline, the quorum's plus ``policy.timeout_seconds``; else for
@@ -344,17 +344,19 @@ async def await_members(
     try:
         while pending and len(pending) > len(tasks) - policy.quorum:
             _done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-        if pending and admission.starts.together():
+        if pending and startup_pass.starts.together():
             # Every member started with the group: one deadline, the quorum's plus the grace, for all of them.
             await asyncio.wait(pending, timeout=policy.timeout_seconds)
         elif pending:
             deadline = asyncio.get_running_loop().time() + policy.timeout_seconds
-            return await workflow._cancel_late_members(data, tasks, pending, admission.starts, deadline, policy.quorum)
+            return await workflow._cancel_late_members(
+                data, tasks, pending, startup_pass.starts, deadline, policy.quorum
+            )
     except BaseException:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        admission.release()
+        startup_pass.release()
         raise
     return []
 
@@ -437,7 +439,7 @@ def member_outcomes(tasks: Sequence[asyncio.Task]) -> list:
     for task in tasks:
         if task.cancelled():
             outcomes.append(
-                _SingleRolloutOutcome(
+                MemberOutcome(
                     result=None,
                     workload=RolloutWorkload(),
                     observed=False,
@@ -450,9 +452,7 @@ def member_outcomes(tasks: Sequence[asyncio.Task]) -> list:
     return outcomes
 
 
-async def arun_episode_single(
-    workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int = 0
-) -> _SingleRolloutOutcome:
+async def arun_episode_single(workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int = 0) -> MemberOutcome:
     """Run a single rollout and return training data.
 
     The blanket guard covers request building too: that adds
@@ -490,7 +490,7 @@ async def arun_episode_single(
             exc,
         )
         workflow.tracker.scalar(rollout_worker_launch_failed=1.0)
-        return _SingleRolloutOutcome(
+        return MemberOutcome(
             result=None,
             workload=RolloutWorkload(),
             observed=False,
@@ -503,7 +503,7 @@ async def run_in_process(
     request: "RolloutWorkerRequest",
     monitor: "ClientThroughputMonitor",
     first_call: dict[str, Any],
-) -> _SingleRolloutOutcome:
+) -> MemberOutcome:
     """A member's rollout in this process (``rollout_isolation: inprocess``), through the rollout body a worker runs
     (``run_rollout_request``), with the workflow's own rollout function and reward processor."""
 
@@ -524,7 +524,7 @@ async def run_in_worker(
     request: "RolloutWorkerRequest",
     monitor: "ClientThroughputMonitor",
     first_call: dict[str, Any],
-) -> _SingleRolloutOutcome:
+) -> MemberOutcome:
     """A member's rollout in a rollout worker process (``rollout_isolation: process``), which reports its readiness to
     the group's startup permit; its telemetry is recorded once it has been reaped."""
 

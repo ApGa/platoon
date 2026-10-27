@@ -23,7 +23,7 @@ from datasets import Dataset
 
 from fakes.config import trainer_config
 from fakes.tinker_service import make_service_trainer
-from fakes.trainer import StepLog, TrainingClient, datum
+from fakes.trainer import StepLog, TrainingClient, datum, draws_of
 from platoon.train.checkpoints.pruning import read_checkpoint_records
 from platoon.train.components import ENVIRONMENT_COLUMN, WeightedOrder
 from platoon.train.dataset_order import PRESERVE_DATASET_ORDER_COLUMN
@@ -182,7 +182,7 @@ def check_fates_once(trainer) -> dict[int, str]:
     ]
     by_position = Counter(position for position, _task, _fate in fates)
     assert all(count == 1 for count in by_position.values()), by_position.most_common(3)
-    store = trainer._recorder.store
+    store = draws_of(trainer).recorder.store
     counted: Counter[tuple[str, str]] = Counter((task_id, fate) for _position, task_id, fate in fates)
     for task_id in store.task_ids():
         for fate, count in store.task(task_id).fates.items():

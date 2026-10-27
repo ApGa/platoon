@@ -3,9 +3,9 @@ service, with its own optimizer, under its objective (:mod:`platoon.train.object
 
 A step opens one update per minibatch (:class:`PolicyUpdate`): the forward_backward calls of its microbatches, as the
 step sends each, then one optimizer step over them all, each result awaited under its deadline, and the update's
-metrics: the objective's of each microbatch, averaged, and the optimizer's.  The rl trainer's step, ``TrainStep`` in
-:mod:`platoon.train.trainer.loops`, builds the learner of the policy it trains and opens its updates; a step hook
-updates the same policy through a learner of its own objective (:meth:`Learner.for_objective`).
+metrics: the objective's of each microbatch, averaged, and the optimizer's.  The rl trainer's step
+(:class:`~platoon.train.step.step.TrainStep`) builds the learner of the policy it trains and opens its updates; a step
+hook updates the same policy through a learner of its own objective (:meth:`Learner.for_objective`).
 
 Two of the run's rules hold here, for every update of any trainer (RFC 0021, rule 10): a step's first submission marks
 the step open (its clock's ``step_open``), and a learner that fails closed refuses an optimizer step that the service
@@ -246,7 +246,7 @@ class PolicyUpdate:
             tally.optimizer_steps += 1
         self.learner.policy.optimizer_steps += 1
         if self.learner.clock is not None:
-            self.learner.clock.open_updates.pop(self.learner.policy.spec.id, None)
+            self.learner.clock.open_updates.pop(self.learner.policy.id, None)
         if optim_elapsed > 60.0:
             logger.warning(f"optim_step result took {optim_elapsed:.1f}s (slow)")
         else:
@@ -279,7 +279,7 @@ class PolicyUpdate:
         clock.step_open = True
         if self.originals:
             return  # a later microbatch of the open update
-        policy_id = self.learner.policy.spec.id  # its spec's: a policy that a test made as platoon 0.4.0 did has no id
+        policy_id = self.learner.policy.id
         if policy_id in clock.open_updates:
             raise RuntimeError(
                 f"an update of policy {policy_id!r} is open, sent and not applied yet: apply it before sending "

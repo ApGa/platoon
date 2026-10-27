@@ -18,6 +18,7 @@ os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 from fakes.config import make_config  # noqa: E402
 from fakes.loop import loop_state, loop_trainer  # noqa: E402
 
+from platoon.train.evaluation.loop import _eval_completion_monitor, eval_worker  # noqa: E402
 from platoon.train.trainer import signals as signals_module  # noqa: E402
 from platoon.train.trainer import waiting as waiting_module  # noqa: E402
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer  # noqa: E402
@@ -77,9 +78,7 @@ def test_worker_loop_heartbeats_before_group_finishes(monkeypatch):
         workflow = _SlowWorkflow(delay=0.3)
         started = asyncio.get_event_loop().time()
         data_q.put_nowait({"task_id": "t1"})
-        worker = asyncio.ensure_future(
-            _trainer()._rollout_workflow_worker_loop(shared, workflow, data_q, result_q, tracker=shared.train_tracker)
-        )
+        worker = asyncio.ensure_future(eval_worker(shared, workflow, data_q, result_q, tracker=shared.train_tracker))
         result = await asyncio.wait_for(result_q.get(), timeout=5)
         finished = asyncio.get_event_loop().time()
         worker.cancel()
@@ -100,18 +99,17 @@ def test_await_rollout_with_heartbeat_default_interval_is_below_watchdog_timeout
     import inspect
 
     # Resolved at call time from the module constant (so tests can shorten it); 60 s is far below any watchdog.
-    sig = inspect.signature(PlatoonTinkerRLTrainer._await_rollout_with_heartbeat)
+    sig = inspect.signature(waiting_module._await_rollout_with_heartbeat)
     assert sig.parameters["heartbeat_interval"].default is None
 
 
 def test_await_rollout_with_heartbeat_propagates_exception_and_none_watchdog():
     async def run():
-        trainer = _trainer()
-        with_none = await trainer._await_rollout_with_heartbeat(
+        with_none = await waiting_module._await_rollout_with_heartbeat(
             _SlowWorkflow(0.0).arun_episode({"task_id": "a"}), watchdog=None, heartbeat_interval=0.01
         )
         try:
-            await trainer._await_rollout_with_heartbeat(
+            await waiting_module._await_rollout_with_heartbeat(
                 _SlowWorkflow(0.0, fail=True).arun_episode({"task_id": "b"}), watchdog=None, heartbeat_interval=0.01
             )
         except RuntimeError as e:
@@ -131,9 +129,7 @@ def test_worker_loop_counts_failed_group_and_keeps_heartbeating(monkeypatch):
         result_q: asyncio.Queue = asyncio.Queue()
         data_q.put_nowait({"task_id": "t2"})
         worker = asyncio.ensure_future(
-            _trainer()._rollout_workflow_worker_loop(
-                shared, _SlowWorkflow(0.1, fail=True), data_q, result_q, tracker=shared.train_tracker
-            )
+            eval_worker(shared, _SlowWorkflow(0.1, fail=True), data_q, result_q, tracker=shared.train_tracker)
         )
         result = await asyncio.wait_for(result_q.get(), timeout=5)
         worker.cancel()
@@ -156,9 +152,7 @@ def test_cancelling_worker_cancels_in_flight_group(monkeypatch):
         result_q: asyncio.Queue = asyncio.Queue()
         workflow = _SlowWorkflow(delay=10.0)
         data_q.put_nowait({"task_id": "t3"})
-        worker = asyncio.ensure_future(
-            _trainer()._rollout_workflow_worker_loop(shared, workflow, data_q, result_q, tracker=shared.train_tracker)
-        )
+        worker = asyncio.ensure_future(eval_worker(shared, workflow, data_q, result_q, tracker=shared.train_tracker))
         await asyncio.sleep(0.1)
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
@@ -171,11 +165,11 @@ class _GroupWorkflow:
     """Returns what ``GroupRolloutWorkflow`` returns: a group output carrying its own statistics."""
 
     async def arun_episode(self, data: dict):
-        from platoon.train.workflow.output import _TaskRolloutOutput
+        from platoon.train.workflow.output import GroupOutput
         from platoon.utils.rollout_workload import RolloutWorkload
 
         await asyncio.sleep(0.01)
-        output = _TaskRolloutOutput(
+        output = GroupOutput(
             [],
             workload=RolloutWorkload(),
             requested_rollouts=1,
@@ -196,9 +190,7 @@ def test_worker_loop_keeps_a_groups_rollout_time_with_the_group():
         result_q: asyncio.Queue = asyncio.Queue()
         data_q.put_nowait({"task_id": "t4"})
         worker = asyncio.ensure_future(
-            _trainer()._rollout_workflow_worker_loop(
-                shared, _GroupWorkflow(), data_q, result_q, tracker=shared.train_tracker
-            )
+            eval_worker(shared, _GroupWorkflow(), data_q, result_q, tracker=shared.train_tracker)
         )
         result = await asyncio.wait_for(result_q.get(), timeout=5)
         worker.cancel()
@@ -220,7 +212,7 @@ def test_eval_records_each_groups_statistics_as_it_collects_the_group():
         queue.put_nowait(None)  # a group that failed carries nothing
         tracker = _StubTracker()
         try:
-            await _trainer()._eval_completion_monitor(2, queue, tracker=tracker)
+            await _eval_completion_monitor(2, queue, tracker=tracker)
         except signals_module.TerminateEvalLoop:
             return tracker.scalars
         raise AssertionError("the monitor ends the eval loop once every group is in")

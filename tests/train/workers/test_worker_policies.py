@@ -130,18 +130,18 @@ def test_the_trainer_publishes_the_other_sampled_policies_bindings_before_the_fi
     assert published == [(("workflow", "judge sampler", 0), {"required": True, "policy": "judge"})]
 
 
-def test_an_evaluation_publishes_the_frozen_bindings_of_its_state_s_policies_if_it_has_them(monkeypatch):
+def test_an_evaluation_publishes_the_bindings_of_its_state_s_frozen_policies(monkeypatch):
+    from platoon.train.evaluation import loop as evaluation_loop
     from platoon.train.evaluation.loop import EvaluationLoop, Publication
 
     published: list[tuple] = []
-    trainer: Any = SimpleNamespace(
-        config=SimpleNamespace(train=SimpleNamespace(label_by=None)),
-        eval_dataset=None,
-        _publish_worker_binding=lambda *args, **kwargs: published.append((args, kwargs)),
+    monkeypatch.setattr(
+        evaluation_loop, "_publish_worker_binding", lambda *args, **kwargs: published.append((args, kwargs))
     )
+    trainer: Any = SimpleNamespace(config=SimpleNamespace(train=SimpleNamespace(label_by=None)), eval_dataset=None)
     workflow: Any = SimpleNamespace(rollout_isolation="process")
     main_sampler: Any = "main sampler"
-    publication = Publication(updated=asyncio.Event(), version=lambda: 1, sampling_client=lambda: main_sampler)
+    publication = Publication(step_ended=asyncio.Event(), version=lambda: 1, sampling_client=lambda: main_sampler)
 
     async def no_groups() -> tuple[int, dict]:
         return 0, {}
@@ -154,11 +154,12 @@ def test_an_evaluation_publishes_the_frozen_bindings_of_its_state_s_policies_if_
         return list(published)
 
     logger = SimpleNamespace(log=lambda **kwargs: None)
-    # A state a test made as platoon 0.4.0 did, without the run's policies: main's binding alone, as the train loop.
+    main = SimpleNamespace(id=MAIN)
+    # A run whose agents sample main alone: main's binding alone, as the train loop.
     state: Any = SimpleNamespace(train_step=1, stats_logger=logger, evaluations_path=None)
+    state.policies = SimpleNamespace(sampled=lambda: [main], trainable=lambda: [main], agents=AgentBindings(MAIN))
     assert evaluated(state) == [((workflow, "main sampler", 1), {})]
     judge = SimpleNamespace(id="judge", sampling_client="judge sampler", version=0)
-    main = SimpleNamespace(id=MAIN)
     state.policies = SimpleNamespace(
         sampled=lambda: [main, judge], trainable=lambda: [main], agents=AgentBindings(MAIN)
     )

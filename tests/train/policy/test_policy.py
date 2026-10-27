@@ -19,6 +19,7 @@ from platoon.train.policy import set as set_module
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.set import PolicySet
 from platoon.train.policy.spec import MAIN, PolicySpec, policy_specs
+from platoon.train.trainer.run import StepClock
 from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.utils.config import build_config
@@ -175,10 +176,8 @@ def _state(**given: Any) -> TrainLoopSharedState:
     }
     return TrainLoopSharedState(
         shutdown_event=asyncio.Event(),
-        train_step=0,
+        clock=StepClock(step=0, updated=asyncio.Event()),
         eval_dataloader=None,
-        sampling_client_step=0,
-        sampling_client_updated_event=asyncio.Event(),
         **fakes,
         **given,
     )
@@ -196,35 +195,3 @@ def test_the_shared_state_reads_and_writes_the_leader_policy_s_state():
     sampler: Any = object()
     state.sampling_client = sampler
     assert policy.optimizer_steps == 4 and policy.sampling_client is sampler
-
-
-def test_a_shared_state_given_the_policy_s_state_keeps_it_in_a_policy_of_its_own():
-    """As platoon 0.4.0's code and the tests make one: the six keyword arguments, and no policies."""
-
-    info, client = SimpleNamespace(model_name="m", renderer_name="r"), object()
-    state = _state(model_info=info, training_client=client, sampling_client=None, optimizer_steps=2)
-
-    assert state.policies is not None and list(state.policies) == [MAIN]
-    leader = state.policies[MAIN]
-    assert (leader.spec.model_name, leader.spec.renderer_name) == ("m", "r")
-    assert state.model_info is info and state.training_client is client and state.sampling_client is None
-    assert state.optimizer_steps == 2 and state.optimizer_params is None and state.service_client is None
-
-
-def test_a_shared_state_takes_the_policies_or_the_policy_s_state_not_both():
-    """The part of the policy's state given beside the policies would be dropped.  ``dataclasses.replace()`` gives
-    both."""
-
-    state = _state(
-        model_info=SimpleNamespace(model_name="m"),
-        service_client="service",
-        training_client="tc-1",
-        sampling_client="sc-1",
-        optimizer_params="adam",
-    )
-
-    with pytest.raises(TypeError, match="not both: given policies and training_client, optimizer_steps"):
-        _state(policies=state.policies, training_client="tc-2", optimizer_steps=0)
-    with pytest.raises(TypeError, match="not both"):
-        dataclasses.replace(state, training_client="tc-2")
-    assert state.training_client == "tc-1" and state.optimizer_steps == 0

@@ -17,8 +17,8 @@ In a run that trains several policies, each policy's rows of a group are judged 
 version and bound (:meth:`StaleFilter.for_policy`): a policy's stale rows are dropped together, and the group's other
 rows still train.
 
-The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, asks the filter of each group it dequeues, and
-logs, counts and drops the stale groups and datums.
+The step itself, :class:`~platoon.train.step.step.TrainStep`, asks the filter of each group it dequeues, and logs,
+counts and drops the stale groups and datums.
 """
 
 from __future__ import annotations

@@ -152,7 +152,8 @@ def _setup_signal_handlers(trainer: "TrainerBase", shutdown_event: asyncio.Event
     """Set up signal handlers for graceful shutdown.
 
     First Ctrl+C (or SIGTERM): Sets shutdown_event. The train loop stops at the next step boundary (a batch
-    that has applied an update finishes first) and ``train`` saves ``<step>_interrupted``.
+    that has applied an update finishes first) and the run saves ``<step>_interrupted`` (``TrainerRun``'s save at
+    exit).
     Second Ctrl+C: Forces immediate exit.
 
     SIGUSR2 and SIGUSR1 are what ``platoon train`` passes on to a start it supervises

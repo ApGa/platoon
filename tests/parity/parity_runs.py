@@ -34,7 +34,7 @@ from platoon.train.components import EnvironmentConfig
 from platoon.train.config_defs import WorkflowConfig
 from platoon.train.tinker.proxy import ModelInfo, TinkerLLM, proxy_interactions
 from platoon.train.workflow.group import GroupRolloutWorkflow
-from platoon.train.workflow.output import _SingleRolloutOutcome
+from platoon.train.workflow.output import MemberOutcome
 
 MODEL_NAME = "parity/policy"
 CHECKPOINT_VERSION = 7
@@ -230,7 +230,7 @@ class ParityWorkflow(GroupRolloutWorkflow):
         self.members = [MemberRun(index, plan) for index, plan in enumerate(plans)]
         self.baselines: list[float] | None = None
 
-    async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> _SingleRolloutOutcome:
+    async def arun_episode_single(self, data: dict, rollout_number: int = 0) -> MemberOutcome:
         member = self.members[rollout_number]
         token = MEMBER.set(member)
         try:
@@ -315,7 +315,7 @@ def datum_record(datum: Any) -> dict[str, Any]:
     return {"model_input": chunks, "loss_fn_inputs": inputs}
 
 
-def member_outcome(outcome: _SingleRolloutOutcome) -> dict[str, Any]:
+def member_outcome(outcome: MemberOutcome) -> dict[str, Any]:
     """A member's outcome as the group got it, before centering: its converted result and workload."""
 
     result = outcome.result

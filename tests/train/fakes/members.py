@@ -42,7 +42,7 @@ def member_datum(position: int, member: int, version: int) -> tinker.Datum:
 
 def member_outcome(
     position: int, member: int, *, reward: float, version: int, seconds: float | None = None
-) -> output_module._SingleRolloutOutcome:
+) -> output_module.MemberOutcome:
     result = TrajectoryCollectionResult(
         datums=[member_datum(position, member, version)],
         task_reward=reward,
@@ -69,7 +69,7 @@ def member_outcome(
         policy_eligible_datums=1,
         post_sampling_datums=1,
     )
-    return output_module._SingleRolloutOutcome(result=result, workload=workload, observed=True, seconds=seconds)
+    return output_module.MemberOutcome(result=result, workload=workload, observed=True, seconds=seconds)
 
 
 async def unscripted_rollout(task: Any, config: Any) -> dict:

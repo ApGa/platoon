@@ -300,7 +300,7 @@ def test_an_estimator_that_raises_stops_the_run_and_its_group_counts_as_no_faile
         match=r"^the credit estimator test of environments\[default\]: assign\(group\) raised KeyError: 'a bug', on "
         r"task task$",
     ):
-        asyncio.run(runner._run_group(workflow, {"task_id": "task"}, watchdog=None, tracker=tracker))
+        asyncio.run(runner.run_group_guarded(workflow, {"task_id": "task"}, watchdog=None, tracker=tracker))
     assert recorded == []
 
 
@@ -331,7 +331,7 @@ def test_a_policy_s_failed_scoring_fails_only_its_group(caplog):
 
     workflow.arun_episode_single = single
     tracker: Any = SimpleNamespace(scalar=lambda **values: None)
-    output = asyncio.run(runner._run_group(workflow, {"task_id": "task"}, watchdog=None, tracker=tracker))
+    output = asyncio.run(runner.run_group_guarded(workflow, {"task_id": "task"}, watchdog=None, tracker=tracker))
 
     # The run goes on: the group's output says it failed, and it trains nothing.
     report = report_of(output)

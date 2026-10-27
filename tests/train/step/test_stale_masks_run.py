@@ -142,7 +142,7 @@ class _Spanning(GroupRolloutWorkflow):
             policy_eligible_datums=count,
             post_sampling_datums=count,
         )
-        return output_module._SingleRolloutOutcome(result=result, workload=workload, observed=True)
+        return output_module.MemberOutcome(result=result, workload=workload, observed=True)
 
 
 def _spanning(position: int):
@@ -203,7 +203,7 @@ def _run(tmp_path, stale_filter: str, workflow_of, *, steps: int = 4):
 
 
 def _group_workflow(versions):
-    return lambda trainer, config: _Spanning(config.train.workflow_config, trainer._model_info.llm, versions)
+    return lambda trainer, config: _Spanning(config.train.workflow_config, trainer.model_info.llm, versions)
 
 
 def test_a_rollout_that_spans_versions_keeps_exactly_its_datums_within_the_bound(tmp_path, caplog):
@@ -280,7 +280,7 @@ class _OwnWorkflow:
 
     async def arun_episode(self, row):
         await asyncio.sleep(0)
-        position, now = row[POSITION_COLUMN], self.trainer._model_info.llm.version
+        position, now = row[POSITION_COLUMN], self.trainer.model_info.llm.version
         return [_datum(position, 0, 0, now - 5 if position == 1 else now), _datum(position, 0, 1, now)]
 
 
@@ -308,7 +308,7 @@ def test_datums_that_no_longer_match_their_own_versions_keep_their_rollouts_and_
     ``datum`` they are judged by it, as under ``group``, and every other group trains."""
 
     def trimming(trainer, config):
-        return _Trimming(config.train.workflow_config, trainer._model_info.llm, _spanning(1))
+        return _Trimming(config.train.workflow_config, trainer.model_info.llm, _spanning(1))
 
     runs = {}
     for name in ("group", "datum"):
