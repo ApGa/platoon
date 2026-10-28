@@ -31,6 +31,7 @@ from platoon.sandbox.stacks import (
     STACK_LABEL,
     STACKS,
     Dependency,
+    ExternalService,
     Healthcheck,
     ServiceSpec,
     StackSpec,
@@ -158,6 +159,38 @@ async def test_the_relay_s_ports_avoid_the_ports_the_services_declare(provider: 
         assert stack.main.routes == {"gateway": "http://127.0.0.1:18082", "judge": "http://127.0.0.1:18083"}
     finally:
         await stack.stop()
+
+
+async def test_an_external_service_is_relayed_at_its_own_port_and_named_like_the_service_it_serves(
+    provider: HpcProvider,
+):
+    # A node service in place of the stack's judge: main reaches it as judge:8081 (or its alias), as it would the
+    # judge's own container, through the pod's relay to the rollout's scope; the other upstreams keep away from 8081.
+    spec = _stack(web=_sidecar(ports=(18080,)))
+    spec.externals = {"judge": ExternalService(socket="/run/node/scope.sock", port=8081, aliases=("grader",))}
+    stack = await provider.start_stack(spec)
+    pod = _only_pod(provider)
+    try:
+        assert pod.spec.upstreams == {"gateway": GATEWAY, "judge": "unix:///run/node/scope.sock"}
+        assert pod.spec.upstream_ports == {"gateway": 18081, "judge": 8081}
+        assert pod.spec.hosts == ["grader", "judge"]
+        assert stack.main.routes == {"gateway": "http://127.0.0.1:18081"}  # the judge is no route of main's
+        assert stack.rewrite("http://judge:8081/evaluate") == "http://judge:8081/evaluate"
+        assert [service.name for service in pod.started] == ["main", "web"]
+    finally:
+        await stack.stop()
+
+
+async def test_an_external_service_that_clashes_with_the_stack_is_refused_before_anything_starts(provider: HpcProvider):
+    gateway_named = _stack()
+    gateway_named.externals = {"gateway": ExternalService(socket="/run/node/scope.sock", port=8081)}
+    with pytest.raises(ValueError, match="named like an upstream of its services"):
+        await provider.start_stack(gateway_named)
+    declared = _stack(web=_sidecar(ports=(8081,)))
+    declared.externals = {"judge": ExternalService(socket="/run/node/scope.sock", port=8081)}
+    with pytest.raises(ValueError, match="at port 8081, which the service 'web' declares"):
+        await provider.start_stack(declared)
+    assert provider.inner.started_pods == []
 
 
 async def test_an_upstream_that_is_not_a_unix_socket_is_refused_before_anything_starts(provider: HpcProvider):

@@ -439,7 +439,7 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         whose run builds the training and evaluation workflows from the setup, on the trainer's policies, first."""
 
         self._run = TrainerRun(self)
-        await self._run.execute()
+        await self._execute(self._run)
 
     async def train(self, train_workflow: RolloutWorkflow, eval_workflow: RolloutWorkflow | None = None):
         """Train this start of the run, from the checkpoint it resumes from (:class:`StartPoint`; none for a fresh run)
@@ -448,7 +448,33 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         run."""
 
         self._run = TrainerRun(self, workflows=Workflows(train_workflow, eval_workflow))
-        await self._run.execute()
+        await self._execute(self._run)
+
+    async def _execute(self, run: TrainerRun) -> None:
+        """Run the start's lifecycle (``run``), then stop the node services its rollouts used (the rollouts' startup's,
+        :meth:`RolloutStartup.close`), before the run reaps its sandboxes.  A start whose node services failed while
+        it ran, which stopped it at a step boundary (:meth:`_loop_state`), fails with why once it saved."""
+
+        try:
+            await run.execute()
+        finally:
+            failure = await self._close_rollout_startup()
+        if failure is not None:
+            from platoon.envs.harbor.node_services import NodeServiceError
+
+            raise NodeServiceError(f"the run stopped because its node services failed: {failure}")
+
+    async def _close_rollout_startup(self) -> str | None:
+        """Close the rollouts' startup, once it began (:meth:`prepare`): why its node services failed, when they did."""
+
+        startup = getattr(self, "_startup", None)
+        if startup is None:
+            return None
+        try:
+            return await startup.close()
+        except Exception:
+            logger.exception("Stopping the run's node services failed")
+            return None
 
     # The lifecycle's hooks (TrainerBase), each a phase of the start or a step of one, in the order the run calls them.
 
@@ -514,13 +540,17 @@ class PlatoonTinkerRLTrainer(TrainerBase):
 
     async def ready(self, run: TrainerRun) -> None:
         """7. What the train and evaluation loops share (:meth:`_loop_state`), once the harness toolchains are staged;
-        its clock, which it starts where the start's steps begin, is the run's."""
+        its clock, which it starts where the start's steps begin, is the run's.  The node services' failure, from now
+        on, stops the steps (:meth:`RolloutStartup.on_node_service_failure`)."""
 
         self._shared_state = await self._loop_state(
             run.start, run.shutdown, self._train_dataloader, self._startup, end_batch=run.plan.end_step
         )
         assert self._shared_state.clock is not None  # the loop state is given its clock
         run.clock = self._shared_state.clock
+        # Node services that fail for good stop the steps at the next boundary, as a first signal does; the start then
+        # fails with why (_execute).
+        self._startup.on_node_service_failure(lambda why: run.shutdown.set())
 
     async def run_steps(self, run: TrainerRun) -> None:
         """8. The train loop, and beside it the evaluation loop when the start evaluates (:meth:`_run_loops`)."""

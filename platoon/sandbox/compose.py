@@ -137,6 +137,11 @@ async def start_compose_stack(provider: DockerProvider, spec: StackSpec) -> Driv
     """Start ``spec`` as a compose project (the module docstring says how): registered for cleanup like the provider's
     sandboxes, so that a stopping process stops it and reaping by label removes what it leaves."""
 
+    if spec.externals:
+        raise ValueError(
+            f"A compose project cannot reach a host socket, and the stack reaches {', '.join(sorted(spec.externals))} "
+            "outside it (a node service): run it as a pod (singularity, enroot) or on the process provider"
+        )
     spec = _shared_networks_first(spec)
     spec.check()
     name = f"{PROJECT_PREFIX}{uuid.uuid4().hex[:12]}"

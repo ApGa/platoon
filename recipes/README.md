@@ -2,12 +2,14 @@
 
 A recipe carries one published experiment over to platoon: configs that run the experiment's setting, and a README
 that says what the publication reports, how the configs differ from its runs, and which versions of platoon and of
-the extensions the configs were checked with. A recipe is not an extension: it adds no code, only configs that name
-the components platoon and the extensions provide.
+the extensions the configs were checked with. A recipe is not an extension: it adds no code to platoon, only configs
+that name the components platoon and the extensions provide, and the files those configs hand to what they run (a
+dataset's overlays, a node service's scripts).
 
 | Recipe | Experiment |
 |---|---|
 | [`rao/`](rao/README.md) | [Recursive Agent Optimization](https://arxiv.org/abs/2605.06639) on TextCraft-Synth: the paper's single CodeAct agent against its recursive agent, and its ablation of the subagents' rewards |
+| [`frontiersmith/`](frontiersmith/README.md) | [FrontierSmith](https://github.com/FrontierCS/FrontierSmith)'s 200 synthetic competitive-programming problems as agentic Harbor tasks, graded by one Frontier-CS judge per node (a node service): an evaluation, and a small training check |
 
 CI checks every recipe on CPU, with every first-party extension installed: each config loads, resolves every
 component it names and validates (`uv run --no-sync pytest recipes/ -v`, after

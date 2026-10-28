@@ -8,8 +8,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -22,6 +24,7 @@ from platoon.sandbox.process import ProcessProvider, ProcessSandbox
 from platoon.sandbox.process_stacks import PORT_ENV, STACK_LABEL, STACK_RECORD, HostService
 from platoon.sandbox.stacks import (
     Dependency,
+    ExternalService,
     Healthcheck,
     ServiceSpec,
     Stack,
@@ -144,6 +147,43 @@ async def test_each_stack_gets_its_own_ports_and_its_services_reach_one_another_
         await asyncio.gather(first.stop(), second.stop())
     assert list(provider.root.iterdir()) == [] and not _registered(before)
     assert not _claimed(port)  # released with the stack
+
+
+async def test_an_external_service_is_reached_by_its_name_through_a_port_relayed_to_its_socket(
+    provider: ProcessProvider, before: set[int], tmp_path: Path
+):
+    # A node service's scope: a Unix socket on this host that answers "judged".  The stack reaches it as judge:8081,
+    # through a port of this host that it holds for its life and relays to the socket.
+    socket_path = str(Path(tempfile.mkdtemp(prefix="scope", dir="/tmp")) / "scope.sock")  # short: a socket's address
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\njudged")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_unix_server(answer, path=socket_path)
+    spec = StackSpec(
+        services={"main": ServiceSpec(sandbox=SandboxSpec(image="local", env={"JUDGE": "http://judge:8081/x"}))},
+        externals={"judge": ExternalService(socket=socket_path, port=8081, aliases=("grader",))},
+    )
+    stack = await provider.start_stack(spec)
+    try:
+        judge = _spec(stack, "main").env["JUDGE"]
+        assert judge.startswith("http://127.0.0.1:") and judge != "http://127.0.0.1:8081/x"
+        port = int(judge.split(":")[2].split("/")[0])
+        assert stack.rewrite("http://grader:8081 and judge:9") == f"http://127.0.0.1:{port} and judge:9"
+        assert await _fetch(stack, "JUDGE") == "judged"
+        if sys.platform.startswith("linux"):
+            assert _claimed(port)
+    finally:
+        await stack.stop()
+        server.close()
+        shutil.rmtree(Path(socket_path).parent, ignore_errors=True)
+    assert list(provider.root.iterdir()) == [] and not _registered(before)
+    assert not _claimed(port)
+    with pytest.raises(OSError):  # the relay is gone with the stack
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
 
 
 async def test_a_named_volume_is_one_directory_for_every_service_that_names_it(provider: ProcessProvider):

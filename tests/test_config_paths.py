@@ -283,6 +283,33 @@ def test_an_adapters_local_repository_is_relative_to_the_config_file(tmp_path, m
         resolve_config(missing)
 
 
+def test_a_node_service_s_binds_are_relative_to_the_config_file(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    (configs / "node-service").mkdir(parents=True)
+    binds = [{"source": "node-service", "target": "/node"}, {"source": "/srv/data", "target": "/data", "stage": True}]
+    services = {"judge": {"image": "judge.sif", "command": ["serve"], "port": 8081, "binds": binds}, "other": "site"}
+    config = _write(
+        configs / "env.yaml", {"environments": [{"service": "harbor", "service_kwargs": {"node_services": services}}]}
+    )
+    monkeypatch.chdir(tmp_path)
+
+    data = resolve_config(config).data
+
+    node_services = _kwargs(data)["node_services"]
+    assert node_services["judge"]["binds"] == [
+        {"source": str(configs / "node-service"), "target": "/node"},
+        {"source": "/srv/data", "target": "/data", "stage": True},  # absolute: as it is, a path of the site
+    ]
+    assert node_services["other"] == "site"
+    binds[0]["source"] = "nowhere"
+    missing = _write(
+        configs / "missing.yaml",
+        {"environments": [{"service": "harbor", "service_kwargs": {"node_services": services}}]},
+    )
+    with pytest.raises(ConfigError, match=r"service_kwargs\.node_services\.judge\.binds\.0\.source: nowhere names"):
+        resolve_config(missing)
+
+
 def test_harness_spec_paths_resolve_in_a_reference_and_in_a_weighted_mapping(tmp_path, monkeypatch):
     configs = tmp_path / "configs"
     configs.mkdir()
@@ -358,6 +385,7 @@ def test_services_declare_their_path_options():
         "tasks",
         "overlays",
         "mounts[].source",
+        "node_services.*.binds[].source",
     }
     assert harbor["splits"] == PathOption(relative_to="dataset_dir")
     assert harbor["lock"] == PathOption(written=True)

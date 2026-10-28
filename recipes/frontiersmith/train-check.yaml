@@ -1,0 +1,73 @@
+# A small training check of the FrontierSmith recipe (eval.yaml has the tasks, the judge pool and README.md the
+# setup): a rank-32 LoRA of Qwen3-4B-Instruct-2507 on 16 of the problems (tasks/check.json: the ten that Frontier-CS
+# also publishes, as its problems 306-315, three that check the judge, and three more), for 20 steps of 8 problems with
+# 4 rollouts each.  It checks that agents, stacks, the node judge pool and training run together, with few invalid
+# rollouts; it is no reproduction of FrontierSmith's single-turn GRPO.
+#
+#   platoon prepare recipes/frontiersmith/train-check.yaml
+#   platoon train recipes/frontiersmith/train-check.yaml [key=value ...]
+
+environments:
+  - name: frontiersmith
+    service: harbor
+    service_kwargs:
+      # FrontierSmith's own Harbor adapter at the release, with --include-non-numeric (its problems are named
+      # frontiersmith_<n>), run with Harbor 0.24.0 as PyPI had it then; only the problems' statements and configs are
+      # checked out, which is all it reads.
+      adapter:
+        repo: https://github.com/FrontierCS/FrontierSmith
+        commit: ac3046cce7a270e3177cbb41376f36e03de1d518
+        path: harbor/adapters/frontier-cs-algorithm
+        sparse:
+          - /harbor/adapters/frontier-cs-algorithm/
+          - /Frontier-CS/algorithmic/problems/*/config.yaml
+          - /Frontier-CS/algorithmic/problems/*/statement.txt
+          - /Frontier-CS/algorithmic/problems/*/tag.txt
+          - /Frontier-CS/algorithmic/problems/*/examples/
+        command: [uv, run, --no-project, --python, "3.12", --exclude-newer, "2026-10-06T00:00:00Z",
+                  --with, harbor==0.24.0, --with, pyyaml==6.0.2, python, -m, frontier_cs_algorithm.main]
+        env: {PYTHONPATH: src}
+        args: [--source, "{checkout}/Frontier-CS", --include-non-numeric]
+      tasks: [tasks/check.json]            # 16 problems
+      overlays: [overlays/frontiersmith]   # the node judge pool, invalid on judge failures, no agent installers
+      network_policy: none                 # the agents work offline: the web may hold answers
+      verifier_timeout_multiplier: 4       # a grade waits for its turn at the shared judge
+      node_services:
+        # The Frontier-CS judge (go-judge 1.11.1 and Frontier-CS's judge engine of 2026-09-28), once per node, shared by
+        # every rollout on it: /srv/frontiersmith stands for your site's copies (README.md, "Set up the site").
+        frontier-cs-judge:
+          image: /srv/frontiersmith/images/frontiercs-judge.sif
+          command: [sh, /node/start-judge.sh]
+          port: 8081                       # the tasks' JUDGE_URL: http://judge:8081
+          cpus: 16                         # 16 of the run's CPUs, whole cores, kept from its rollouts
+          memory_mb: 65536
+          binds:
+            - {source: /srv/frontiersmith/FrontierSmith/Frontier-CS/algorithmic/problems, target: /app/problems,
+               stage: true}                # the 200 problems' test data, copied to node-local disk once per node
+            - {source: node-service, target: /node}
+          health: {path: /health, interval: 15, timeout: 30, start_period: 300, retries: 3}
+          front: {routes: ["POST /evaluate", "GET /health"], concurrency: 1}
+          network: none
+          provider_options: {allow_network_none: true}
+    harness: platoon-bash
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  lora_rank: 32
+  batch_size: 8
+  max_training_steps: 20
+  max_concurrent_rollouts: 32
+  workflow_config:
+    group_size: 4
+    rollout_config:
+      max_steps: 60
+      timeout: 3600
+      inference_params: {temperature: 1.0, max_completion_tokens: 4096}
+
+log_path: ./logs/runs
+
+stats:
+  experiment_name: frontiersmith
+  trial_name: qwen3-4b-check
+  wandb: {mode: disabled}

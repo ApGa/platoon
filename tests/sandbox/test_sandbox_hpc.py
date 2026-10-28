@@ -34,7 +34,7 @@ from platoon.sandbox.enroot import EnrootProvider, enroot_options
 from platoon.sandbox.hpc import HpcProvider
 from platoon.sandbox.hpc_stacks import pods_refusal
 from platoon.sandbox.singularity import SingularityProvider
-from platoon.sandbox.stacks import STACKS
+from platoon.sandbox.stacks import EXTERNALS, STACKS
 
 PROVIDERS = {"singularity": SingularityProvider, "enroot": EnrootProvider}
 IMAGES = {"singularity": "x.sif", "enroot": "x.sqsh"}
@@ -317,11 +317,12 @@ def test_enroot_refuses_root_and_remap_root_together():
 
 
 def _with_stacks(provider: object, *capabilities: str) -> frozenset[str]:
-    """``capabilities``, and ``stacks`` where the installed hpc-sandbox's pods run them here (0.5 on a node that nests
-    user namespaces)."""
+    """``capabilities``, and ``stacks`` and ``externals`` where the installed hpc-sandbox's pods run them here (0.5 on a
+    node that nests user namespaces)."""
 
     assert isinstance(provider, HpcProvider)
-    return frozenset({*capabilities, *([STACKS] if pods_refusal(provider.name, provider.inner_class) is None else [])})
+    pods = pods_refusal(provider.name, provider.inner_class) is None
+    return frozenset({*capabilities, *([STACKS, EXTERNALS] if pods else [])})
 
 
 def _published_hpc_sandbox():

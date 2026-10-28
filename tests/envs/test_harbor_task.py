@@ -324,14 +324,19 @@ def test_artifacts_of_a_service_name_an_absolute_path_of_one_the_stack_starts(ma
         HarborTask.load(relative)
 
 
-def test_a_stack_whose_service_a_node_service_serves_is_refused(make_task):
+def test_a_stack_whose_service_a_node_service_serves_loads_with_it(make_task):
+    # A node service serves db (an overlay's external): the task loads, and the service that serves it is the
+    # environment's to declare (HarborEnvironmentService.check_tasks refuses a task whose node service it lacks).
     task_dir = make_task("external")
     (task_dir / "environment" / "docker-compose.yaml").write_text(STACK)
     plan = HarborTask.load(task_dir).compose
     assert plan is not None
-    marked = {**plan.to_json(), "services": {**plan.services, "db": {"external": "judge-pool"}}}
-    with pytest.raises(HarborTaskError, match="whose service db a node service serves \\(judge-pool"):
-        HarborTask.load(task_dir, compose=marked)
+    scope = {"problem_id": "${PROBLEM_ID}"}
+    marked = {**plan.to_json(), "services": {**plan.services, "db": {"external": "judge-pool", "scope": scope}}}
+    loaded = HarborTask.load(task_dir, compose=marked).compose
+    assert loaded is not None
+    assert loaded.external == {"db": "judge-pool"}
+    assert loaded.external_scope("db") == scope
 
 
 @pytest.mark.parametrize(

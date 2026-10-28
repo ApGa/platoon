@@ -1,0 +1,12 @@
+# Written for platoon: main writes an answer that the tests submit to the judge, a privileged judge pool in Docker,
+# which the fixtures' overlay serves from the node's judge pool (a node service) instead.
+services:
+  main:
+    depends_on:
+      judge:
+        condition: service_started
+  judge:
+    build: ./judge
+    privileged: true
+    environment:
+      PORT: "8081"

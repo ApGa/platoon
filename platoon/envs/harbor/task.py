@@ -11,9 +11,9 @@ and one with services besides ``main`` runs as a multi-container stack (:mod:`pl
 ``[[verifier.collect]]`` hooks run in its services and ``artifacts`` collected from them (``service``).
 
 Refused: multi-step and non-Linux tasks; stacks where the caller says none can run (``stack_refusal``), and stacks
-with a service a node service serves, or whose services depend on one another in a cycle, or that the host-network
-fallback cannot run, where the caller runs stacks on it (``on_host_network``: a sidecar no overlay authenticates, a port
-without a listen rule, a reference to a service it cannot rewrite); compose files outside the
+whose services depend on one another in a cycle, or that the host-network fallback cannot run, where the caller runs
+stacks on it (``on_host_network``: a sidecar no overlay authenticates, a port without a listen rule, a reference to a
+service it cannot rewrite); compose files outside the
 subset platoon runs, or that give ``main`` what platoon cannot apply to it yet; collect hooks and artifacts of a
 service the task does not start; a compose file in ``tests/``; and ``[agent].user`` or ``[verifier].user`` (or a
 collect hook's ``user``) unless the caller ignores them, running every process as the sandbox's own user, or honors
@@ -524,12 +524,6 @@ def _compose_plan(
         # its verifier would write 0 for a policy that may have done the task: a silent reward 0 in training.
         if stack_refusal is not None:
             raise HarborTaskError(f"{stack}, and {stack_refusal}; the task is refused, never started without them")
-        if external := plan.external:
-            name, served_by = next(iter(sorted(external.items())))
-            raise HarborTaskError(
-                f"{stack} whose service {name} a node service serves ({served_by}, an overlay's external), which "
-                "platoon does not run; the task is refused"
-            )
         if cycle := plan.dependency_cycle():
             raise HarborTaskError(f"{stack} whose services depend on one another in a cycle ({' -> '.join(cycle)})")
         if (problem := _sidecars_problem(plan, planned_here=compose is _PLANNED_HERE)) is not None:

@@ -26,7 +26,9 @@ resolve) and whose port is one it declares, becomes ``[scheme://][user@]127.0.0.
 environment values, command and healthcheck, and in what a caller rewrites with :meth:`Stack.rewrite
 <platoon.sandbox.stacks.Stack.rewrite>`; so does a service's reference to a port it declares itself on its own loopback
 (``localhost``, ``127.0.0.1``, ``0.0.0.0``), such as its healthcheck's.  A service that shares another's network
-(``network_of``) declares its ports there.  ``connect(service, port)`` is ``tcp://127.0.0.1:<its port>``.
+(``network_of``) declares its ports there.  ``connect(service, port)`` is ``tcp://127.0.0.1:<its port>``.  An external
+service (a node service, ``StackSpec.externals``) gets a port of this host too, which the stack relays to its socket
+for its whole life (:class:`SocketRelay`), and the references to it are rewritten as to a service of the stack.
 
 **Volumes** are directories below the stack's own, ``<root>/stack-<id>/``, made (and filled, for a volume with a
 ``fill``) before any service starts, and mounted at their targets (``root`` is a directory of your uid's alone,
@@ -107,22 +109,33 @@ class HostAddresses:
                 owner = shared
                 seen.add(owner)
             self.network_of[name] = owner
-        # The names each network answers to, in lower case: its services' names and aliases.
+        # The names each network answers to, in lower case: its services' names and aliases; an external service is
+        # a network of its own (named so that no service's can be: a service's name holds no colon).
         self.names: dict[str, str] = {}
         for name, service in spec.services.items():
             for alias in (name, *service.aliases):
                 self.names.setdefault(alias.lower(), self.network_of[name])
+        self.externals = dict(spec.externals)
+        for name, external in self.externals.items():
+            for alias in (name, *external.aliases):
+                self.names.setdefault(alias.lower(), _external_network(name))
         self.ports: dict[tuple[str, int], int] = {}  # (network, declared port) -> the host's port
         self._claims: list[socket.socket] = []  # what holds those ports for the stack, until they are released
 
     def claim(self) -> None:
-        """Claim a port of this host for each port a network declares."""
+        """Claim a port of this host for each port a network declares, and for each external service's."""
 
         declared = dict.fromkeys(
             (self.network_of[name], port) for name, service in self.services.items() for port in service.ports
         )
+        declared.update(dict.fromkeys((_external_network(name), ext.port) for name, ext in self.externals.items()))
         ports, self._claims = _claim_ports(len(declared))
         self.ports = dict(zip(declared, ports, strict=True))
+
+    def external_ports(self) -> dict[str, int]:
+        """Each external service's port of this host, by its name."""
+
+        return {name: self.ports[(_external_network(name), ext.port)] for name, ext in self.externals.items()}
 
     def own_ports(self, name: str) -> dict[int, int]:
         """The ports the service ``name`` declares, with the host's port of each."""
@@ -218,6 +231,7 @@ class HostBackend:
         self.labels = labels
         self.addresses = HostAddresses(spec)
         self.volumes = StackVolumes()
+        self.relays: list[SocketRelay] = []  # one per external service, from its port of this host to its socket
 
     @classmethod
     def create(cls, provider: SandboxProvider, spec: StackSpec, directory: Path, labels: dict[str, str]) -> Self:
@@ -257,6 +271,12 @@ class HostBackend:
             raise
         return self.watch(name, sandbox, entry)
 
+    async def relay_externals(self) -> None:
+        """Relay each external service's port of this host to its socket, for the stack's life (:meth:`close`)."""
+
+        for name, port in self.addresses.external_ports().items():
+            self.relays.append(await SocketRelay.start(port, self.addresses.externals[name].socket))
+
     def watch(self, name: str, sandbox: Sandbox, entry: str | None) -> HostService:
         """The handle of the started service ``name``: its sandbox, and its command's shell (``entry``)."""
 
@@ -275,8 +295,75 @@ class HostBackend:
         return self.volumes.named[name]
 
     async def close(self) -> None:
+        relays, self.relays = self.relays, []
+        for relay in relays:
+            await relay.close()
         self.addresses.release()
         await asyncio.to_thread(shutil.rmtree, self.directory, True)
+
+
+class SocketRelay:
+    """A listener on a port of this host's loopback that relays each connection to a Unix socket on this host: how a
+    stack on this host's network reaches an external service.  It holds the port while it listens; :meth:`close`
+    stops it and ends the connections it relays."""
+
+    def __init__(self, socket_path: str) -> None:
+        self._socket = socket_path
+        self._server: asyncio.Server | None = None
+        self._pipes: set[asyncio.Future[None]] = set()
+
+    @classmethod
+    async def start(cls, port: int, socket_path: str) -> SocketRelay:
+        """A relay from ``port`` of this host's loopback to ``socket_path``, listening."""
+
+        relay = cls(socket_path)
+        relay._server = await asyncio.start_server(relay._accept, LOOPBACK, port)
+        return relay
+
+    async def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            upstream_reader, upstream_writer = await asyncio.open_unix_connection(self._socket)
+        except OSError:
+            writer.close()
+            return
+        pipes = [
+            asyncio.ensure_future(_pipe(reader, upstream_writer)),
+            asyncio.ensure_future(_pipe(upstream_reader, writer)),
+        ]
+        self._pipes.update(pipes)
+        try:
+            await asyncio.gather(*pipes, return_exceptions=True)
+        finally:
+            self._pipes.difference_update(pipes)
+            for each in (writer, upstream_writer):
+                each.close()
+
+    async def close(self) -> None:
+        if self._server is None:
+            return
+        self._server.close()
+        for pipe in list(self._pipes):
+            pipe.cancel()
+        await self._server.wait_closed()
+
+
+async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    """Copy what ``reader`` reads to ``writer`` until it ends, then end ``writer``'s side."""
+
+    try:
+        while chunk := await reader.read(65536):
+            writer.write(chunk)
+            await writer.drain()
+        if writer.can_write_eof():
+            writer.write_eof()
+    except (ConnectionError, OSError):
+        pass
+
+
+def _external_network(name: str) -> str:
+    """The network of an external service, in :class:`HostAddresses`: its own."""
+
+    return f"external:{name}"
 
 
 async def start_host_stack(
@@ -306,6 +393,12 @@ async def start_host_stack(
     except BaseException:
         cleanup.unregister(token)
         let_finish(asyncio.ensure_future(_remove_made(creating)))
+        raise
+    try:
+        await backend.relay_externals()
+    except BaseException:
+        cleanup.unregister(token)
+        await asyncio.shield(let_finish(asyncio.ensure_future(backend.close())))
         raise
     try:
         stack = await drive_stack(backend, spec, id=stack_id, on_stop=lambda: cleanup.unregister(token))
@@ -456,6 +549,7 @@ __all__ = [
     "HostAddresses",
     "HostBackend",
     "HostService",
+    "SocketRelay",
     "private_root",
     "reap_stack_directories",
     "start_host_stack",

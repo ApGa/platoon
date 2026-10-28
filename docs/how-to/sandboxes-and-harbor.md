@@ -223,6 +223,7 @@ configs](configs.md#2-build-on-it-with-extends)):
 | `max_artifact_bytes` | 1 GiB | The largest artifact a separate verifier receives; a larger one is left out, and the tests decide what its absence means |
 | `sandbox_start_budget_s` | 600 | What a rollout's deadline allows each sandbox start, the task's and a separate verifier's ([Run it](#4-run-it)) |
 | `stacks`, `network_policy`, `on_sidecar_down` | `auto`, `task`, `invalid` | *Since 0.5.0.* Whether and how multi-container tasks run, the network of every sandbox, and what a sidecar that is down at grading makes the outcome ([Multi-container tasks](#multi-container-tasks)) |
+| `node_services` | none | *Since 0.5.0.* The services the node runs once for every rollout, by name, which a dataset's overlay names for the compose services they serve (`external`); `platoon train` and `platoon eval` start them before the first rollout ([Node services](#node-services)) |
 
 Values like `${HF_TOKEN}` or `${REGION:-us}` in a task's `env` tables are read from the host: `[environment] env`
 when a session opens (an unset variable without a default fails the session as a configuration error), and
@@ -851,8 +852,9 @@ replace = {command = ["serve", "--port", "9111"]}  # keys set whole
 ```
 
 The lock records the edits with the stack plan, and the overlay's hash with the lock's inputs, as for any overlay.
-An entry may also mark a service `external = "<node service>"`: a service that a node service serves, which platoon
-does not start; and say how a service runs on the host-network fallback (`host_network = {listen = {6379 =
+An entry may also mark a service `external = "<node service>"`: a service that a node service serves, once per node,
+which platoon does not start per rollout ([Node services](#node-services)); and say how a service runs on the
+host-network fallback (`host_network = {listen = {6379 =
 "KV_PORT"}, token = "KV_TOKEN", bind = "KV_HOST"}`, [Stacks on the host network](#stacks-on-the-host-network)), which
 changes nothing elsewhere.
 
@@ -956,6 +958,7 @@ restore brings back `main`'s files, not its services.
 | `stacks` | `auto` | `auto` runs a stack on a provider that runs stacks, and refuses it elsewhere; `refuse` refuses every stack; `host_network` runs every stack on the host-network fallback, each service a single sandbox of the provider on the node's network ([below](#stacks-on-the-host-network)) |
 | `network_policy` | `task` | `task` gives each phase the network the task asks for (`network_mode`, `[agent]`'s and `[verifier]`'s); `none` gives every sandbox and stack none, in every phase, for datasets whose answers the web holds (a provider that cannot run a sandbox without a network refuses the tasks then) |
 | `on_sidecar_down` | `invalid` | What a sidecar that is down at grading makes the outcome: `invalid` (`sidecar_unhealthy`), or `grade`, which runs the tests anyway |
+| `node_services` | none | The services a node runs once for every rollout on it, which serve the compose services a dataset's overlays mark `external` ([below](#node-services)) |
 
 ### Stacks on Docker
 
@@ -1258,6 +1261,113 @@ directory of yours alone: made 0700, and refused when it is a symlink or another
 directory, and so does the worker supervisor's cleanup for a worker it saw killed; a run killed as a whole leaves them
 in node scratch, which a reap by the run's labels does not look in (a batch job's own scratch goes with the job). The
 fallback runs no pod, so hpc-sandbox 0.4 runs it.
+
+### Node services
+
+*Since 0.5.0.* Some sidecars are better run once per node than once per rollout: a judge that every stack would start
+again, compiling every problem's checker anew and asking for privileges a pod's services lack. A **node service** is such
+a service: the environment declares it (`node_services`), a dataset's overlay marks the compose service that it serves
+(`external`), and `platoon train` and `platoon eval` start it on the node before the first rollout, check it between
+rollouts and stop it with the run. Each rollout reaches it by the service's name, as its task's files expect, through a
+**scope** of its own, which lets only the declared routes through and tells the service what the rollout may act on.
+
+```yaml
+    service_kwargs:
+      dataset: ./tasks
+      overlays: [overlays/judge-pool]
+      node_services:
+        judge-pool:
+          image: /srv/judge/judge.sif              # in a sandbox of the environment's provider
+          command: [sh, /node/start.sh]            # runs there in the background
+          port: 8081                               # where a stack's services reach it, by the served service's name
+          cpus: 16                                 # the run's CPUs it keeps for itself: a number (whole cores), or 0-15
+          memory_mb: 65536
+          env: {WORKERS: "4"}
+          binds:
+            - {source: /srv/judge/problems, target: /app/problems, stage: true}  # copied to node-local disk once
+            - {source: node-service, target: /node}                             # relative to the config file
+          health: {path: /health, interval: 15, timeout: 30, start_period: 300, retries: 3}
+          front: {routes: ["POST /evaluate", "GET /health"], max_request_bytes: 16777216, concurrency: 1}
+          network: none                            # its sandbox's network: none (the default), or host
+          provider_options: {allow_network_none: true}   # over the environment's
+          restarts: 3                              # failed starts in a row before it stays down, and the run fails
+```
+
+```toml
+# overlays/judge-pool/overlay.toml
+[[compose]]
+service = "judge"
+external = "judge-pool"                   # served by the node service: not started per rollout
+scope = {problem_id = "${PROBLEM_ID}"}    # what each rollout's scope carries, from the task's variables
+```
+
+- **One per node.** The service runs in one sandbox of the environment's sandbox provider (its `provider` and
+  `provider_options`, the declaration's options over them), owned by a supervisor process (`python -m
+  platoon.envs.harbor.node_services`) that the run starts before its first rollout, in a session of its own, and that
+  the run stops as it ends, before it reaps its sandboxes. It dies with the run too: the kernel ends it with its parent,
+  and it looks for its parent every second. A signal to the run's process group (Ctrl+C) never reaches it, and a
+  SIGTERM while the run lives (a scheduler's, to every process of the job) does not stop it: the run, which stops at
+  its next step boundary, still grades its last rollouts with it. The supervisor holds the service's lock in node
+  scratch (`platoon-node-services-<uid>/<name>-<digest>`, the digest of the declaration): another run on the node that
+  declares the same service uses the first one's, and takes over when the first run ends, starting the service again;
+  the scopes that the other run's rollouts hold end with the first run's supervisor, so those rollouts are `invalid`,
+  and the scopes its workers open meanwhile wait for the new start. The run waits until the service answers its health
+  check, and stops before any rollout when it does not start, ending its message with the supervisor's log
+  (`supervisor-<pid>.log` in that directory). A bind with `stage: true` is copied to node-local disk once per node and
+  bound read-only; a copy is kept while its source does not change, and a source that changed gets a new copy beside
+  the one a running service still reads.
+- **CPUs.** `cpus` gives the service CPUs of the run's own, which the run's rollouts then leave alone: a number takes
+  whole cores (a CPU with its hyperthread siblings), the first ones the run may use, each node service its own; a list
+  (`"0-15"`) takes those CPUs, and their siblings leave the run too. The supervisor runs on them, so a provider whose
+  sandboxes are its children (`process`, `singularity`, `enroot`) runs the service there too, and the run's rollout
+  workers, which start afterwards, and their sandboxes run on the others; the run's log names both sets. Node services
+  that would take every CPU of the run share them with its rollouts (a warning says so). A run on a node whose service
+  another run's supervisor serves keeps the CPUs from its rollouts all the same.
+- **The service's side.** It listens on `$PLATOON_NODE_SERVICE_SOCKET`, a Unix socket in a directory of the node that
+  platoon binds into its sandbox at `/run/platoon-node`, and must refuse a request without `Authorization: Bearer
+  $PLATOON_NODE_SERVICE_TOKEN`; `$PLATOON_NODE_SERVICE_CPUS` says how many CPUs it runs on. Its health check is `GET
+  <health.path>` over the socket, answered 2xx within the timeout while its command runs.
+- **Scopes.** A stack whose task reaches a node service gets a scope of it as it opens, with the overlay's `scope`
+  values (`${NAME}` read from the task's `[verifier].env` over its `[environment].env`): a Unix socket of the
+  supervisor's front, which lets through only the declared `front.routes` (by method and path, the query string
+  dropped) with bodies of at most `max_request_bytes`, `concurrency` requests of the scope at a time, and forwards each
+  to the service with the token and the scope's values as JSON in `X-Platoon-Scope` (`{"problem_id":
+  "frontiersmith_81"}`); an `Authorization` or `X-Platoon-*` header the rollout sends is dropped. The service acts on
+  what the scope names alone, so a rollout can reach neither its other routes nor another task's problem, nor the
+  token, which no sandbox sees. In a pod the scope is an upstream that the pod's holder relays at the node service's
+  `port`, and the served service's name resolves to the pod's loopback, so `main` reaches `http://judge:8081` as it
+  would the judge's own container; on the `process` provider the stack relays a port of the host it holds to the
+  scope, and rewrites `judge:8081` to it, as for its own services. Docker's compose projects and the host-network
+  fallback reach no node service, nor does a provider that does not declare the `externals` capability (one written
+before node services): such stacks are refused when the tasks are listed. The scope closes with the stack.
+- **Health and failure.** The supervisor checks the service every `interval`; `retries` failures in a row end that
+  start of it, and so does its command's exit, at once. It starts the service again: at once after one failure, then 5
+  seconds later for each further failure in a row (at most a minute), where a start that failed within 5 minutes of
+  coming up counts as failed; after `restarts` failed starts in a row it gives up, no scope opens, and the run fails
+  (`platoon train` stops at the next step boundary, saves, and exits with an error; `platoon eval` starts no further
+  rollout and exits with an error). So does a run whose supervisor of a service died three times; each time before,
+  the run reaps what it left and starts another. A start that ends makes `invalid` (`node_service_down`) the rollouts
+  whose answers it may have got wrong: those with a request in flight as it failed, or with one since it last passed its
+  health check, and those whose request the front could not serve; the other rollouts go on with the next start, their
+  requests waiting for it (up to 10 minutes). A rollout's probes, before and after its tests (or before and after the
+  artifacts are collected for a separate verifier), check its scope: down makes the outcome `invalid`, whatever
+  `on_sidecar_down` says. A probe also ends a start whose command exited, never one that failed a health check: one
+  rollout's bad moment is not a reason to start the service again under every other rollout. The outcome's metadata
+  records the start it opened on and the starts that answered it (`node_services`). A session that opens while the
+  service starts again waits for it (up to 10 minutes); one on a node where no supervisor serves it fails to open
+  (`env_setup`). A service that cannot grade a request should answer an error the task's verifier turns into no reward
+  (`reward.json` with `invalid`), never a 0.
+- **Reaping.** The service's sandbox carries the run's labels and `platoon.node_service: <name>`, so `platoon sandbox
+  reap` of the run reaps it; the run reaps what a supervisor that died or did not stop in time left. A site profile may
+  hold the declarations instead (`node_services: {judge-pool: {...}}`, the same keys), which an entry takes by name:
+  `node_services: {judge-pool: site}`.
+- **Sharing.** Every rollout of the node shares the service: `front.concurrency` bounds the requests one rollout has in
+  flight, not how often it asks, so a rollout that submits often slows every rollout's grading. The node service's
+  `port` must be the port the task's files reach the served service at (`JUDGE_URL=http://judge:8081` with `port:
+  8081`): nothing listens at another.
+
+[`recipes/frontiersmith`](../../recipes/frontiersmith/README.md) runs FrontierSmith's 200 problems with the Frontier-CS
+judge as a node service, and `tests/envs/fixtures/harbor-node-services` has a small judge, two tasks and their overlay.
 
 ## Users in task sandboxes
 
@@ -2032,7 +2142,8 @@ dataset skips such a task with a warning; naming it directly (as a task id, in a
 |---|---|
 | A multi-container environment (`environment/docker-compose.yaml` with sidecar services) on a provider that runs no stacks (`singularity` and `enroot` with an hpc-sandbox older than 0.5, or on a node that does not nest user namespaces), or with `stacks: refuse` (a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78; a dataset directory skips them with a warning) | The main container alone would lack its sidecar services (a judge, a database), and its tests would score 0 for work the policy may have done. Where a provider runs stacks, they run ([Multi-container tasks](#multi-container-tasks)); a compose file that names only `main` runs as one sandbox on every provider ([Compose files](#compose-files)); the other compose names (`compose.yaml`, ...) are plain files, as in Harbor |
 | A multi-container environment under `stacks: host_network` that the host-network fallback cannot run: a sidecar with ports that no overlay authenticates, a declared TCP port without a listen rule, a UDP port, a reference to a service that the fallback cannot rewrite, a task MCP server that is a sidecar, a phase without a network, or a provider whose sandboxes run other users (when the tasks are listed, exit 78, and when a session opens; a dataset directory skips every stack) | On the node's network every process of the node reaches a service's port, and a name that is not rewritten reaches nothing, or something else: the fallback runs only what a dataset's overlays make safe there ([Stacks on the host network](#stacks-on-the-host-network)) |
-| A stack with a service that a node service serves (an overlay's `external`), whose services depend on one another in a cycle, with a sidecar's read-only bind of a log directory, or with binds of one path of the task that services would share in Docker and platoon would copy apart (when the task loads) | platoon runs no node services yet, compose refuses a cycle, a sidecar does not see `main`'s log directories, and the services must see one another's writes as in Docker |
+| A stack whose services depend on one another in a cycle, with a sidecar's read-only bind of a log directory, or with binds of one path of the task that services would share in Docker and platoon would copy apart (when the task loads) | Compose refuses a cycle, a sidecar does not see `main`'s log directories, and the services must see one another's writes as in Docker |
+| A stack with a service that a node service serves (an overlay's `external`) whose node service the environment does not declare, or on Docker's compose projects, the host-network fallback or a provider without the `externals` capability (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | Nothing would serve it: the stack's tests would find no judge and score 0 ([Node services](#node-services)) |
 | A stack that no rollout could start: a dataset directory's sidecar of a registry image that its compose file gives no command, or that builds from a context; a fetched dataset's sidecar whose built image or pin the image map lacks; a `service_healthy` dependency on a service without a healthcheck (a dataset directory's when the task loads, for the first two; a fetched dataset's when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, naming `platoon prepare` for what it makes) | A registry image's own command is what `platoon prepare` pins, and a sidecar's build context what it builds, in a fetched dataset's image map, which a dataset directory has none of ([Multi-container tasks](#multi-container-tasks)) |
 | A fetched stack whose services ask for privileges (`refuse: {privileges: false}` kept them) on a provider other than `docker` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | Only Docker gives a service every privilege, or a capability such as `NET_ADMIN` over its stack's network ([Stacks on Docker](#stacks-on-docker)) |
 | A compose file outside the subset platoon runs (when the dataset is fetched, as `compose`; `privileged` and a `cap_add` of `NET_ADMIN` included, unless the fetch keeps them for Docker), or one that gives `main` what platoon cannot apply to it yet, such as `cap_add`, `privileged` or `shm_size` in a main-only file (when the task loads) | platoon runs a compose file as written or not at all ([Compose files](#compose-files)): a dataset's overlay may drop or replace what it refuses |
@@ -2067,7 +2178,8 @@ an absolute path, is used as written; any other reference without a scheme gets 
 beyond what is described here: stacks whose services run as the users a task names. Until then, multi-container tasks
 run as `docker compose` projects, as rootless pods on Singularity, Apptainer and enroot, on the node's network where
 pods cannot run (`stacks: host_network`), and on the `process` provider, with their MCP servers served through the tool
-plane ([Multi-container tasks](#multi-container-tasks)), main-only compose files on every
+plane ([Multi-container tasks](#multi-container-tasks)) and services that a node runs once for every rollout on it
+([Node services](#node-services)), main-only compose files on every
 provider ([Compose files](#compose-files)), and a task's users in single sandboxes ([Users in task
 sandboxes](#users-in-task-sandboxes)). The [RFC index](../rfcs/README.md) lists every proposal and explains how one
 moves from draft to implemented; comment on the RFC, or open a new one, to shape what gets built.

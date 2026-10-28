@@ -28,6 +28,7 @@ from platoon.sandbox.base import (
     cwd_error,
 )
 from platoon.sandbox.stacks import (
+    EXTERNALS,
     STACKS,
     Dependency,
     Healthcheck,
@@ -137,6 +138,28 @@ def stack_refusal(provider: str | SandboxProvider, options: Mapping[str, Any] | 
     return f"the {provider!r} sandbox provider runs no multi-container stacks"
 
 
+def externals_refusal(provider: str | SandboxProvider) -> str | None:
+    """Why the stacks of ``provider`` (a name, or a built provider) would not reach services outside them (a stack
+    spec's ``externals``, node services): it does not declare the ``externals`` capability, as a provider written before
+    externals existed does not, whose stacks would start without them.  None when it declares it, and when it cannot
+    tell before it is built (an hpc-sandbox provider's capabilities: its stacks refuse what they cannot reach)."""
+
+    if isinstance(provider, str):
+        try:
+            kind = provider_class(provider)
+        except (ImportError, AttributeError, ValueError):
+            return None  # building the provider reports it
+        name, capabilities = provider, getattr(kind, "capabilities", None)
+    else:
+        name, capabilities = provider.name, provider.capabilities
+    if not isinstance(capabilities, frozenset | set) or EXTERNALS in capabilities:
+        return None
+    return (
+        f"the stacks of the {name!r} sandbox provider reach no service outside them (it lacks the {EXTERNALS!r} "
+        "capability)"
+    )
+
+
 def privilege_refusal(provider: str | SandboxProvider) -> str | None:
     """Why ``provider`` (a name, or a built provider) would not give a stack's services the privileges a Harbor task
     fetched with ``refuse: {privileges: false}`` may ask for: a privileged container, or a capability that a rootless
@@ -208,6 +231,7 @@ __all__ = [
     "CWD_ERROR_EXIT_CODE",
     "CWD_ERROR_PREFIX",
     "CWD_ERROR_REASONS",
+    "EXTERNALS",
     "STACKS",
     "Dependency",
     "DownloadReport",
@@ -228,6 +252,7 @@ __all__ = [
     "SupportsReap",
     "Volume",
     "cwd_error",
+    "externals_refusal",
     "file_owners_refusal",
     "get_provider",
     "loses_file_owners",

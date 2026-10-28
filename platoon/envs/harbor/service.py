@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import posixpath
+import re
 import shutil
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
@@ -51,6 +52,13 @@ from platoon.envs.harbor.images import (
 )
 from platoon.envs.harbor.lock import LockError
 from platoon.envs.harbor.locked import LockedTasks, TaskImages
+from platoon.envs.harbor.node_services import (
+    NodeScope,
+    NodeServiceSpec,
+    NodeServiceUnavailable,
+    declared_node_services,
+    open_scope,
+)
 from platoon.envs.harbor.session import (
     DEFAULT_CLOSE_TIMEOUT_S,
     LOG_DIRS,
@@ -84,6 +92,7 @@ from platoon.sandbox import (
     SandboxProvider,
     SandboxSpec,
     StackStartError,
+    externals_refusal,
     file_owners_refusal,
     get_provider,
     loses_file_owners,
@@ -94,10 +103,10 @@ from platoon.sandbox import (
     stack_refusal,
 )
 from platoon.sandbox._processes import alive_processes, list_processes, start_background
-from platoon.sandbox.host_network_stacks import NO_NETWORK, HostNetworkStackProvider, host_network_refusal
+from platoon.sandbox.host_network_stacks import NO_EXTERNALS, NO_NETWORK, HostNetworkStackProvider, host_network_refusal
 from platoon.sandbox.routes import RouteError
+from platoon.sandbox.stacks import ExternalService, StackNetwork, StackProvider
 from platoon.sandbox.stacks import Healthcheck as StackHealthcheck
-from platoon.sandbox.stacks import StackNetwork, StackProvider
 from platoon.task import Task
 
 logger = logging.getLogger(__name__)
@@ -115,6 +124,9 @@ SIDECAR_DOWN_POLICIES = ("invalid", "grade")
 _GRADING_ALLOWANCE_S = 120.0
 # Where a main-only task's init (its compose command) writes its output in the sandbox.
 INIT_LOG = "/tmp/platoon-init/init.log"
+# How long a session waits for a node service that is starting again before its scope opens (or the session fails).
+NODE_SCOPE_WAIT_S = 600.0
+_SCOPE_VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _REPORTED: set[tuple[str, str]] = set()  # hold-out reports logged by this process: (dataset, eval digest)
 
 
@@ -135,7 +147,12 @@ class HarborEnvironmentService:
     its command (main's init), which the session starts once the sandbox runs, waits for main's healthcheck, and keeps
     alive through grading: ``kill_processes`` spares it and what it started.  ``network_policy`` (``task`` or ``none``)
     gives every sandbox and stack the network its task asks for, or none, and ``on_sidecar_down`` (``invalid`` or
-    ``grade``) decides what a sidecar that is down at grading makes the outcome.
+    ``grade``) decides what a sidecar that is down at grading makes the outcome.  ``node_services`` declares the node
+    services that the dataset's overlays name for the services they mark ``external``
+    (:mod:`platoon.envs.harbor.node_services`): each a service that the node runs once for every rollout, which
+    ``platoon train`` and ``platoon eval`` start, and which a stack reaches through a scope of its rollout's own; a
+    stack whose node service is down at grading is ``invalid`` (``node_service_down``), whatever ``on_sidecar_down``
+    says.
     The dataset is indexed lazily, so opening a session for a task that already
     carries its directory (``Task.misc["harbor"]["task_dir"]``) never scans it,
     and the sandbox provider is built when the first session opens.
@@ -222,6 +239,7 @@ class HarborEnvironmentService:
         "tasks": PathOption(),
         "overlays": PathOption(),
         "mounts[].source": PathOption(),
+        "node_services.*.binds[].source": PathOption(),
     }
 
     def __init__(
@@ -263,6 +281,7 @@ class HarborEnvironmentService:
         stacks: str = "auto",
         network_policy: str = "task",
         on_sidecar_down: str = "invalid",
+        node_services: Mapping[str, Any] | None = None,
     ) -> None:
         concurrent = frozenset([concurrent_tools] if isinstance(concurrent_tools, str) else concurrent_tools)
         if unknown := sorted(concurrent - {spec.name for spec in TOOL_SPECS}):
@@ -299,6 +318,16 @@ class HarborEnvironmentService:
         self.stacks = stacks
         self.network_policy = network_policy
         self.on_sidecar_down = on_sidecar_down
+        if node_services and not isinstance(provider, str):
+            raise ValueError(
+                "node_services need a provider named by its name (singularity, process, module:Class): a node service "
+                "runs on a provider its supervisor builds"
+            )
+        self.node_services: dict[str, NodeServiceSpec] = (
+            declared_node_services(node_services, provider=provider, provider_options=provider_options or {})
+            if node_services and isinstance(provider, str)
+            else {}
+        )
         if agent_user not in AGENT_USER_POLICIES:
             raise ValueError(f"agent_user must be one of {AGENT_USER_POLICIES}, got {agent_user!r}")
         if verifier_user is not None and verifier_user not in VERIFIER_USER_POLICIES:
@@ -472,7 +501,8 @@ class HarborEnvironmentService:
         as their ``[agent].user`` and ``[verifier].user`` ask (:meth:`_check_users`), or whose sandboxes honor users
         on an image that may keep its files from other users (:meth:`_check_closed_images`), so that the run stops
         when it lists its tasks rather than lose every rollout of theirs, or that are multi-container stacks no rollout
-        could start (:meth:`_check_stacks`, :meth:`_check_privileges`, :meth:`_check_stack_specs`); and, with
+        could start (:meth:`_check_stacks`, :meth:`_check_privileges`, :meth:`_check_node_services`,
+        :meth:`_check_stack_specs`); and, with
         :class:`EnvNotPrepared`, tasks of a fetched dataset whose images the image map lacks (:meth:`_check_images`),
         whose sidecars run registry images it has not pinned (:meth:`_check_pins`), or whose sandboxes honor users and
         lack their images' file owners (:meth:`_check_owners`)."""
@@ -495,6 +525,7 @@ class HarborEnvironmentService:
         self._check_images(task_ids, split)
         self._check_pins(task_ids, split)
         self._check_owners(task_ids, split)
+        self._check_node_services(task_ids, split)
         self._check_stack_specs(task_ids, split)
         self._check_closed_images(task_ids, split)
 
@@ -717,7 +748,12 @@ class HarborEnvironmentService:
             if not harbor_task.is_stack:
                 continue
             try:
-                self._stack_plan(harbor_task, self._sandbox_spec(harbor_task, "check"), setup=_no_setup)
+                self._stack_plan(
+                    harbor_task,
+                    self._sandbox_spec(harbor_task, "check"),
+                    setup=_no_setup,
+                    externals=self._checked_externals(harbor_task),
+                )
             except (KeyError, ValueError) as exc:
                 unrunnable[name] = str(exc)
         if unrunnable:
@@ -729,6 +765,59 @@ class HarborEnvironmentService:
                 f"{len(unrunnable)} of the {len(names)} tasks of split {split!r} are multi-container stacks that no "
                 f"rollout can start ({shown}): {next(iter(unrunnable.values()))}; leave them out (exclude_tasks)",
             )
+
+    def _checked_externals(self, harbor_task: HarborTask) -> dict[str, ExternalService]:
+        """How a check of the task's stack spec reaches its node services: their ports, and a socket that is never
+        opened (a check opens no scope); a node service the environment does not declare is
+        :meth:`_check_node_services`'s to refuse."""
+
+        plan = harbor_task.compose
+        served = plan.external if plan is not None else {}
+        return {
+            name: ExternalService(socket="/nonexistent/check.sock", port=self.node_services[served_by].port)
+            for name, served_by in served.items()
+            if served_by in self.node_services
+        }
+
+    def _check_node_services(self, names: Sequence[str], split: str) -> None:
+        """Refuse the stacks among the tasks that reach a node service (an overlay's ``external``) that the environment
+        does not declare (``node_services``), or that their stacks could not reach here: on the host-network fallback,
+        and through a provider whose stacks reach no host socket (docker's compose projects) or that does not declare
+        that they reach one (:func:`platoon.sandbox.externals_refusal`)."""
+
+        if not names or self.stacks_refusal() is not None:
+            return
+        needed: dict[str, list[str]] = {}  # node service -> the tasks that reach it
+        for name in names:
+            try:
+                harbor_task = self._peek(name)
+            except (KeyError, ValueError):  # a refused or unknown task fails on its own when it is opened
+                continue
+            if harbor_task.is_stack and harbor_task.compose is not None:
+                for served_by in harbor_task.compose.external.values():
+                    needed.setdefault(served_by, []).append(name)
+        if not needed:
+            return
+        node_service, tasks = next(iter(sorted(needed.items())))
+        reached = f"{len(tasks)} of the {len(names)} tasks of split {split!r} reach the node service {node_service}"
+        if undeclared := sorted(set(needed) - set(self.node_services)):
+            node_service, tasks = undeclared[0], needed[undeclared[0]]
+            raise EnvSetupError(
+                "env_config",
+                f"{len(tasks)} of the {len(names)} tasks of split {split!r} reach the node service {node_service} (an "
+                f"overlay's external, such as {tasks[0]}), which the environment does not declare: declare it in "
+                "service_kwargs.node_services",
+            )
+        if self.stacks == "host_network":
+            raise EnvSetupError("env_config", f"{reached}, and {NO_EXTERNALS}")
+        if self._provider_name() == "docker":
+            raise EnvSetupError(
+                "env_config",
+                f"{reached}, and the docker provider runs stacks as compose projects, which reach no node service: run "
+                "them on singularity or enroot (as pods), or on the process provider",
+            )
+        if (refusal := externals_refusal(self._provider)) is not None:
+            raise EnvSetupError("env_config", f"{reached}, and {refusal}")
 
     def _check_networks(self, names: Sequence[str], split: str) -> None:
         """Refuse tasks that run without a network (``network_mode = "no-network"``, for their agents or their
@@ -1108,7 +1197,8 @@ class HarborEnvironmentService:
         timeout (times ``verifier_timeout_multiplier``), the grading commands around them, its collect hooks'
         timeouts, and the close.  For a stack, its services' starts, health waits (their images' healthchecks too) and
         init jobs' runs (each bounded by a start budget) count along their dependencies' longest path, and so do three
-        probes of its sidecars and the listing of its MCP servers' tools.  Deadlines on whole rollouts add it
+        probes of its sidecars, the listing of its MCP servers' tools, and the wait for a node service that starts
+        again.  Deadlines on whole rollouts add it
         (:func:`platoon.train.components.rollout_overhead_s`)."""
 
         return self._limits(task_id)[1]
@@ -1137,6 +1227,8 @@ class HarborEnvironmentService:
             start += 3 * sidecars.probe_bound_s(checks)
             served = [server for server in harbor_task.mcp_servers if harbor_task.mcp_service(server) is not None]
             start += len(served) * TASK_TOOLS_LISTING_TIMEOUT_S  # their tools are listed as the session opens
+            if harbor_task.compose is not None and harbor_task.compose.external:  # a node service starting again
+                start += NODE_SCOPE_WAIT_S
         else:
             main = harbor_task.main
             if main is not None and main.healthcheck is not None:  # main's compose healthcheck runs before it
@@ -1217,10 +1309,12 @@ class HarborEnvironmentService:
     async def _open_stack(
         self, task: Task, harbor_task: HarborTask, spec: SandboxSpec, *, rollout_id: str
     ) -> HarborSession:
-        """Start the task's stack (:mod:`platoon.envs.harbor.sidecars`), ``spec`` being main's sandbox, and list the
-        tools of its MCP servers that the tool plane serves (:class:`TaskTools`); on any failure everything it started
-        is stopped and an ``EnvSetupError`` says why: ``sidecar_start`` for a sidecar that did not start or an MCP
-        server that did not list its tools, ``env_config`` where no stack may run or a service cannot."""
+        """Start the task's stack (:mod:`platoon.envs.harbor.sidecars`), ``spec`` being main's sandbox, with a scope
+        of each node service it reaches (:meth:`_open_scopes`), and list the tools of its MCP servers that the tool
+        plane serves (:class:`TaskTools`); on any failure everything it started is stopped and an ``EnvSetupError``
+        says why: ``sidecar_start`` for a sidecar that did not start or an MCP server that did not list its tools,
+        ``env_setup`` for a node service that is not running here, ``env_config`` where no stack may run or a service
+        cannot."""
 
         refusal = self.stacks_refusal()
         if refusal is None and self.stacks != "host_network":
@@ -1233,6 +1327,10 @@ class HarborEnvironmentService:
             )
         if (why := self._host_network_refusal(harbor_task)) is not None:
             raise EnvSetupError("env_config", why)
+        reaches = harbor_task.compose is not None and bool(harbor_task.compose.external)
+        if reaches and self.stacks != "host_network" and (refusal := externals_refusal(self.provider)) is not None:
+            # The provider as built, whose capabilities the listing's check could not read before it was.
+            raise EnvSetupError("env_config", f"Harbor task {harbor_task.name!r} reaches a node service, and {refusal}")
         init: str | None = None
 
         async def setup(sandbox: Sandbox) -> None:  # main's preparation, once its dependencies are up
@@ -1244,25 +1342,33 @@ class HarborEnvironmentService:
             except Exception as exc:
                 raise EnvSetupError("env_setup", f"{type(exc).__name__}: {exc}") from exc
 
+        scopes = await self._open_scopes(harbor_task)
         try:
-            plan = self._stack_plan(harbor_task, spec, setup=setup)
-        except (KeyError, ValueError) as exc:  # an image without a known command or not in the map, a variable, ...
-            raise EnvSetupError("env_config", str(exc)) from exc
-        provider = self.stack_provider
-        assert isinstance(provider, StackProvider)  # stack_refusal checked that it has start_stack
-        try:
-            stack = await provider.start_stack(plan.spec)
-        except EnvSetupError:  # main's preparation said why
-            raise
-        except Exception as exc:
-            raise _start_failure(exc) from exc
-        try:
-            task_tools = await TaskTools.open(stack, harbor_task)
-        except BaseException as exc:
-            await asyncio.shield(stack.stop())
-            if not isinstance(exc, Exception):
+            externals = {
+                name: ExternalService(socket=scope.socket, port=scope.spec.port) for name, scope in scopes.items()
+            }
+            try:
+                plan = self._stack_plan(harbor_task, spec, setup=setup, externals=externals)
+            except (KeyError, ValueError) as exc:  # an image without a known command or not in the map, a variable, ...
+                raise EnvSetupError("env_config", str(exc)) from exc
+            provider = self.stack_provider
+            assert isinstance(provider, StackProvider)  # stack_refusal checked that it has start_stack
+            try:
+                stack = await provider.start_stack(plan.spec)
+            except EnvSetupError:  # main's preparation said why
                 raise
-            raise EnvSetupError("sidecar_start", str(exc)) from exc
+            except Exception as exc:
+                raise _start_failure(exc) from exc
+            try:
+                task_tools = await TaskTools.open(stack, harbor_task)
+            except BaseException as exc:
+                await asyncio.shield(stack.stop())
+                if not isinstance(exc, Exception):
+                    raise
+                raise EnvSetupError("sidecar_start", str(exc)) from exc
+        except BaseException:
+            await asyncio.shield(_close_scopes(scopes))
+            raise
         lease = StackLease(
             stack,
             spec,
@@ -1271,14 +1377,58 @@ class HarborEnvironmentService:
             init=init,
             logs=plan.logs,
             task_tools=task_tools,
+            scopes=scopes,
         )
         return HarborSession(self, task, harbor_task, lease, rollout_id=rollout_id)
 
+    async def _open_scopes(self, harbor_task: HarborTask) -> dict[str, NodeScope]:
+        """A scope of the node service that serves each of the task's services an overlay marks ``external``, by the
+        service's name, with the scope's values read from the task's variables (``${NAME}``); an ``EnvSetupError``
+        when one cannot open (``env_config`` for a node service the environment does not declare or a variable the
+        task lacks, ``env_setup`` for one that is not running here), once the others are closed."""
+
+        plan = harbor_task.compose
+        scopes: dict[str, NodeScope] = {}
+        if plan is None:
+            return scopes
+        try:
+            for name, served_by in plan.external.items():
+                node_spec = self._node_service(harbor_task, name, served_by)
+                values = _scope_values(harbor_task, name, plan.external_scope(name))
+                try:
+                    scopes[name] = await open_scope(node_spec, values, wait_s=NODE_SCOPE_WAIT_S)
+                except NodeServiceUnavailable as exc:
+                    raise EnvSetupError("env_setup", f"Harbor task {harbor_task.name!r}: {exc}") from exc
+        except BaseException:
+            await asyncio.shield(_close_scopes(scopes))
+            raise
+        return scopes
+
+    def _node_service(self, harbor_task: HarborTask, name: str, served_by: str) -> NodeServiceSpec:
+        """The declaration of the node service ``served_by``, which serves the task's service ``name``; an
+        ``env_config`` ``EnvSetupError`` when the environment declares none of that name."""
+
+        node_spec = self.node_services.get(served_by)
+        if node_spec is None:
+            declared = ", ".join(sorted(self.node_services)) or "none"
+            raise EnvSetupError(
+                "env_config",
+                f"Harbor task {harbor_task.name!r}: its service {name} is served by the node service {served_by} (an "
+                f"overlay's external), which the environment does not declare (node_services: {declared})",
+            )
+        return node_spec
+
     def _stack_plan(
-        self, harbor_task: HarborTask, spec: SandboxSpec, *, setup: Callable[[Sandbox], Any]
+        self,
+        harbor_task: HarborTask,
+        spec: SandboxSpec,
+        *,
+        setup: Callable[[Sandbox], Any],
+        externals: Mapping[str, ExternalService] | None = None,
     ) -> sidecars.StackPlan:
-        """The spec of the task's stack, ``spec`` being main's sandbox (:func:`sidecars.stack_spec`, which makes
-        nothing); ``ValueError`` or ``KeyError`` says why no rollout could start it."""
+        """The spec of the task's stack, ``spec`` being main's sandbox and ``externals`` how it reaches the node
+        services that serve its services (:func:`sidecars.stack_spec`, which makes nothing); ``ValueError`` or
+        ``KeyError`` says why no rollout could start it."""
 
         return sidecars.stack_spec(
             harbor_task,
@@ -1293,6 +1443,7 @@ class HarborEnvironmentService:
             job_timeout_s=self.sandbox_start_budget_s,
             pulled_image=self._images.for_pulled,
             on_host_network=self.stacks == "host_network",
+            externals=externals,
         )
 
     def _service_image(self, harbor_task: HarborTask) -> Callable[[str, Mapping[str, Any]], SessionImage]:
@@ -1818,6 +1969,36 @@ async def _no_setup(sandbox: Sandbox) -> None:
 def _remove(directories: Sequence[Path]) -> None:
     for directory in directories:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def _scope_values(harbor_task: HarborTask, name: str, scope: Mapping[str, str]) -> dict[str, str]:
+    """The values of a rollout's scope of the node service that serves the task's service ``name``: the overlay's
+    ``scope``, each ``${NAME}`` read from the task's ``[verifier].env`` over its ``[environment].env``; an
+    ``env_config`` ``EnvSetupError`` names a variable the task lacks."""
+
+    variables = {**harbor_task.env, **harbor_task.verifier_env}
+
+    def read(match: re.Match[str]) -> str:
+        variable = match.group(1)
+        if variable not in variables:
+            raise EnvSetupError(
+                "env_config",
+                f"Harbor task {harbor_task.name!r}: the scope of its service {name}'s node service names "
+                f"${{{variable}}}, which the task's [verifier].env and [environment].env do not set",
+            )
+        try:  # a value that is a host template (${HOST:-default}) is read from this host, as the session reads it
+            return resolve_env({variable: variables[variable]})[variable]
+        except KeyError as exc:
+            message = f"Harbor task {harbor_task.name!r}: host variable {exc} is not set"
+            raise EnvSetupError("env_config", message) from exc
+
+    return {key: _SCOPE_VARIABLE.sub(read, value) for key, value in scope.items()}
+
+
+async def _close_scopes(scopes: Mapping[str, NodeScope]) -> None:
+    """Close node services' scopes, each whatever another's close raises."""
+
+    await asyncio.gather(*(scope.close() for scope in scopes.values()), return_exceptions=True)
 
 
 def _network_refusal(harbor_task: HarborTask, refusals: Mapping[str, str | None], policy: str = "task") -> str | None:

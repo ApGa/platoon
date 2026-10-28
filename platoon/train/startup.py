@@ -1,5 +1,14 @@
 """What a run readies before its first rollout: the toolchains its environments' harnesses run from, staged on this
-node; its rollout workers' fork servers, started; and what those servers import and build ahead of the workers.
+node; the node services its environments declare, started; its rollout workers' fork servers, started; and what those
+servers import and build ahead of the workers.
+
+**Node services.**  An environment that declares node services (``service_kwargs.node_services``,
+:mod:`platoon.envs.harbor.node_services`) gets a supervisor of each started on this node as the run begins
+(:meth:`RolloutStartup.begin`), first, so that the rollout workers start on the CPUs the node services leave them, and
+no rollout starts before each one is up (:meth:`RolloutStartup.ready`), with the toolchains' staging: one that fails
+to start fails the run's start, naming it and the end of its log, since its rollouts could not be graded.  The run
+hears of node services that fail later (:meth:`RolloutStartup.on_node_service_failure`), and stops them as it ends
+(:meth:`RolloutStartup.close`); their supervisors also die with the run.
 
 **Toolchains and fork servers.**  Both used to fall on a run's first rollouts.  A CLI harness's first rollout on a node
 copied the harness's toolchain (tens of thousands of files) from the shared filesystem to node-local disk while every
@@ -51,7 +60,7 @@ import contextvars
 import logging
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -84,19 +93,26 @@ class RolloutStartup:
     def __init__(self, toolchains: Sequence[str], workflows: Sequence[Any] = ()) -> None:
         self.toolchains = list(dict.fromkeys(toolchains))
         self.workflows = [workflow for workflow in workflows if workflow is not None]
+        self.node_services: Any = None  # a NodeServiceRunner when the environments declare node services
         self._staging: asyncio.Future[Any] | None = None
         self._began = 0.0
 
     @classmethod
     async def begin(cls, environments: Sequence[Any], workflows: Sequence[Any] = ()) -> RolloutStartup:
-        """Start the fork servers of ``workflows`` (``warm_up``, for a workflow that has one) and the staging of the
-        named toolchains of ``environments``' TOML harness specs (:func:`platoon.train.auto.harness_toolchains`), on a
-        thread of its own; returns at once.  A workflow whose start fails is logged, and its first rollouts start it,
-        as before."""
+        """Start the supervisors of the node services ``environments`` declare (which take their CPUs from this
+        process's first), the fork servers of ``workflows`` (``warm_up``, for a workflow that has one), and the staging
+        of the named toolchains of ``environments``' TOML harness specs (:func:`platoon.train.auto.harness_toolchains`),
+        on a thread of its own; returns at once.  A workflow whose start fails is logged, and its first rollouts start
+        it, as before."""
 
         from platoon.train.auto import harness_toolchains
 
         startup = cls(harness_toolchains(environments), workflows)
+        if any((getattr(entry, "service_kwargs", None) or {}).get("node_services") for entry in environments):
+            from platoon.envs.harbor.node_services import NodeServiceRunner, node_services_of
+
+            startup.node_services = NodeServiceRunner(node_services_of(environments))
+            await startup.node_services.start()
         for workflow in startup.workflows:
             warm_up = getattr(workflow, "warm_up", None)
             if not callable(warm_up):
@@ -110,6 +126,23 @@ class RolloutStartup:
         startup._stage()
         return startup
 
+    def on_node_service_failure(self, callback: Callable[[str], Any]) -> None:
+        """Call ``callback(why)`` once the run's node services fail while it runs (one could not be started again, or
+        its supervisor kept dying: :class:`~platoon.envs.harbor.node_services.runner.NodeServiceRunner`), so that the
+        run stops; never without node services."""
+
+        if self.node_services is not None:
+            self.node_services.on_failure(callback)
+
+    async def close(self) -> str | None:
+        """Stop the run's node services, as the run ends and before it reaps its sandboxes: their supervisors, and
+        what one left; why they failed while the run ran, when they did.  Idempotent."""
+
+        if self.node_services is None:
+            return None
+        await self.node_services.stop()
+        return self.node_services.failure
+
     def _stage(self) -> None:
         if not self.toolchains:
             return
@@ -120,13 +153,17 @@ class RolloutStartup:
         self._staging = _in_thread(prestage, self.toolchains, log=logger.info)
 
     async def ready(self, *, timeout: float | None = None, stop: asyncio.Event | None = None) -> None:
-        """Wait until the toolchains are staged; at once when there are none.  It waits at most ``timeout`` seconds
-        (default :data:`STAGING_WAIT_S`), and no longer once ``stop`` is set (a shutdown was asked for): the staging
-        goes on, on its thread, and the rollouts that start meanwhile stage the toolchains themselves, each waiting for
-        the copy under its lock, as they did before platoon staged ahead, within their own time limits.  A toolchain
-        that could not be staged is logged (:func:`platoon.harness.toolchains.prestage`), and its rollouts stage it
-        themselves, as before.  Raises only when cancelled."""
+        """Wait until the node services are up and the toolchains are staged; at once when there are none.  It waits
+        for the staging at most ``timeout`` seconds (default :data:`STAGING_WAIT_S`), and no longer once ``stop`` is set
+        (a shutdown was asked for): the staging goes on, on its thread, and the rollouts that start meanwhile stage the
+        toolchains themselves, each waiting for the copy under its lock, as they did before platoon staged ahead,
+        within their own time limits.  A toolchain that could not be staged is logged
+        (:func:`platoon.harness.toolchains.prestage`), and its rollouts stage it themselves, as before.  Raises when
+        cancelled, and :class:`~platoon.envs.harbor.node_services.spec.NodeServiceError` for a node service that did
+        not start."""
 
+        if self.node_services is not None:
+            await self.node_services.ready(stop=stop)
         if self._staging is None:
             return
         waited = time.monotonic()

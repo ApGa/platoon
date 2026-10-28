@@ -228,6 +228,37 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   the `process` provider's is the port of the host that the stack holds. A socket path too long for an address is
   handed out as a link in node scratch (`platoon.sandbox.stacks.SocketLinks`)
   ([Write a sandbox provider](docs/extending/sandbox-providers.md#run-multi-container-stacks)).
+- **Node services: services a node runs once for every rollout on it.** A Harbor environment declares them
+  (`node_services`, by name: an image, a command, the port stacks reach it at, CPUs of the run's that it keeps from the
+  run's rollouts (whole cores, each node service its own), memory, environment, binds, which a bind with `stage: true`
+  copies to node-local disk once per node, a health check and its front's routes), and a dataset's overlay marks the
+  compose service that one serves (`[[compose]]` `external`, with `scope`, what each rollout's scope of it carries,
+  `${NAME}` read from the task's variables), which then no rollout starts. `platoon train` and `platoon eval` start a
+  supervisor per node service before the first rollout (`python -m platoon.envs.harbor.node_services`, in a session of
+  its own), which owns the service under a lock in node scratch, in a sandbox of the environment's provider with the
+  run's labels, checks it between rollouts, starts it again when it fails, backing off, and gives up after failed starts
+  in a row; the run waits until each one serves, and stops before any rollout when one does not start, replaces a
+  supervisor that died, fails when a service gave up, and stops them as it ends, while a Ctrl+C or a scheduler's
+  SIGTERM leaves them serving its last rollouts. Another run on the node that declares the same service shares it, and
+  takes it over when the first one ends, the scopes its workers open meanwhile waiting for it. A stack reaches the
+  service by the served service's name at its port, through a scope of its own rollout: a socket of the supervisor's
+  front that lets only the declared routes through, adds the token the service checks and the scope's values
+  (`X-Platoon-Scope`), and drops what the rollout sends in their place, so that `main` reaches neither the service's
+  other routes nor another rollout's task; a pod relays it (an upstream at the port, the name a host alias of the pod),
+  and the `process` provider's stacks relay a port of the host to it. A rollout whose node service failed while it used
+  it (a request in flight, or one since the service last passed its health check), or could not answer it, is `invalid`
+  (`node_service_down`), whatever `on_sidecar_down` says; the other rollouts go on with the service's next start, and
+  an outcome records which starts of the service answered it (`node_services`). A site profile may declare node
+  services too (`node_services`), which an entry takes by name (`{name: site}`). Docker's compose projects, the
+  host-network fallback and providers without the new `externals` capability reach no node service: such stacks are
+  refused when the tasks are listed. `StackSpec.externals` (`platoon.sandbox.stacks.ExternalService`) is what a stack
+  provider gets of them ([Node services](docs/how-to/sandboxes-and-harbor.md#node-services)).
+- **A FrontierSmith recipe.** `recipes/frontiersmith` runs FrontierSmith's 200 synthetic competitive-programming
+  problems as agentic Harbor tasks, fetched through its own adapter at its release, with the Frontier-CS judge as a
+  node service in place of each task's privileged judge: go-judge as your own uid (rlimits, not cgroups), on 16 CPUs
+  that the rollouts' agents leave alone, its parallelism from them, reached through a scope of the rollout's own
+  problem; a judge that cannot grade makes the reading invalid rather than 0. Configs for an evaluation and for a small training check
+  ([`recipes/frontiersmith`](recipes/frontiersmith/README.md)).
 - **Harness specs get a task's own MCP servers.** `{task_mcp_servers}` renders the MCP servers a task offers its agents,
   as a JSON list of each one's `name`, `transport` and `url` as the task's sandbox reaches it (or a `stdio` server's
   `command` and `args`), for a harness in the task's sandbox that reaches them itself, as Harbor's agents do; a harness
@@ -582,6 +613,11 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
 ### Fixes
 
+- `platoon eval` that gets SIGTERM, such as a scheduler's at the end of a job's time, stops as at Ctrl+C: it starts
+  no further rollout, cancels those in flight, stops its node services, reaps the sandboxes labelled with its output
+  directory and exits 143. It died at once, leaving its sandboxes until `platoon sandbox reap`. It also reaps them
+  before its first rollout, as `platoon train` does, so that a start on an output directory reaps what an earlier one
+  that was killed left there.
 - The `process` sandbox provider's `reap(labels)`, which a run calls before it starts and as it exits, and
   `platoon sandbox reap` with it, returns only once the processes it killed have exited, or after 10 seconds, with a
   warning that names those still running. It returned once it had sent them SIGKILL, while they could still be giving

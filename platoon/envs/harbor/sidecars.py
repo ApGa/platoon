@@ -36,6 +36,11 @@ why a stack cannot start:
   (:func:`log_source`), and a file it cannot read fails the grade as infrastructure, never left out.  A sidecar does
   not see what ``main`` writes in its own, so a read-only bind of one is refused when the task loads.
 
+**Node services.**  A service that a dataset's overlay marks ``external`` is served by a node service
+(:mod:`platoon.envs.harbor.node_services`), and not started: the stack reaches it outside it (``StackSpec.externals``),
+through the rollout's scope of the node service, at the node service's port, by the service's name, and the other
+services' dependencies on it are met before the stack starts (the node service is up, or no scope opens).
+
 **On the host network** (``host_network``, the fallback of :mod:`platoon.sandbox.host_network_stacks`), each service
 also gets what the overlay's rules for it name (:class:`~platoon.envs.harbor.compose.HostNetworkRule`): the stack's
 token, a secret of the stack's own, in every token variable that a rule names, in every service of the stack (so that
@@ -90,6 +95,7 @@ from platoon.sandbox.stacks import (
     LOG_TAIL_BYTES,
     LOOPBACK,
     Dependency,
+    ExternalService,
     Healthcheck,
     ServiceSpec,
     ServiceState,
@@ -362,18 +368,27 @@ def stack_spec(
     job_timeout_s: float | None = None,
     pulled_image: Callable[[str], SessionImage | None] = lambda reference: None,
     on_host_network: bool = False,
+    externals: Mapping[str, ExternalService] | None = None,
 ) -> StackPlan:
     """The spec of the task's stack (the module docstring says what each service gets): ``main`` is the agents'
     sandbox, prepared by ``setup``; ``main_image`` is its image as the session runs it (None: its ``docker_image``,
     whose configuration platoon does not know), ``service_image(name, build)`` the image of a service that builds from
     a context, ``pulled_image(reference)`` the image map's pin of a registry image (None: none), ``env`` and ``mounts``
-    the Harbor service's (every sidecar gets its read-only mounts), ``job_timeout_s`` an init job's longest run, and
-    ``on_host_network`` whether it runs on the host-network fallback, with what the overlays' rules say.  It makes
-    nothing.  ``ValueError`` says why a service cannot run (an image without a known command or not in the image map,
-    an unset host variable, a spec no stack can start)."""
+    the Harbor service's (every sidecar gets its read-only mounts), ``job_timeout_s`` an init job's longest run,
+    ``on_host_network`` whether it runs on the host-network fallback, with what the overlays' rules say, and
+    ``externals`` how the stack reaches each service that a node service serves (its scope's socket and the node
+    service's port), by the service's name.  It makes nothing.  ``ValueError`` says why a service cannot run (an image
+    without a known command or not in the image map, an unset host variable, a node service the stack has no way to,
+    a spec no stack can start)."""
 
     plan = harbor_task.compose
     assert plan is not None and plan.kind == "sidecars"
+    served = plan.external
+    if missing := sorted(set(served) - set(externals or {})):
+        raise ValueError(
+            f"Harbor task {harbor_task.name!r}: the service {missing[0]} is served by the node service "
+            f"{served[missing[0]]}, which the stack has no way to"
+        )
     copies = {
         key: Volume(
             target="",
@@ -386,6 +401,8 @@ def stack_spec(
     logs: dict[str, dict[str, str]] = {}  # each log directory's sidecars, with their targets
     services: dict[str, ServiceSpec] = {}
     for name, data in plan.services.items():
+        if name in served:
+            continue  # served by a node service: not started
         binds = service_binds(data)
         own = [
             replace(copies[copy_key(bind)], target=bind.target, read_only=bind.read_only)
@@ -394,7 +411,9 @@ def stack_spec(
         ]
         if name == MAIN:
             check = _healthcheck(data, main_image.healthcheck if main_image is not None else None)
-            services[MAIN] = _service(data, sandbox=main, command=None, healthcheck=check, setup=setup, volumes=own)
+            services[MAIN] = _service(
+                data, sandbox=main, command=None, healthcheck=check, setup=setup, volumes=own, served=served
+            )
             continue
         for bind in binds:
             if bind.logs is not None:
@@ -411,10 +430,12 @@ def stack_spec(
             network=network,
             labels=labels,
             timeout_s=job_timeout_s,
+            served=served,
         )
     if on_host_network:
         services = _on_host_network(services, plan.host_network_rules)
-    spec = StackSpec(services=services, network=network, labels=dict(labels))
+    reached = {name: external for name, external in (externals or {}).items() if name in served}
+    spec = StackSpec(services=services, network=network, labels=dict(labels), externals=reached)
     spec.check()
     directories = [
         SidecarLogs(logs=kind, volume=LOGS_VOLUME.format(logs=kind), services=targets) for kind, targets in logs.items()
@@ -451,8 +472,10 @@ def _sidecar(
     network: StackNetwork,
     labels: Mapping[str, str],
     timeout_s: float | None,
+    served: Collection[str] = (),
 ) -> ServiceSpec:
-    """A sidecar's service, as compose runs it (the module docstring says what it gets)."""
+    """A sidecar's service, as compose runs it (the module docstring says what it gets); ``served`` are the services
+    that node services serve, whose dependencies are met before the stack starts."""
 
     environment = {
         key: resolve_deferred(value, harbor_task.env, os.environ)
@@ -477,6 +500,7 @@ def _sidecar(
         volumes=volumes,
         timeout_s=timeout_s,
         user=image.user,
+        served=served,
     )
 
 
@@ -490,6 +514,7 @@ def _service(
     volumes: Sequence[Volume] = (),
     timeout_s: float | None = None,
     user: str | None = None,
+    served: Collection[str] = (),
 ) -> ServiceSpec:
     network_mode = str(data.get("network_mode") or "")
     return ServiceSpec(
@@ -499,6 +524,7 @@ def _service(
         depends_on={
             other: Dependency(condition=settings["condition"], required=settings.get("required", True))
             for other, settings in (data.get("depends_on") or {}).items()
+            if other not in served  # a node service is up before the stack starts
         },
         volumes=[
             *(
@@ -613,6 +639,9 @@ def healthchecks(
     assert plan is not None
     checks: dict[str, Healthcheck | None] = {}
     for name, data in plan.services.items():
+        if data.get("external"):  # a node service's: not the stack's to wait for
+            checks[name] = None
+            continue
         image: Mapping[str, Any] | None = None
         try:
             if name == MAIN:
@@ -647,7 +676,10 @@ def start_bound_s(
         if settings.get("condition") == "service_completed_successfully"
     }
     weights = {}
-    for name in plan.services:
+    for name, data in plan.services.items():
+        if data.get("external"):  # a node service's: up before the stack starts
+            weights[name] = 0.0
+            continue
         if name == MAIN:
             wait = main_health_s
         elif name in jobs:

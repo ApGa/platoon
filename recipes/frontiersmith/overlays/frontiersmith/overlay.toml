@@ -1,0 +1,44 @@
+# FrontierSmith's Harbor tasks on platoon (recipes/frontiersmith/README.md): each task's judge is the node's judge pool,
+# the Frontier-CS judge as a node service, which a rollout reaches as judge:8081 through a scope of its own problem;
+# a judge that cannot grade makes the reading invalid, never 0; main's image installs no agents of its own.
+description = "FrontierSmith: the judge is the node's Frontier-CS judge pool, judge failures are invalid, main installs no agents"
+
+[match]
+name = "frontier-cs-algorithm-*"
+
+# The adapter writes the fetching host's checkout into each task (FRONTIER_CS_ALGORITHMIC_PATH's default, which only
+# its judge's build and binds read): the node's judge pool has the problems, so no task names a host path.
+[[edit]]
+file = "task.toml"
+pattern = '^FRONTIER_CS_ALGORITHMIC_PATH = "[^"\n]*"\n'
+replace = ""
+
+[[edit]]
+file = "environment/docker-compose.yaml"
+pattern = '\$\{FRONTIER_CS_ALGORITHMIC_PATH:-[^}\n]*\}'
+replace = '${FRONTIER_CS_ALGORITHMIC_PATH}'
+count = 2
+
+# main's image without the agents' installers (Claude Code, nvm, Codex: unpinned downloads): platoon brings its
+# harnesses' toolchains.
+[[copy]]
+file = "environment/Dockerfile"
+source = "files/Dockerfile"
+
+# The verifier: the score through the scope, or the reading marked invalid when the judge cannot grade (the adapter's
+# wrote 0 for a judge that was down, timed out or failed).
+[[copy]]
+file = "tests/evaluate.py"
+source = "files/evaluate.py"
+
+[[copy]]
+file = "tests/test.sh"
+source = "files/test.sh"
+
+# The judge is not started per rollout: the node's judge pool serves it (node_services.frontier-cs-judge in the
+# configs), and each rollout's scope names its own problem alone.
+[[compose]]
+service = "judge"
+unset = ["build", "privileged", "shm_size", "ulimits", "environment", "volumes"]
+external = "frontier-cs-judge"
+scope = {problem_id = "${PROBLEM_ID}"}
