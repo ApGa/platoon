@@ -913,6 +913,13 @@ def test_an_overlay_marks_a_service_external(tmp_path: Path):
     plan = _plan(task_dir, edits=[edit])
 
     assert plan.services["judge"] == {"external": "judge-pool"}  # served by a node service, never started here
+    scoped = ComposeEdit.parse(
+        "pool", {"service": "judge", "external": "judge-pool", "scope": {"problem_id": "${PROBLEM_ID}"}}
+    )
+    plan = _plan(task_dir, edits=[scoped])
+    assert plan.services["judge"] == {"external": "judge-pool", "scope": {"problem_id": "${PROBLEM_ID}"}}
+    assert plan.external == {"judge": "judge-pool"} and plan.external_scope("judge") == {"problem_id": "${PROBLEM_ID}"}
+    assert plan.data["edits"] == ["pool: judge: external judge-pool (scope problem_id)"]
 
 
 @pytest.mark.parametrize(
@@ -922,6 +929,8 @@ def test_an_overlay_marks_a_service_external(tmp_path: Path):
         ({"service": "main", "unset": "cap_add"}, "unset must list keys"),
         ({"service": "bad name!", "unset": ["x"]}, "needs a service name"),
         ({"service": "main", "rename": {}}, "unknown keys"),
+        ({"service": "judge", "scope": {"problem_id": "1"}}, "scope goes with external"),
+        ({"service": "judge", "external": "pool", "scope": {"problem_id": 1}}, "scope must map names to strings"),
     ],
 )
 def test_compose_edits_are_checked_when_an_overlay_loads(entry, message: str):
@@ -1094,7 +1103,7 @@ def test_the_fallback_refuses_what_it_cannot_run(tmp_path: Path):
     unauthenticated = host_network_problem(_scanned(clean)) or ""
     assert "whose sidecar kv no overlay authenticates" in unauthenticated
     assert 'with bind = "VARIABLE" where a variable sets the address' in unauthenticated  # bind is not required
-    assert "external" not in unauthenticated  # refused at load until node services exist
+    assert "external" not in unauthenticated
     listenless = [ComposeEdit.parse("fix", {"service": name, "host_network": {"token": "T"}}) for name in rules]
     problem = host_network_problem(_scanned(clean, edits=listenless)) or ""
     assert "whose service kv declares port 6379 and no listen rule" in problem

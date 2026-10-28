@@ -1,5 +1,6 @@
 """``platoon eval``'s policy: without one, refused for harness rollouts before anything runs and fine for custom
-ones; a Tinker one opens its session with the Tinker SDK's telemetry off."""
+ones; a Tinker one opens its session with the Tinker SDK's telemetry off.  And an evaluation whose node services fail
+stops."""
 
 from __future__ import annotations
 
@@ -125,3 +126,30 @@ def test_a_tinker_policy_opens_its_session_with_the_sdks_telemetry_off(monkeypat
     EvalPolicy(model_name="m", renderer_name="r", base_url="http://self-hosted:8000").install()
 
     assert telemetry == ["0"]
+
+
+def test_an_evaluation_whose_node_services_fail_starts_no_further_rollout_and_stops_them(tmp_path, monkeypatch):
+    from platoon.train.startup import RolloutStartup
+
+    closed: list[bool] = []
+
+    class Startup:  # the rollouts' startup of a run whose node services failed as it began
+        node_services = object()
+
+        async def ready(self) -> None:
+            pass
+
+        def on_node_service_failure(self, callback) -> None:
+            callback("the judge could not be started again")
+
+        async def close(self) -> str:
+            closed.append(True)
+            return "the judge could not be started again"
+
+    async def begin(environments, workflows=()):
+        return Startup()
+
+    monkeypatch.setattr(RolloutStartup, "begin", staticmethod(begin))
+    with pytest.raises(RuntimeError, match=r"0 rollout\(s\), 1 not started: the judge could not be started again"):
+        asyncio.run(arun_eval(_config(tmp_path, {**CUSTOM, "rollout": f"{__name__}:scored_rollout"})))
+    assert closed == [True]  # its node services stopped before the evaluation ended

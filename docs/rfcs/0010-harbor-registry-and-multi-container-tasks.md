@@ -7,7 +7,8 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The Harbor service (`platoon/envs/harbor/`), sandboxes (`platoon/sandbox/`), the harness runner (`platoon/harness/runner.py`) and the gateway (`platoon/gateway/server.py`); [Architecture](../architecture.md) (the Harbor backend, sandboxes, the native-tools rule); [RFC 0001](0001-native-multi-agent.md) (per-agent grading, `snapshot_async`), [RFC 0004](0004-sandweave-integration.md) (capabilities and routes), [RFC 0005](0005-gateway-dialects-and-tito.md) (dialects), [RFC 0008](0008-config-and-cli.md) (`platoon eval`), [RFC 0009](0009-gateway-step-budgets.md) (step budgets) |
 | Discussion | The pull request that adds this revision |
-| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources; M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. The sources pull request: the rest of M1, the Harbor Hub, Harbor's legacy registry, git repositories and adapters (no `ls`, and no `service: harbor://...` shorthand). The Docker-stacks pull request: stacks on the `docker` provider as `docker compose` projects, sidecars' build contexts built by `platoon prepare`, and Docker-only privileges for a fetch that keeps them (`refuse: {privileges: false}`, the `privileged` capability). The pods pull request: M7's stacks as hpc-sandbox pods on Singularity, and on Apptainer and enroot (experimental), with hpc-sandbox 0.5 (with 0.4 they are refused, naming it): a run mode per service, the gateway relayed by the pod, volumes in the pod's directory, egress per phase; the registry images that sidecars run pinned with their configuration by `platoon prepare` (`platoon harbor images pin`), which also fetches the pod tools. The users pull request: `agent_user: honor` and `verifier_user: honor` for any user in single sandboxes (§7: Docker's, and Singularity's with `--fakeroot`), with owner manifests and pulled entries recorded by `platoon prepare`. The hpc-sandbox 0.5.1 pull request: the `hpc` extra requires it, and a fetch locks stacks as runnable by default (`refuse.sidecars: false`). The task-MCP pull request: the rest of M6, a stack's MCP servers served through the tool plane as `<server>__<tool>` env tools (streamable HTTP and the legacy SSE transport, by platoon's own client), reached through `Stack.connect` on every stack provider (the docker provider's relay, a pod's exposed sockets), and `{task_mcp_servers}` for harnesses in `main`. The host-network pull request: M8, the fallback over any provider whose sandboxes share the host's network as the caller's uid (`stacks: host_network`), with overlays' `host_network` rules per service, a fetch-time scan for references it cannot rewrite, and a check that what listens at each service's ports is the caller's and on the loopback alone; with user namespaces available but unused (setuid SingularityCE without pods), not on a site that lacks them. Not yet: M5, enroot pods at a site, M9, users on stacks, and trajectories recording the kill mode |
+| Implementation | The Harbor fast-path pull request: M0; M1 for `hf://` and local sources; M2 (no `platoon toolchain ls`, and the `docker` builder untested on a Docker host); M3; M4 (its kill is `Sandbox.kill_processes`). The compose-subset pull request: M6's compose parser and subset (§6), with stack plans in the lock, compose overlays, and compose files that name only `main` run as one sandbox on every provider. The stack-layer pull request: the provider-neutral stack layer (`platoon/sandbox/stacks.py`: the stack spec, `Stack`, the `stacks` capability and a driver that starts services in dependency order), sidecar stacks on the `process` provider, sidecar probes, collect hooks and sidecar artifacts, `stacks`, `network_policy` and `on_sidecar_down`. The sources pull request: the rest of M1, the Harbor Hub, Harbor's legacy registry, git repositories and adapters (no `ls`, and no `service: harbor://...` shorthand). The Docker-stacks pull request: stacks on the `docker` provider as `docker compose` projects, sidecars' build contexts built by `platoon prepare`, and Docker-only privileges for a fetch that keeps them (`refuse: {privileges: false}`, the `privileged` capability). The pods pull request: M7's stacks as hpc-sandbox pods on Singularity, and on Apptainer and enroot (experimental), with hpc-sandbox 0.5 (with 0.4 they are refused, naming it): a run mode per service, the gateway relayed by the pod, volumes in the pod's directory, egress per phase; the registry images that sidecars run pinned with their configuration by `platoon prepare` (`platoon harbor images pin`), which also fetches the pod tools. The users pull request: `agent_user: honor` and `verifier_user: honor` for any user in single sandboxes (§7: Docker's, and Singularity's with `--fakeroot`), with owner manifests and pulled entries recorded by `platoon prepare`. The hpc-sandbox 0.5.1 pull request: the `hpc` extra requires it, and a fetch locks stacks as runnable by default (`refuse.sidecars: false`). The task-MCP pull request: the rest of M6, a stack's MCP servers served through the tool plane as `<server>__<tool>` env tools (streamable HTTP and the legacy SSE transport, by platoon's own client), reached through `Stack.connect` on every stack provider (the docker provider's relay, a pod's exposed sockets), and `{task_mcp_servers}` for harnesses in `main`. The host-network pull request: M8, the fallback over any provider whose sandboxes share the host's network as the caller's uid (`stacks: host_network`), with overlays' `host_network` rules per service, a fetch-time scan for references it cannot rewrite, and a check that what listens at each service's ports is the caller's and on the loopback alone; with user namespaces available but unused (setuid SingularityCE without pods), not on a site that lacks them. The node-services pull request: M9's shared judge pool as node services in core (§8: declared by an environment or the site profile, a per-node supervisor that a run starts and that dies with it, a scope per rollout through the supervisor's front, relayed into pods and to `process` stacks, a failure that makes the rollouts that used it `invalid`, the
+`externals` capability), and the FrontierSmith recipe, whose 200 problems the Frontier-CS judge grades as a node service. Not yet: M5, enroot pods at a site, the rest of M9 (Frontier-CS's own adapters, the 2.0 judge as a per-rollout sidecar), users on stacks, and trajectories recording the kill mode |
 
 ## Summary
 
@@ -573,7 +574,8 @@ directory.
   and named volumes below a bind mask it, and the bind is of a filtered copy in which they are empty directories, so
   that the masked files never enter a sandbox; binds of `${HOST_*_PATH}` are the session's log directories.
 - **Edited** by a dataset's overlays (`[[compose]]`: `set`, `replace` and `unset` a service's keys, or mark it
-  `external`, served by a node service), which the plan records.
+  `external`, served by a node service, with the `scope` that each rollout's scope of it carries, §8), which the plan
+  records.
 - A refusal is recorded at fetch (`compose: <service>.<key>: <why>`, which a run that names the task meets as
   `env_config`), never a partial stack.
 
@@ -772,6 +774,35 @@ Frontier-CS's algorithmic and 2.0 tracks are compose stacks (a judge proxy, a pr
   sandbox lacks, and one engine per rollout would swamp a node);
 - the 2.0 judge runs as a per-rollout sidecar.
 
+**Node services** (the node-services pull request; `platoon.envs.harbor.node_services`) are the shared judge pool's
+mechanism, for any service a node runs once for every rollout on it:
+- an environment declares one (`node_services`: an image, a command, the port stacks reach it at, CPUs of the run's
+  that it keeps from the run's rollouts, memory, environment, binds, which a bind with `stage` copies to node-local
+  disk once per node, a health check and the routes a rollout may use), or takes the site profile's declaration of it
+  by name; a dataset's overlay marks the compose service it serves `external`, with the `scope` each rollout's scope
+  carries (`{problem_id = "${PROBLEM_ID}"}`, read from the task's variables);
+- `platoon train` and `platoon eval` start a supervisor per node service before the first rollout, a process of its own
+  in a session of its own (`python -m platoon.envs.harbor.node_services`), since a pod dies with the process that
+  started it and the rollout workers' fork server must stay free of threads: it owns the service under a node lock, in
+  one sandbox of the environment's provider (go-judge in it runs as the caller's uid), checks it between rollouts,
+  starts it again when it fails, backing off, and gives up after failed starts in a row; the run watches its
+  supervisors, replaces one that died, fails once a service gave up, and stops them as it ends, while a signal to its
+  process group leaves them serving its last rollouts; another run on the node that declares the same service shares
+  it;
+- a stack reaches it through a scope of its rollout's own: a Unix socket of the supervisor's front, which lets only the
+  declared routes through, adds the token the service checks and the scope's values, and drops what the rollout sends
+  in their place, so that `main` reaches neither the judge's other routes nor another rollout's problem; a pod relays
+  the scope at the node service's port, and resolves the served service's name to its loopback, as Frontier-CS's
+  per-task proxy did on its own network; the `process` provider's stacks relay a port of the host to it; Docker's
+  compose projects and the host-network fallback reach none, and refuse such stacks;
+- a rollout whose node service failed while it used it (a request in flight, or one since the service last passed its
+  health check), or could not answer it, is `invalid` (`node_service_down`), whatever `on_sidecar_down` says; the other
+  rollouts go on with the service's next start; and a verifier that the judge cannot answer writes no reward.
+
+The FrontierSmith recipe (`recipes/frontiersmith`) is the first user: FrontierSmith's 200 synthetic problems, in
+Frontier-CS's algorithmic format, fetched through its own adapter, each task's privileged judge served by the
+Frontier-CS judge as a node service.
+
 What changes is the default HPC provider:
 - In a pod, the 2.0 judge keeps its fixed port and its `http://judge:8082` name, and only its own stack can reach
   it.
@@ -786,7 +817,7 @@ What changes is the default HPC provider:
 | New `service_kwargs`: `dataset`, `adapter`, `registry`, `lock`, `cache`, `tasks`, `select`, `overlays`, `image_map`, `toolchain_root`, `reward`, `verifier_classifiers`, `agent_timeout_multiplier`, `network_policy` (`task`, `none`), `stacks` (`auto`, `refuse`, `host_network`), `on_sidecar_down` (`invalid`, `grade`), `agent_user` (`refuse`, `ignore`, `honor`) | additive |
 | New environment-entry key `on_harness_exit`; new rollout-config key `sampling_precedence` (`request`, today's behavior, or `config`, under which policy calls sample with the temperature, top_p and top_k of `inference_params`, never a harness's own) and `inference_params.top_k` | additive; defaults keep today's behavior |
 | Spec keys `[install.recipe]`, `[resources]`, `[budget]`; `[install].toolchain` may be a name | additive |
-| Overlay keys `[[compose]]` (with `host_network`) and `compose_host_env`; the lock's `compose` (with each service's `host_network` rule, and the scan's `unrewritable_references`) and `compose_rule`, and `flags.stack: main_only`; `Sandbox.keep_processes` (optional) | additive |
+| Overlay keys `[[compose]]` (with `host_network`, and `external` with `scope`) and `compose_host_env`; the lock's `compose` (with each service's `host_network` rule, and the scan's `unrewritable_references`) and `compose_rule`, and `flags.stack: main_only`; `Sandbox.keep_processes` (optional) | additive |
 | The `stacks` capability and `StackProvider.start_stack` (`platoon.sandbox.stacks`); multi-container tasks run where a provider runs stacks (`docker`, `process`, and `singularity` and `enroot` with hpc-sandbox 0.5), `[[verifier.collect]]` hooks and sidecars' artifacts run | additive; tasks platoon refused now run |
 | The `privileged` capability (`docker`) and the fetch's `refuse: {privileges: false}`; the `docker` provider's `stack_root` option | additive; a lock fetched without the switch answers its config as before |
 | `platoon prepare` builds sidecars' contexts and pins their registry images (`pulled:<reference>` entries of the image map; `platoon harbor images pin`); the `hpc` extra requires hpc-sandbox 0.5.1 | additive |
@@ -794,6 +825,7 @@ What changes is the default HPC provider:
 | Main-only compose files run; a task with `compose.yaml`, `compose.yml` or `docker-compose.yml` runs as one container, as in Harbor, which reads none of them | behavior change, intended |
 | `EnvironmentService.open` takes `needs`; `Sandbox.routes`, `Sandbox.kill_processes`, `SandboxSpec.upstreams`, `SandboxProvider.reap` | services and providers outside platoon must accept the new keyword and fields (a public protocol change) |
 | Commands `platoon harbor fetch\|verify\|images\|check\|ls`, `platoon toolchain build\|ls` | new |
+| `node_services` (a Harbor entry's, and the site profile's), `StackSpec.externals` (`ExternalService`), and the supervisor `python -m platoon.envs.harbor.node_services` that `platoon train` and `platoon eval` start | additive: without a node service, nothing changes |
 | Task ids of fetched datasets come from `registry.json`, else `task-index.json`, else the task's path relative to the dataset, as `dataset_dir` names them; local directories keep directory names unless they ship a `registry.json` | existing configs unchanged |
 | Tasks platoon refused (separate verifiers, trivial compose files) now run; `.sif` and `.sqsh` paths no longer get `docker://` | behavior change, intended |
 | The loaders' absolute-path task ids (`platoon.envs.harbor.loaders`) | deprecated in favor of locked ids; kept through 1.x |
@@ -838,11 +870,12 @@ No public name is removed.
      those places unless the overlay patches the file;
    - sidecars are reachable by every process on the node, so one with ports that the overlay does not authenticate (a
      per-stack token, and a `127.0.0.1` bind, which the fallback checks along with the listener's owner) is refused,
-     as is an MCP sidecar, whose client cannot send the token; binding a sidecar to a node service waits for node
-     services (M9).
+     as is an MCP sidecar, whose client cannot send the token; so is a stack that reaches a node service, whose relay
+     would be a port of the node.
 6. **Privileged judges without root.** go-judge and other sidecars that need privileges or devices are refused on
-   rootless providers unless an overlay binds them to node services. On rlimits instead of cgroups, time and memory
-   limits are enforced less exactly.
+   rootless providers unless an overlay serves them from a node service (§8), which runs go-judge as the caller's
+   uid, where it limits programs with rlimits instead of cgroups: time and memory limits are enforced less exactly,
+   and a program's number of processes is not.
 
 ## Alternatives
 

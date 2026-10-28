@@ -252,8 +252,10 @@ class ComposeEdit:
     """A dataset overlay's edit of one compose service (``[[compose]]`` in ``overlay.toml``), applied before the
     file is interpolated: ``unset`` removes keys (dotted for nested ones: ``deploy.resources.reservations``),
     ``replace`` sets keys whole, ``set`` merges mappings into the service's (other values replace), and ``external``
-    marks a service that a node service serves, which platoon does not start.  ``host_network`` says how the service
-    runs on the host-network fallback (:class:`HostNetworkRule`)."""
+    marks a service that a node service serves, which platoon does not start (:mod:`platoon.envs.harbor.node_services`),
+    with ``scope``: what a rollout's scope of it carries (``{problem_id = "${PROBLEM_ID}"}``, ``${NAME}`` a variable of
+    the task's ``[verifier].env`` or ``[environment].env``, read when a session opens).  ``host_network`` says how the
+    service runs on the host-network fallback (:class:`HostNetworkRule`)."""
 
     overlay: str
     service: str
@@ -261,6 +263,7 @@ class ComposeEdit:
     replace: Mapping[str, Any] = field(default_factory=dict)
     unset: tuple[str, ...] = ()
     external: str | None = None
+    scope: Mapping[str, str] = field(default_factory=dict)
     host_network: HostNetworkRule | None = None
 
     @classmethod
@@ -268,7 +271,7 @@ class ComposeEdit:
         where = f"overlay {overlay}: [[compose]]"
         if not isinstance(entry, Mapping):
             raise ValueError(f"{where} entries must be tables, got {entry!r}")
-        if unknown := sorted(set(entry) - {"service", "set", "replace", "unset", "external", "host_network"}):
+        if unknown := sorted(set(entry) - {"service", "set", "replace", "unset", "external", "scope", "host_network"}):
             raise ValueError(f"{where}: unknown keys {unknown}")
         service = entry.get("service")
         if not isinstance(service, str) or not _SERVICE_NAME.match(service):
@@ -282,6 +285,11 @@ class ComposeEdit:
         external = entry.get("external")
         if external is not None and (not isinstance(external, str) or not external):
             raise ValueError(f"{where} {service}: external must name a node service")
+        scope = entry.get("scope") or {}
+        if not isinstance(scope, Mapping) or not all(isinstance(v, str) for v in scope.values()):
+            raise ValueError(f"{where} {service}: scope must map names to strings")
+        if scope and external is None:
+            raise ValueError(f"{where} {service}: scope goes with external, the node service it scopes")
         host_network = HostNetworkRule.parse(entry.get("host_network"), f"{where} {service}: host_network")
         if not (entry.get("set") or entry.get("replace") or unset or external or host_network):
             raise ValueError(f"{where} {service}: give set, replace, unset, external or host_network")
@@ -292,6 +300,7 @@ class ComposeEdit:
             replace=dict(entry.get("replace") or {}),
             unset=tuple(unset),
             external=external,
+            scope={str(key): value for key, value in scope.items()},
             host_network=host_network,
         )
 
@@ -304,7 +313,8 @@ class ComposeEdit:
         if self.unset:
             parts.append(f"unset {', '.join(self.unset)}")
         if self.external:
-            parts.append(f"external {self.external}")
+            scoped = f" (scope {', '.join(sorted(self.scope))})" if self.scope else ""
+            parts.append(f"external {self.external}{scoped}")
         if self.host_network is not None:
             parts.append(f"host_network {self.host_network.describe()}")
         return f"{self.overlay}: {self.service}: {'; '.join(parts)}"
@@ -598,6 +608,12 @@ class ComposePlan:
 
         return {name: str(service["external"]) for name, service in self.services.items() if service.get("external")}
 
+    def external_scope(self, name: str) -> dict[str, str]:
+        """What a rollout's scope of the node service that serves the service ``name`` carries, as the overlay gives
+        it (``${NAME}`` not read yet); empty for none."""
+
+        return {str(key): str(value) for key, value in (self.services[name].get("scope") or {}).items()}
+
     def dependency_cycle(self) -> list[str] | None:
         """Services that depend on one another in a cycle, as the names along it (the first again at its end), which
         compose refuses to start; None when there is none."""
@@ -812,13 +828,14 @@ def _check_top_level(document: Mapping[str, Any]) -> None:
 
 def _apply_edits(
     document: dict[str, Any], edits: Sequence[ComposeEdit]
-) -> tuple[list[str], dict[str, str], dict[str, HostNetworkRule]]:
-    """Apply overlays' service edits to ``document`` in place; what was applied, the services marked external, and
-    what the edits say of each service on the host-network fallback (a later edit's over an earlier's)."""
+) -> tuple[list[str], dict[str, dict[str, Any]], dict[str, HostNetworkRule]]:
+    """Apply overlays' service edits to ``document`` in place; what was applied, the services marked external (each
+    as its plan holds it: its node service, and its scope), and what the edits say of each service on the
+    host-network fallback (a later edit's over an earlier's)."""
 
     services: dict[str, dict[str, Any]] = document["services"]
     applied: list[str] = []
-    external: dict[str, str] = {}
+    external: dict[str, dict[str, Any]] = {}
     host_network: dict[str, HostNetworkRule] = {}
     for edit in edits:
         if edit.service not in services:
@@ -834,7 +851,7 @@ def _apply_edits(
         if edit.external:
             if edit.service == MAIN:
                 raise ComposeEditError(MAIN, f"overlay {edit.overlay} marks main external; main is the agents' sandbox")
-            external[edit.service] = edit.external
+            external[edit.service] = {"external": edit.external, **({"scope": dict(edit.scope)} if edit.scope else {})}
         if edit.host_network is not None:
             host_network[edit.service] = edit.host_network.over(host_network.get(edit.service))
         applied.append(edit.describe())
@@ -1118,7 +1135,7 @@ class _Planner:
         self,
         document: dict[str, Any],
         *,
-        external: Mapping[str, str],
+        external: Mapping[str, Mapping[str, Any]],
         edits: list[str],
         host_network: Mapping[str, HostNetworkRule],
     ) -> ComposePlan:
@@ -1134,7 +1151,7 @@ class _Planner:
         services = {}
         for name, raw in started.items():
             if name in external:
-                services[name] = {"external": external[name]}
+                services[name] = dict(external[name])
                 continue
             services[name] = self._service(name, raw, networks=networks, volumes=volumes, started=started)
         egress = self._check_networks(services, networks)

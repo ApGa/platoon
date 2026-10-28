@@ -15,6 +15,7 @@ from platoon.sandbox.base import ExecResult, SandboxSpec
 from platoon.sandbox.stacks import (
     Dependency,
     DrivenStack,
+    ExternalService,
     Healthcheck,
     ServiceSpec,
     StackSpec,
@@ -389,6 +390,27 @@ async def test_specs_no_stack_can_start_are_refused_before_anything_starts(servi
     with pytest.raises(ValueError, match=message):
         await drive_stack(backend, StackSpec(services=services), id="s")
     assert backend.events == ["closed"]  # nothing started, and what the backend holds is released
+
+
+@pytest.mark.parametrize(
+    ("external", "services", "message"),
+    [
+        (ExternalService(socket="/s.sock", port=8081), {"judge": _service(["j"])}, "named like a service of the stack"),
+        (ExternalService(socket="/s.sock", port=80, aliases=("Main",)), {}, "named like a service of the stack"),
+        (ExternalService(socket="/s.sock", port=0), {}, "has no TCP port"),
+        (
+            ExternalService(socket="/s.sock", port=6379),
+            {"kv": _service(["kv"], ports=(6379,))},
+            "which the service 'kv'",
+        ),
+        (ExternalService(socket="s.sock", port=8081), {}, "needs a socket's absolute path"),
+    ],
+    ids=["service-name", "alias", "no-port", "declared-port", "relative-socket"],
+)
+def test_external_services_that_clash_with_the_stack_are_refused(external, services, message: str):
+    spec = StackSpec(services={"main": _service(), **services}, externals={"judge": external})
+    with pytest.raises(ValueError, match=message):
+        spec.check()
 
 
 def test_dependency_cycles_and_the_longest_path():

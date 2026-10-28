@@ -1,0 +1,7 @@
+description = "The judge of these fixtures is the node's judge pool (a node service): each rollout reaches it through a scope of its own problem"
+
+[[compose]]
+service = "judge"
+unset = ["privileged", "build"]
+external = "judge-pool"
+scope = {problem_id = "${PROBLEM_ID}"}

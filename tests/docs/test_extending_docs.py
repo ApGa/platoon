@@ -457,7 +457,8 @@ def test_the_audited_provider_keeps_the_inner_provider_s_capabilities(snippets, 
 def test_the_capabilities_table_lists_the_capabilities_providers_declare() -> None:
     from platoon.sandbox import base
 
-    declared = set(re.search(r"subset of \{(.*?)\}", base.__doc__)[1].replace('"', "").split(", "))
+    listed = re.search(r"subset of \{(.*?)\}", base.__doc__, re.S)[1]
+    declared = {name.strip().strip('"') for name in listed.split(",")}
     assert declared == base.CAPABILITIES
     text = (GUIDES / "sandbox-providers.md").read_text(encoding="utf-8")
     table = text[text.index("| Capability |") :]

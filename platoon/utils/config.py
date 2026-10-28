@@ -227,6 +227,10 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
             continue
         rules: Mapping[str, PathOption] = service_path_options(service)
         for option, rule in rules.items():
+            if "*" in option:  # a key of each mapping of a mapping, as node_services.*.binds[].source
+                parts = option.replace("[]", ".[]").split(".")
+                _resolve_each(options, parts, f"{where}.service_kwargs", resolver, rule)
+                continue
             name, listed, key = option.partition("[].")
             if not listed:
                 name, _, key = option.partition(".")
@@ -248,6 +252,24 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
             else:
                 options[name] = resolver.path(value, at, rule)
     return resolver.problems
+
+
+def _resolve_each(value: Any, parts: list[str], at: str, resolver: _InputPaths, rule: Any) -> Any:
+    """``value`` with the paths that ``parts`` name below it resolved (:func:`resolve_input_paths`): each segment a key,
+    ``*`` each value of a mapping, ``[]`` each item of a list."""
+
+    if not parts:
+        return resolver.path(value, at, rule)
+    head, *rest = parts
+    if head == "*" and isinstance(value, dict):
+        for key in value:
+            value[key] = _resolve_each(value[key], rest, f"{at}.{key}", resolver, rule)
+    elif head == "[]" and isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = _resolve_each(item, rest, f"{at}.{index}", resolver, rule)
+    elif head not in ("*", "[]") and isinstance(value, dict) and value.get(head) is not None:
+        value[head] = _resolve_each(value[head], rest, f"{at}.{head}", resolver, rule)
+    return value
 
 
 def resolve_trainer_path_defaults(data: Any, config_path: str | os.PathLike[str] | None) -> list[str]:

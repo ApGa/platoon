@@ -606,7 +606,10 @@ another policy made is refused (exit 78) before anything in it changes; its roll
 The evaluation loads that snapshot, and the report summary is printed as JSON. The site profile it uses is named
 on stderr, and checked as platoon train checks it. Rollouts of every split but train run with each entry's
 eval_overrides. A harness toolchain or a task image that is not built is refused before any rollout, with the
-platoon prepare command that builds it, which --prepare runs first.
+platoon prepare command that builds it, which --prepare runs first. The sandboxes labelled with the output
+directory are reaped before the first rollout (those an earlier start that was killed left) and when the evaluation
+exits. A SIGTERM, such as a scheduler's at the end of a job's time, stops it as Ctrl+C does: the rollouts in flight
+are cancelled, its node services stop and its sandboxes are reaped; it then exits 143.
 
 **Arguments**:
 

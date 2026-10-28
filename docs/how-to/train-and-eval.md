@@ -1543,7 +1543,8 @@ trainer that ends at once (the watchdog, a second signal, SIGKILL), leaves its s
 
 - `platoon train` reaps the sandboxes labelled with its run when it starts, before each restart and when it exits,
   and first kills the rollout workers whose trainer is gone;
-- `platoon eval` reaps those labelled with its output directory when it exits;
+- `platoon eval` reaps those labelled with its output directory when it starts and when it exits; a SIGTERM stops
+  it as Ctrl+C does, cancelling its rollouts in flight, and it exits 143 once it has reaped them;
 - `platoon sandbox reap RUN_DIR` reaps those of a run whose process was killed, such as a job that ran out of time.
 
 Each logs how many it found, for example `Reaped 4 sandbox(es) labelled platoon.run=/runs/exp/trial before restart 1

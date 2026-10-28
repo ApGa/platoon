@@ -40,8 +40,11 @@ import enum
 import inspect
 import json
 import logging
+import os
 import re
+import signal
 import sys
+import threading
 import warnings
 from collections.abc import Callable, Generator, Mapping, Sequence
 from datetime import datetime, timezone
@@ -218,7 +221,10 @@ def eval_(config: Path, /, *overrides: str, prepare: bool = False) -> int | None
     The evaluation loads that snapshot, and the report summary is printed as JSON. The site profile it uses is named
     on stderr, and checked as platoon train checks it. Rollouts of every split but train run with each entry's
     eval_overrides. A harness toolchain or a task image that is not built is refused before any rollout, with the
-    platoon prepare command that builds it, which --prepare runs first.
+    platoon prepare command that builds it, which --prepare runs first. The sandboxes labelled with the output
+    directory are reaped before the first rollout (those an earlier start that was killed left) and when the evaluation
+    exits. A SIGTERM, such as a scheduler's at the end of a job's time, stops it as Ctrl+C does: the rollouts in flight
+    are cancelled, its node services stop and its sandboxes are reaped; it then exits 143.
 
     Parameters
     ----------
@@ -273,7 +279,7 @@ def eval_(config: Path, /, *overrides: str, prepare: bool = False) -> int | None
     _configure_logging()
     if getattr(resolved.config, "stage", "full") != "report":
         _lock_tool_call_parsing(record.lock_path, resolved.config.inference)
-    with _held_evaluation(record.run_dir, resolved.config):
+    with _sigterm_as_ctrl_c(), _held_evaluation(record.run_dir, resolved.config):
         result = _evaluation().run_eval(["--config", str(record.config_path)])
     print(json.dumps(result.get("summary", result), indent=2))
 
@@ -294,16 +300,54 @@ def _refuse_an_output_dir_in_use(settings: Any) -> None:
 @contextlib.contextmanager
 def _held_evaluation(run_dir: Path, settings: Any) -> Generator[None]:
     """An evaluation that runs rollouts records itself in its directory, which :func:`_refuse_an_output_dir_in_use`
-    found free, and reaps the sandboxes labelled with it when it exits (:func:`platoon.train.reaping.held_run`); a
-    report-only one starts none."""
+    found free, and reaps the sandboxes labelled with it before its rollouts, which an earlier start that was killed
+    left, and when it exits (:func:`platoon.train.reaping.held_run`); a report-only one starts none."""
 
     if getattr(settings, "stage", "full") == "report":
         yield
         return
     from platoon.train.reaping import held_run
 
-    with held_run(run_dir, "eval", settings.environments, workers=False, reap_first=False):
+    with held_run(run_dir, "eval", settings.environments, workers=False, reap_first=True):
         yield
+
+
+@contextlib.contextmanager
+def _sigterm_as_ctrl_c() -> Generator[None]:
+    """A SIGTERM to this process (a scheduler's, at the end of a job's time) stops the evaluation as Ctrl+C does: no
+    rollout starts any more, those in flight are cancelled, the node services stop and the sandboxes labelled with the
+    run are reaped; then it exits 143, as a process that SIGTERM ended.  Another SIGINT or SIGTERM meanwhile does what
+    a second Ctrl+C does.  A process forked from this one keeps SIGTERM's default."""
+
+    if threading.current_thread() is not threading.main_thread():  # only the main thread sets handlers
+        yield
+        return
+    pid = os.getpid()
+    got: list[int] = []
+
+    def interrupt(signum: int, frame: Any) -> None:
+        if os.getpid() != pid:  # a fork that has not set a handler of its own: as SIGTERM's default
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+        got.append(signum)
+        # asyncio's handler cancels the evaluation (and raises the second time), Python's raises KeyboardInterrupt
+        ctrl_c = signal.getsignal(signal.SIGINT)
+        if callable(ctrl_c):
+            ctrl_c(signal.SIGINT, frame)
+        else:  # SIGINT ignored, as in a script's background job
+            raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, interrupt)
+    try:
+        yield
+    except KeyboardInterrupt:
+        if not got:
+            raise
+        print("platoon: the evaluation stopped on SIGTERM", file=sys.stderr)
+        sys.exit(128 + signal.SIGTERM)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _check_policy_environment(policy: Any | None) -> None:

@@ -7,7 +7,7 @@ out-of-memory kill) leaves them running, and a trainer that dies may leave rollo
 reaps what it left (:class:`RunReaper`), and logs how many sandboxes went:
 
 * ``platoon train`` when it starts, before each restart of a supervised run (:mod:`platoon.train.supervise`), and
-  when it exits; ``platoon eval`` when it exits (:func:`held_run`);
+  when it exits; ``platoon eval`` when it starts and when it exits, a SIGTERM's exit included (:func:`held_run`);
 * ``platoon sandbox reap RUN_DIR``, for a run that was killed (:func:`reap_stopped_run`).
 
 **Which providers.**  The sandbox providers the run's config names (:func:`sandbox_providers`): each Harbor entry's
