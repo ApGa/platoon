@@ -64,6 +64,8 @@ def attach_hooks(specs: Sequence[HookSpec], run: "TrainerRun") -> None:
     for index, spec in enumerate(specs):
         try:
             run.hooks.register(_built(spec, run))
+        except ConfigError as exc:  # a key the hook may not hold (run.checkpoints.register): its problems, by item
+            problems.extend(f"trainer_options.hooks[{index}]: {problem}" for problem in exc.problems)
         except ValueError as exc:
             problems.append(f"trainer_options.hooks[{index}]: {exc}")
     if problems:

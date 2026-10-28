@@ -8,14 +8,17 @@ its participants with the run (``run.checkpoints``); the rl trainer's is its dra
 dispatcher's state.
 
 The participants' rules (RFC 0021, section 8): each key is its participant's own (:meth:`RunCheckpoints.register`
-refuses one that the counters, the keys kept for several policies or another participant hold); a participant
-registered before the start point is read takes it up then, before any training client opens, and one registered later
-as it registers; and a key of the row a start resumes from that no part of the run claims stops the start
-(:meth:`RunCheckpoints.unclaimed`), so that nothing saved is dropped silently.
+refuses one that the counters, the keys kept for several policies, the row itself (:func:`row_fields`) or another
+participant hold, and a step hook's that is one of the draws'); a participant registered before the start point is read
+takes it up then, before any training client opens, and one registered later as it registers; and a key of the row a
+start resumes from that no part of the run claims stops the start (:meth:`RunCheckpoints.unclaimed`), so that nothing
+saved is dropped silently.
 
 Imports no Tinker, so that ``platoon.experimental`` re-exports :class:`CheckpointParticipant`.
 """
 
+import dataclasses
+import functools
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -33,6 +36,19 @@ RESERVED_KEYS = ("policies", "commit_seq")
 # The keys of a row that the run claims whoever takes part: its counters, and its draws' (the rollout source's), the
 # only other keys a platoon release ever wrote, so that every run directory a release wrote resumes.
 CORE_KEYS = (*COUNTER_KEYS, "tasks", "next_position", "dispatch")
+
+
+@functools.cache
+def row_fields() -> frozenset[str]:
+    """The keys that a row of ``checkpoints.jsonl`` holds itself, beside its ``loop_state``: the fields of
+    tinker_cookbook's ``CheckpointRecord`` (the checkpoint's ``name``, ``batch``, ``epoch``, ``final``, and the
+    ``state_path`` and ``sampler_path`` its save wrote), read from the class so that they follow it, but ``extra``,
+    which holds the other entries.  The row is ``{"name": name, **loop_state, **paths}``: an entry of one of these
+    names would replace the row's own value (its name, which the pruners read), or be replaced by the save's paths."""
+
+    from tinker_cookbook.checkpoint_utils import CheckpointRecord
+
+    return frozenset(field.name for field in dataclasses.fields(CheckpointRecord) if field.name != "extra")
 
 
 class CheckpointParticipant(Protocol):
@@ -78,27 +94,41 @@ class RunCheckpoints:
         # The name of the newest full checkpoint this start saved; None before its launch save.
         self.last_saved: str | None = None
 
-    def register(self, participant: CheckpointParticipant) -> None:
+    def register(self, participant: CheckpointParticipant, *, hook: bool = False) -> None:
         """``participant`` takes part in every full checkpoint from now on, after those that registered before it;
         registering it again does nothing.  Registered once the start's point is read, it takes that up at once
         (:meth:`CheckpointParticipant.resume`).  Its keys are its own: a key of the run's counters
-        (:data:`COUNTER_KEYS`), one kept for several policies (:data:`RESERVED_KEYS`) or one another participant holds
-        is refused (``ValueError``), naming both owners."""
+        (:data:`COUNTER_KEYS`), one kept for several policies (:data:`RESERVED_KEYS`), one the row holds itself
+        (:func:`row_fields`), one the run claims for its draws (:data:`CORE_KEYS`) when it is a step hook (``hook``,
+        which ``run.hooks.register`` passes), or one another participant holds is refused (``ConfigError``, exit 78),
+        naming the participant and the key."""
 
         if any(other is participant for other in self.participants):
             return
         for key in participant.keys:
-            if key in COUNTER_KEYS or key in RESERVED_KEYS:
-                raise ValueError(f"loop_state key {key!r} is the run's own: {_named(participant)} may not hold it")
-            if (owner := next((other for other in self.participants if key in other.keys), None)) is not None:
-                raise ValueError(
-                    f"loop_state key {key!r} is {_named(owner)}'s: {_named(participant)} may not hold it too"
-                )
+            if (refusal := self._refusal(key, participant, hook=hook)) is not None:
+                from platoon.utils.config import ConfigError
+
+                raise ConfigError(refusal)
         self.participants.append(participant)
         if self._joined is not None:
             self._joined(participant)
         if self.start is not None:
             participant.resume(self.start)
+
+    def _refusal(self, key: str, participant: CheckpointParticipant, *, hook: bool) -> str | None:
+        """Why ``participant`` may not hold ``key`` (:meth:`register`), or None when it may."""
+
+        named = _named(participant)
+        if key in COUNTER_KEYS or key in RESERVED_KEYS:
+            return f"loop_state key {key!r} is the run's own: {named} may not hold it"
+        if key in row_fields():
+            return f"loop_state key {key!r} is a field of the checkpoint row itself: {named} may not hold it"
+        if hook and key in CORE_KEYS:
+            return f"loop_state key {key!r} is the draws' (the rollout source's): step hook {named} may not hold it"
+        if (owner := next((other for other in self.participants if key in other.keys), None)) is not None:
+            return f"loop_state key {key!r} is {_named(owner)}'s: {named} may not hold it too"
+        return None
 
     def unclaimed(self, start: "StartPoint") -> list[str]:
         """The keys of the row that ``start`` resumes from that neither the run (:data:`CORE_KEYS`) nor a registered
