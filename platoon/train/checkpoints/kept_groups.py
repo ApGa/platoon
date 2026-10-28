@@ -10,8 +10,10 @@ and the steps after it train them as they are, each once.
 What a group keeps: its datums, exactly (token ids, and every loss input; floats as their bytes), and what the step
 that consumes it reads of it besides, by the codec of its output's exact type (:func:`register_codec`): for a
 ``GroupRolloutWorkflow`` group (``GroupOutput``, whose codec :mod:`platoon.train.workflow.output` registers), its
-workload, rollout counts, rollout statistics, deferred group statistics, label, entry, members and verdict; for a
-workflow that returns a plain list of datums, the list; for a group whose workflow failed, that it failed, so that the
+workload, rollout counts, rollout statistics, deferred group statistics, label, entry, members and verdict, and for one
+whose rows are tagged by who produced them (``PolicyGroupOutput``, under a credit estimator that reads agents), each
+row's tags and the same report; for a workflow that returns a plain list of datums, the list; for a group whose
+workflow failed, that it failed, so that the
 step after a resume consumes it as failed, as the run would have without one.  An output of any other type is not
 kept: a resume draws its task again.  The file is gzip-compressed JSON, as the snapshot is JSON: no pickle, so reading
 a run directory runs no code.  Writing it costs about ten bytes per token of the groups it keeps, which every full save

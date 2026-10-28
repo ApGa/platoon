@@ -30,6 +30,10 @@ The pieces:
   saved; it checks the experimental trainer API, and changes with it;
 * :func:`fake_tinker_service`: that fake Tinker service (:class:`FakePolicyService`), for a run of ``platoon train`` or
   of a trainer in a test, on CPU;
+* :func:`check_credit_estimator`: the conformance check of a credit estimator (``platoon.experimental``), made of named
+  checks: it credits fixture groups of two roles, and checks that it sets advantages on action tokens only and that a
+  new estimator that took up its state credits as the running one does; it checks the experimental credit API, and
+  changes with it;
 * :func:`toy_tokenizer` and :func:`toy_renderer`: a 7 KB byte-level tokenizer with Qwen3's chat tokens, and
   tinker-cookbook's ``qwen3_instruct`` renderer over it, so prompts render and parse offline as they do for a Qwen3
   model, apart from the token ids;
@@ -37,8 +41,8 @@ The pieces:
   ``pytest -p platoon.testing`` and never automatically.
 
 The names this module exports are a stable API, but for :func:`check_task_sampler`, :func:`check_group_admission`,
-:func:`check_trainer` and :func:`fake_tinker_service`, which serve the experimental sampler, admission and trainer
-APIs and change with them; its submodules are not.  It needs the
+:func:`check_trainer`, :func:`fake_tinker_service` and :func:`check_credit_estimator`, which serve the experimental
+sampler, admission, trainer and credit APIs and change with them; its submodules are not.  It needs the
 ``tinker`` extra (and the ``ors`` extra for ORS environments), and pytest only for the plugin.
 ``docs/how-to/test-extensions.md`` is the guide.
 """
@@ -72,6 +76,7 @@ _EXPORTS = {
     "check_task_sampler": "platoon.testing.samplers",
     "check_group_admission": "platoon.testing.admissions",
     **dict.fromkeys(("FakePolicyService", "check_trainer", "fake_tinker_service"), "platoon.testing.trainers"),
+    "check_credit_estimator": "platoon.testing.credit",
 }
 
 __all__ = [
@@ -84,6 +89,7 @@ __all__ = [
     "PolicyCall",
     "ScriptExhaustedError",
     "ScriptedPolicy",
+    "check_credit_estimator",
     "check_group_admission",
     "check_task_sampler",
     "check_trainer",
@@ -113,6 +119,7 @@ def __getattr__(name: str) -> Any:
 
 if TYPE_CHECKING:
     from platoon.testing.admissions import check_group_admission
+    from platoon.testing.credit import check_credit_estimator
     from platoon.testing.episode import EpisodeRun, run_episode
     from platoon.testing.gateway import make_gateway, serve_policy
     from platoon.testing.policy import (

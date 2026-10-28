@@ -46,6 +46,13 @@ workflow class can do beyond it (`WorkflowCapabilities`, read through `capabilit
 group's output is read: its report (`OutputReport`, `report_of`) and its rows by policy
 (`RolloutOutput`, `rows_by_policy`).  A trainer that rolls out draws the run's groups through
 `run.rollouts()`.
+And credit estimators (RFC 0021): how an environment entry's training groups turn rewards into advantages
+(`CreditEstimator`, or a subclass of `CreditEstimatorBase`), built per entry with a `CreditSetup`
+and checked at load (`CreditCheckContext`); its `assign` sees a `CreditGroup` of
+`MemberRollout` members, each agent an `AgentRun` (role, policy, own reward, rows), each row a
+`TrainingSample`, and the run's policies as `PolicyView` views.  It is registered with
+`credit_estimator` or named as `module:Class`, and `platoon.testing.check_credit_estimator` checks it.
+`docs/extending/credit-estimators.md` is the guide.
 
 This module imports neither `tinker` nor `datasets`.
 
@@ -101,13 +108,23 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`PolicyMoved`](#platoon-experimental-policymoved) | A snapshot refused a sample: its policy published a newer sampler before the call, or while it ran, so the sample would not be its version's. |
 | [`DrawInfo`](#platoon-experimental-drawinfo) | The run and the training draw an episode belongs to (`ctx.draw`), when its trainer asks for them (RFC 0021's draw provenance, `TrainerNeeds.draw_provenance`); never in an evaluation. A draw's key `(start, seq)` is never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by it (`StepEnd.consumed`). |
 | [`RolloutWorkflow`](#platoon-experimental-rolloutworkflow) | What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group failed, and trains nothing). The output is a `RolloutOutput`, or a sequence of datums, all of the run's one trained policy (a `GroupOutput`, or a plain list). |
-| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets six of them as flags. |
+| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets seven of them as flags. |
 | [`capabilities_of`](#platoon-experimental-capabilities-of) | What `workflow` (an instance or a class) can do: its `capabilities` when it declares them, else its class flags, a flag it does not set False. Each flag is read as the trainer read it before the contract was written down: `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True. |
 | [`WorkflowSetup`](#platoon-experimental-workflowsetup) | What `platoon train` builds one phase's workflow with (a workflow class's `from_setup`), in place of `GroupRolloutWorkflow`'s keyword arguments, whose `model_info` cannot carry several policies: the phase's settings and the run's components, and the policies its rollouts sample. |
 | [`RolloutOutput`](#platoon-experimental-rolloutoutput) | A group's output written to the contract: its rows, by the policy each trains, and its report. The other output a workflow may return is a sequence of datums (`GroupOutput`, a plain list). |
 | [`OutputReport`](#platoon-experimental-outputreport) | What the trainer reads of a group's output besides its rows, in one place: the per-task statistics and the group admission rules read its members and verdict, the step that consumes the group its statistics and its workload, and the label metrics its label. What an output does not give is None (`members` empty, `verdict` unknown). `workload` and its four counts come together: all set, or all None. |
 | [`report_of`](#platoon-experimental-report-of) | The report of a group's output: its `report` when it gives one (a `RolloutOutput`, a `GroupOutput`), else the one its attributes give (`carried_report`: an output written before the contract was, such as a workflow's own list subclass), which for a plain list of datums, or None for a group that failed, is empty. |
 | [`rows_by_policy`](#platoon-experimental-rows-by-policy) | A group's rows by the policy each trains. A list of datums (a `GroupOutput`, or a workflow's plain list), or any other output without `rows()` (a tuple of datums, say), is all `trained`'s, the run's one trained policy: `{trained: output}`, the output itself. Any other output answers `rows()`. The step reads every output's rows through this one function. |
+| [`CreditEstimator`](#platoon-experimental-creditestimator) | What the trainer calls of a credit estimator: `assign(group)`, once per training group, awaited. |
+| [`CreditEstimatorBase`](#platoon-experimental-creditestimatorbase) | An optional base class of credit estimators: the protocol's shape, typed options and a load-time check. |
+| [`CreditSetup`](#platoon-experimental-creditsetup) | What an estimator is built with, once per start of the process and environment entry: `Class(setup, options)`. |
+| [`CreditCheckContext`](#platoon-experimental-creditcheckcontext) | What an estimator's load-time `check` sees, beside its options. |
+| [`CreditGroup`](#platoon-experimental-creditgroup) | One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's order, the run's policies, each policy's version when `assign` began (`versions`; it does not move during the call, although the policies may publish meanwhile), and where the group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker; an estimator's metrics belong under `credit/`). |
+| [`MemberRollout`](#platoon-experimental-memberrollout) | One member of the group that returned a result: its place among them (`index`), every row of its rollout (`samples`), its agents (filled when the estimator asked for them, else empty), its root's processed reward and whether that is a completed root's scored outcome (`task_reward_valid`: an interrupted root's is not, and enters no baseline), and what the converter returned (`result`), to read: its trajectories' statistics and its root's reward components. Its `datums` are the member's rows; an estimator sets their advantages through `samples`. |
+| [`AgentRun`](#platoon-experimental-agentrun) | One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role (`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it samples, its depth in the tree, its reward and its rows. `reward` is its trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never trains an unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent did not use, whose reward still counts. |
+| [`TrainingSample`](#platoon-experimental-trainingsample) | One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree. It lives in the trainer process only: what reaches the training service is the datum. |
+| [`PolicyView`](#platoon-experimental-policyview) | What an estimator may read of a policy: its id, and the renderer that turns its token ids into text. |
+| [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, and `reverse_kl` and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
 
 ## Task samplers
 
@@ -1731,6 +1748,9 @@ The optional members, which the trainer uses when a workflow has them:
   the oldest policy version its own model calls sampled;
 - `entry_configs`: each environment entry's settings, which `platoon train` sets on a workflow that applies
   them (`applies_entry_settings`);
+- `entry_credit`: each environment entry's credit estimator, for the entries that set one, which a workflow that
+  applies them (`applies_credit`) gets from its setup and keeps, so that the rollout source settles and saves
+  them (`platoon.train.credit.runtime`);
 - its capabilities: a `capabilities` class attribute, or the class flags of `WorkflowCapabilities`;
 - `from_setup(setup)`, a class method: `platoon train` builds the run's workflow class with it, from a
   `WorkflowSetup`, and builds a class without one with `GroupRolloutWorkflow`'s keyword arguments.
@@ -1751,7 +1771,7 @@ class WorkflowCapabilities
 
 What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead
 of testing whether the class is a `GroupRolloutWorkflow`.  A class declares them in a `capabilities` class
-attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets six of them as flags.
+attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets seven of them as flags.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -1762,6 +1782,7 @@ attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets six 
 | `takes_stale_filter` | `bool` | `False` | It takes how the run's stale filter judges its groups as its `stale_filter` (`train.stale_filter`), and under `datum` stamps each datum with the oldest policy version its own model calls sampled. |
 | `runs_rollout_workers` | `bool` | `False` | Its rollouts can run in rollout workers: `platoon train` gives it the environments' `packages` and the run's `label_by` as arguments, and the `worker_preload` of its workers' fork server (platoon.train.launch). |
 | `binds_policies` | `bool` | `False` | Its `publish_model_binding` takes `policy=`, which a run that samples more than one policy needs. |
+| `applies_credit` | `bool` | `False` | It credits each environment entry's groups with the entry's credit estimator (`entry_credit`, which `from_setup` gets as `WorkflowSetup.entry_credit`): loading refuses an entry's `credit` beside a workflow that does not (platoon.train.credit.registry). |
 
 <a id="platoon-experimental-capabilities-of"></a>
 
@@ -1775,9 +1796,10 @@ What `workflow` (an instance or a class) can do: its `capabilities` when it decl
 flags, a flag it does not set False.  Each flag is read as the trainer read it before the contract was written down:
 `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True.
 
-Declared capabilities, a class's own or inherited, are all seven, and win over every flag: over a subclass's own
-flags, and over `GroupRolloutWorkflow`'s rule that a subclass overriding how a member runs does not run its
-rollouts on the lease (`runs_rollouts_on_lease`), which sets the flag only.
+Declared capabilities, a class's own or inherited, are all eight, and win over every flag: over a subclass's own
+flags, and over `GroupRolloutWorkflow`'s rules that a subclass overriding how a member runs does not run its
+rollouts on the lease (`runs_rollouts_on_lease`), and one overriding how its groups are credited does not apply
+an entry's estimator (`applies_credit`), which set the flags only.
 
 <a id="platoon-experimental-workflowsetup"></a>
 
@@ -1806,6 +1828,7 @@ settings and the run's components, and the policies its rollouts sample.
 | `packages` | `Sequence[str] \| None` | `None` | The environments' packages and the run's label column, for a workflow that runs rollout workers (WorkflowCapabilities.runs_rollout_workers; None for one that does not). |
 | `label_by` | `str \| None` | `None` |  |
 | `options` | `Mapping[str, Any]` | `{}` | The environment's other arguments of the phase's workflow (workflow_kwargs, eval_workflow_kwargs), as given. |
+| `entry_credit` | `Mapping[str, Any]` | `{}` | Each environment entry's credit estimator, by entry, for the entries that set one (environments[].credit, platoon.train.credit.api); always empty for the eval phase, whose groups train nothing. |
 
 <a id="platoon-experimental-rolloutoutput"></a>
 
@@ -1879,6 +1902,277 @@ A group's rows by the policy each trains.  A list of datums (a `GroupOutput`, or
 any other output without `rows()` (a tuple of datums, say), is all `trained`'s, the run's one trained policy:
 `{trained: output}`, the output itself.  Any other output answers `rows()`.  The step reads every output's rows
 through this one function.
+
+## Credit estimators
+
+The credit API: what an estimator is and its base class, what it is built with and what its check sees, the group it credits with its members, agents and rows, and the decorator that registers it ([Write a credit estimator](../extending/credit-estimators.md)).
+
+<a id="platoon-experimental-creditestimator"></a>
+
+### `platoon.experimental.CreditEstimator`
+
+```python
+class CreditEstimator(Protocol)
+```
+
+What the trainer calls of a credit estimator: `assign(group)`, once per training group, awaited.
+
+`needs_agents`: True when it reads the group's agents (`MemberRollout.agents`) and the rows' tags; the rollout
+workers then tag each row with its agent (worker protocol 3).  Optional: `settle(group)`, synchronous, the one
+place where an estimator with state changes it; `state()` and `load_state(state)`, which give and take that
+state as JSON data; and `assign_timeout_seconds`, how long `assign` may take on one group
+(`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit).  An estimator that raises in any of them, or
+whose `assign` runs out of time, stops the run with an error that names it, its entry and the group.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `needs_agents` | `ClassVar[bool]` |  |
+
+#### `CreditEstimator.assign`
+
+```python
+async def assign(group: CreditGroup) -> None
+```
+
+Set the advantages of the group's rows (`TrainingSample.set_advantage`,
+`TrainingSample.set_advantages`).  A row it leaves alone keeps what the converter loaded: its trajectory's
+processed reward on every action token.  It may await (a service's call, say), and assume that every member
+has settled; a group is credited once, and a resume that trains a group a checkpoint kept trains it with the
+advantages this call set.  Other groups' calls run while it awaits.
+
+<a id="platoon-experimental-creditestimatorbase"></a>
+
+### `platoon.experimental.CreditEstimatorBase`
+
+```python
+class CreditEstimatorBase
+```
+
+An optional base class of credit estimators: the protocol's shape, typed options and a load-time check.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `needs_agents` | `ClassVar[bool]` | Whether it reads the group's agents and the rows' tags (CreditEstimator.needs_agents). |
+| `options_schema` | `ClassVar[Any]` | Its options' schema: a dataclass, a pydantic model, or a function of the options' mapping that returns them parsed and raises ValueError; None: it takes no options. `self.options` holds them parsed. |
+| `assign_timeout_seconds` | `float \| None` | How long `assign` may take on one group, in seconds, before the run stops with an error that names the estimator; None: no limit. An estimator that calls a service may set it, from its options say, in `__init__`. |
+
+#### `CreditEstimatorBase.assign`
+
+```python
+async def assign(group: CreditGroup) -> None
+```
+
+Set the advantages of the group's rows (`CreditEstimator.assign`): a subclass implements it.
+
+#### `CreditEstimatorBase.check`
+
+```python
+@staticmethod
+def check(options: Any, ctx: CreditCheckContext) -> None
+```
+
+Refuse a config it cannot serve, with a `ValueError` that says why: it accepts every config.
+
+<a id="platoon-experimental-creditsetup"></a>
+
+### `platoon.experimental.CreditSetup`
+
+```python
+class CreditSetup
+```
+
+What an estimator is built with, once per start of the process and environment entry: `Class(setup, options)`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | required | Its name as the config gives it ("keyed", "acme.credit:ByRole"). |
+| `entry` | `str` | required | The label of the environment entry whose groups it credits. |
+| `settings` | `WorkflowConfig` | required | The entry's training settings (train.workflow_config with the entry's own laid over it). |
+| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id: the one the run trains, main, in this release. |
+
+<a id="platoon-experimental-creditcheckcontext"></a>
+
+### `platoon.experimental.CreditCheckContext`
+
+```python
+class CreditCheckContext
+```
+
+What an estimator's load-time `check` sees, beside its options.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `entry` | `str` | required | The label of the environment entry that names it. |
+| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id. |
+| `config` | `Any` | required | The whole loaded config, read-only, to cross-check the settings the estimator relies on. |
+
+<a id="platoon-experimental-creditgroup"></a>
+
+### `platoon.experimental.CreditGroup`
+
+```python
+class CreditGroup
+```
+
+One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its
+environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's
+order, the run's policies, each policy's version when `assign` began (`versions`; it does not move during the
+call, although the policies may publish meanwhile), and where the group's own statistics go (`stats`: in a
+training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker;
+an estimator's metrics belong under `credit/`).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `task_id` | `str` | required |  |
+| `label` | `str \| None` | required |  |
+| `entry` | `str \| None` | required |  |
+| `settings` | `WorkflowConfig` | required |  |
+| `members` | `list[MemberRollout]` | required |  |
+| `policies` | `Mapping[PolicyId, PolicyView]` | required |  |
+| `versions` | `Mapping[PolicyId, int]` | required |  |
+| `stats` | `DeferredStats \| StatsTracker` | required |  |
+
+#### `CreditGroup.samples`
+
+```python
+def samples() -> list[TrainingSample]
+```
+
+Every row of the group, member by member, each member's in its order.
+
+#### `CreditGroup.agents`
+
+```python
+def agents() -> list[AgentRun]
+```
+
+Every agent of the group, member by member (none when the estimator did not ask for them).
+
+<a id="platoon-experimental-memberrollout"></a>
+
+### `platoon.experimental.MemberRollout`
+
+```python
+class MemberRollout
+```
+
+One member of the group that returned a result: its place among them (`index`), every row of its rollout
+(`samples`), its agents (filled when the estimator asked for them, else empty), its root's processed reward and
+whether that is a completed root's scored outcome (`task_reward_valid`: an interrupted root's is not, and enters
+no baseline), and what the converter returned (`result`), to read: its trajectories' statistics and its root's
+reward components.  Its `datums` are the member's rows; an estimator sets their advantages through `samples`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `index` | `int` | required |  |
+| `samples` | `list[TrainingSample]` | required |  |
+| `agents` | `list[AgentRun]` | required |  |
+| `task_reward` | `float` | required |  |
+| `task_reward_valid` | `bool` | required |  |
+| `result` | `TrajectoryCollectionResult` | required |  |
+
+<a id="platoon-experimental-agentrun"></a>
+
+### `platoon.experimental.AgentRun`
+
+```python
+class AgentRun
+```
+
+One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role
+(`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it
+samples, its depth in the tree, its reward and its rows.  `reward` is its trajectory's processed reward, as the
+converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a
+child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score.  An
+estimator never trains an unscored agent's reward as 0, nor counts it in a baseline.  An agent whose rows the
+converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent
+did not use, whose reward still counts.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | `str` | required |  |
+| `trajectory_id` | `str` | required |  |
+| `parent_id` | `str \| None` | required |  |
+| `role` | `str` | required |  |
+| `policy` | `PolicyId` | required |  |
+| `depth` | `int` | required |  |
+| `reward` | `float \| None` | required |  |
+| `samples` | `list[TrainingSample]` | `[]` |  |
+
+<a id="platoon-experimental-trainingsample"></a>
+
+### `platoon.experimental.TrainingSample`
+
+```python
+class TrainingSample
+```
+
+One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of
+the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked
+for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree.  It lives in
+the trainer process only: what reaches the training service is the datum.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `datum` | `tinker.Datum` | required |  |
+| `policy` | `PolicyId` | required |  |
+| `member` | `int` | required |  |
+| `agent_id` | `str \| None` | `None` |  |
+| `role` | `str \| None` | `None` |  |
+| `trajectory_id` | `str \| None` | `None` |  |
+| `depth` | `int \| None` | `None` |  |
+| `advantages` | `torch.Tensor` | | The row's advantages, one per target token, as they are now: the converter loads every action token with its trajectory's processed reward, and the other positions with 0. Read-only. |
+| `mask` | `torch.Tensor` | | Which of the row's target tokens are actions, which train (`mask > 0`), one per target token. Read-only. |
+
+#### `TrainingSample.set_advantage`
+
+```python
+def set_advantage(value: float) -> None
+```
+
+Set `value` as the advantage of every action token of the row; its other positions keep theirs.
+
+#### `TrainingSample.set_advantages`
+
+```python
+def set_advantages(values: torch.Tensor | Sequence[float]) -> None
+```
+
+Set one advantage per target token (`values`, as many as the row has target tokens) on the row's action
+tokens; its other positions keep theirs.  A `ValueError` for values of another length.
+
+<a id="platoon-experimental-policyview"></a>
+
+### `platoon.experimental.PolicyView`
+
+```python
+class PolicyView
+```
+
+What an estimator may read of a policy: its id, and the renderer that turns its token ids into text.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | `PolicyId` | required |  |
+| `renderer` | `Any` | `None` |  |
+
+<a id="platoon-experimental-credit-estimator"></a>
+
+### `platoon.experimental.credit_estimator`
+
+```python
+def credit_estimator(
+    name: str,
+    *,
+    options: Any = None,
+    check: Callable[[Any, CreditCheckContext], None] | None = None,
+) -> Callable[[R], R]
+```
+
+Register a credit estimator class under `name`, from a module that an environment entry's `package` names,
+so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its
+load-time check.  Core's names (`group`, `keyed`, and `reverse_kl` and `gae`, which platoon adds) are
+reserved, whatever their case and their `-` or `_`; a name registered twice is an error.
 
 ## The types these take and return
 

@@ -8,7 +8,8 @@ start of training is the trainer (:mod:`platoon.train.trainer`).  Each stage of 
 - ``step``: one training step: what it dequeues, the microbatch transforms, the update's metrics, what it logs;
 - ``dispatch``: what starts the training groups (RFC 0019, section 4), and what they settle into;
 - ``workflow``: one group of rollouts (``GroupRolloutWorkflow`` and its parts);
-- ``credit``: the advantages a group's rollouts train with: its baselines and error-token filter;
+- ``credit``: the advantages a group's rollouts train with: its baselines and error-token filter, and the credit
+  estimators an environment entry may choose instead (``environments[].credit``);
 - ``workers``: process-per-rollout: the worker entrypoint, its supervisor and the protocol between them;
 - ``checkpoints``: what a full checkpoint saves, and how a start resumes from it;
 - ``evaluation``: evaluation during training.

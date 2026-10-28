@@ -33,9 +33,10 @@ if TYPE_CHECKING:
 COUNTER_KEYS = ("batch", "wandb_run_id", "policy_version", "optimizer_steps")
 # The keys kept for runs of several policies, which no participant may hold.
 RESERVED_KEYS = ("policies", "commit_seq")
-# The keys of a row that the run claims whoever takes part: its counters, and its draws' (the rollout source's), the
-# only other keys a platoon release ever wrote, so that every run directory a release wrote resumes.
-CORE_KEYS = (*COUNTER_KEYS, "tasks", "next_position", "dispatch")
+# The keys of a row that the run claims whoever takes part: its counters, and its draws' (the rollout source's, its
+# credit estimators' state included), the only other keys a platoon release writes, so that every run directory a
+# release wrote resumes.
+CORE_KEYS = (*COUNTER_KEYS, "tasks", "next_position", "dispatch", "credit")
 
 
 @functools.cache

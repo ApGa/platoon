@@ -111,10 +111,10 @@ checkpoints too. The rules:
 
 - **Its keys are its own.** It registers with none of these keys, or the start stops (exit 78) naming the hook and the
   key: the run's counters (`batch`, `wandb_run_id`, `policy_version`, `optimizer_steps`), those kept for several
-  policies (`policies`, `commit_seq`), the fields that a `checkpoints.jsonl` row holds itself (`name`, `epoch`,
-  `final`, `state_path`, `sampler_path`, read from tinker_cookbook's `CheckpointRecord`), the draws' (`tasks`,
-  `next_position`, `dispatch`), and a key another participant holds. A trainer's own participants follow the same
-  rule, but may hold the draws' keys.
+  policies (`policies`, `commit_seq`), the fields that a `checkpoints.jsonl` row holds itself (`name`, `epoch`, `final`,
+  `state_path`, `sampler_path`, read from tinker_cookbook's `CheckpointRecord`), the draws' (`tasks`, `next_position`,
+  `dispatch` and `credit`, the credit estimators' state), and a key another participant holds. A trainer's own
+  participants follow the same rule, but may hold the draws' keys.
 - **It resumes before the training client opens** when it registers in the trainer's `check()`, as the `rl` trainer's
   config-attached hooks do.
 - **Nothing saved is dropped.** A key of the checkpoint a start resumes from that no part of the run claims stops the

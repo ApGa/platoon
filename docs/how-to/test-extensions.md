@@ -358,6 +358,31 @@ def test_my_config_trains(tmp_path):
     assert service.calls.count("optim_step") == 6
 ```
 
+## Check a credit estimator
+
+A credit estimator of your own ([Write a credit estimator](../extending/credit-estimators.md)) is checked against its
+contract by `check_credit_estimator`, which needs neither a model nor a training run:
+
+```python
+from platoon.testing import check_credit_estimator
+
+
+def test_my_estimator_keeps_the_contract():
+    check_credit_estimator("my_pkg.credit:ByRole", options={"leave_one_out": True})
+```
+
+It builds the estimator (a class, a registered name, or `module:Class`) with `options` checked against its schema, and
+credits fixture groups of four members, each a root (role `policy`) that delegated to one subagent (role `helper`),
+with an interrupted root and a subagent whose rows were left out; an estimator that does not read agents gets them
+without agents or tags. It raises one `AssertionError` that names every check that failed: `protocol` (it is an
+estimator class: an async `assign`, a bool `needs_agents`, a synchronous `settle` if any, both or neither of `state()`
+and `load_state()`; it builds, and its `check`, given a loaded config of one entry, returns or raises `ValueError`),
+`options` (and a typed schema refuses an unknown key), `action_tokens` (every row keeps its length, its type and its
+values off the action tokens, and every advantage is finite) and `resumes` (an estimator that credited and settled
+three groups, and a new one that took up its state as JSON, credit the next group alike, and `assign` alone leaves
+`state()` as it was). Call it outside a running event loop. `check_credit_estimator` checks the
+experimental credit API (`platoon.experimental`), and changes with it.
+
 ## Reference
 
 | Name | Signature and behavior |
@@ -381,7 +406,8 @@ def test_my_config_trains(tmp_path):
 | `check_trainer` | `check_trainer(trainer, *, options=None, options_for_steps=None)`: raises `AssertionError` naming each check a trainer fails ([Check a trainer](#check-a-trainer)) |
 | `fake_tinker_service` | `fake_tinker_service(*, stop_at=None)`: a context manager that yields a `FakePolicyService` in place of the Tinker service, puts back the signal handlers a run installs, and with `stop_at` asks the run to stop in that optimizer step |
 | `FakePolicyService` | The fake service: `calls` (what it was asked, in order), `datums` (each datum sent to forward_backward), `deleted` (the checkpoint paths deleted), `optimizer_steps` |
+| `check_credit_estimator` | `check_credit_estimator(estimator, *, options=None)`: raises `AssertionError` naming each check a credit estimator fails ([Check a credit estimator](#check-a-credit-estimator)) |
 
 The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission`,
-`check_trainer`, `fake_tinker_service` and `FakePolicyService`, which serve the experimental sampler, admission and
-trainer APIs and change with them; its submodules are not.
+`check_trainer`, `fake_tinker_service`, `FakePolicyService` and `check_credit_estimator`, which serve the
+experimental sampler, admission, trainer and credit APIs and change with them; its submodules are not.

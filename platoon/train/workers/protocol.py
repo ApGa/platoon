@@ -29,7 +29,7 @@ import os
 import pickle
 import stat
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Literal
 
 from platoon.task import Task
@@ -42,6 +42,9 @@ from platoon.utils.tinker_data_processing import TrajectoryCollectionResult
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 2
+#: The protocol of a request that also asks for each datum's tags (:class:`PolicyRolloutWorkerRequest`).  Its response
+#: is protocol 2's, whose result carries the tags.
+POLICY_PROTOCOL_VERSION = 3
 
 #: The directory in node-local scratch that holds request/response/ready/diag files, one per user:
 #: ``platoon-rollout-ipc-<uid>`` (:func:`ipc_dir`).
@@ -193,6 +196,24 @@ class RolloutWorkerRequest:
 
 
 @dataclass(frozen=True)
+class PolicyRolloutWorkerRequest(RolloutWorkerRequest):
+    """A rollout whose datums carry who produced them (protocol 3): ``tag_datums`` has the conversion give every
+    trajectory's agent and each datum's trajectory (``TrajectoryCollectionResult.agents``, ``datum_trajectories``),
+    which a credit estimator that reads agents needs.  The trainer sends it only for such an entry's groups; every other
+    rollout is protocol 2's :class:`RolloutWorkerRequest`, field for field as before."""
+
+    tag_datums: bool = True
+
+    @classmethod
+    def tagging(cls, request: RolloutWorkerRequest) -> "PolicyRolloutWorkerRequest":
+        """``request``, asking for its datums' tags."""
+
+        values: dict[str, Any] = {item.name: getattr(request, item.name) for item in fields(request)}
+        values["protocol_version"] = POLICY_PROTOCOL_VERSION
+        return cls(**values)
+
+
+@dataclass(frozen=True)
 class RolloutWorkerResponse:
     """One rollout's outcome.  Everything after ``observed`` is diagnostic, but for ``reward_key``, which decides
     whether the rollout's group trains."""
@@ -297,8 +318,9 @@ def load_request(path: str) -> RolloutWorkerRequest:
         request = pickle.load(handle)
     if not isinstance(request, RolloutWorkerRequest):
         raise ProtocolVersionError(f"{path} does not contain a RolloutWorkerRequest")
-    if request.protocol_version != PROTOCOL_VERSION:
-        raise ProtocolVersionError(f"rollout worker request protocol {request.protocol_version} != {PROTOCOL_VERSION}")
+    expected = POLICY_PROTOCOL_VERSION if isinstance(request, PolicyRolloutWorkerRequest) else PROTOCOL_VERSION
+    if request.protocol_version != expected:
+        raise ProtocolVersionError(f"rollout worker request protocol {request.protocol_version} != {expected}")
     return request
 
 

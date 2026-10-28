@@ -39,6 +39,10 @@ straggler, a worker that died).  With ``group_size: 8`` and
 members are trainable; with the default of 1, when one root completed.
 
 ``GroupRolloutWorkflow._untrainable_verdict`` checks these two rules, before step 2.
+
+An environment entry may credit its groups with an estimator of its own instead of steps 2 and 3
+(``environments[].credit``, :mod:`platoon.train.credit.api`); :class:`GroupCredit` is this module's, ``credit:
+group``, which centers the rows as the workflow does.
 """
 
 import logging
@@ -53,6 +57,7 @@ from platoon.utils.trajectory_error_filtering import ERROR_ACTION_MASK_KEY
 
 if TYPE_CHECKING:
     from platoon.train.config_defs import WorkflowConfig
+    from platoon.train.credit.api import CreditGroup, CreditSetup
     from platoon.utils.tinker_data_processing import TrajectoryCollectionResult
 
 logger = logging.getLogger(__name__)
@@ -207,3 +212,41 @@ def group_verdict(
     )
     # Every retained advantage zero: the group trains nothing (a uniform group).
     return ("trained" if trainable_rollouts else "uniform"), trainable_rollouts
+
+
+class GroupCredit:
+    """``credit: group``, the estimator of today's credit (steps 2 and 3 above): each member's rows centered on its
+    baseline from the group's completed root rewards, the group mean, or the leave-one-out mean with the entry's
+    ``leave_one_out_baseline``, as ``GroupRolloutWorkflow.assign_advantages`` centers them, value for value, with the
+    same ``credit/*`` metrics.  An entry that sets no ``credit`` gets the same credit from the workflow itself.  It
+    takes no options and reads no agents."""
+
+    needs_agents = False
+
+    def __init__(self, setup: "CreditSetup", options: None = None) -> None:
+        self.setup = setup
+
+    async def assign(self, group: "CreditGroup") -> None:
+        members = group.members
+        baselines = group_baselines(
+            [member.task_reward for member in members],
+            [member.task_reward_valid for member in members],
+            leave_one_out=group.settings.leave_one_out_baseline,
+        )
+        for member, baseline in zip(members, baselines, strict=True):
+            for sample in member.samples:
+                sample.set_advantages(sample.advantages - baseline)
+        completed = [
+            (member.task_reward, baseline)
+            for member, baseline in zip(members, baselines, strict=True)
+            if member.task_reward_valid
+        ]
+        if completed:
+            group.stats.scalar(
+                **{
+                    "credit/baseline/avg": sum(baseline for _, baseline in completed) / len(completed),
+                    "credit/baseline/spread": max(b for _, b in completed) - min(b for _, b in completed),
+                    "credit/root_advantage/abs_avg": sum(abs(reward - baseline) for reward, baseline in completed)
+                    / len(completed),
+                }
+            )

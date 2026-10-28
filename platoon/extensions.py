@@ -1129,7 +1129,8 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
     too (``kind: task_sampler``): the run's and, under a run sampler that hands slots, each entry's, with their level
     and their options, defaults included, their options and their checks run as a run's start runs them; and its group
     admission rules other than ``all`` (``kind: group_admission``), likewise, ``informative`` refused beside a workflow
-    that gives its groups no verdict.  A harness
+    that gives its groups no verdict; and its entries' credit estimators (``kind: credit``), likewise, refused beside a
+    workflow that does not apply them.  A harness
     with an option schema (a TOML spec's ``[options]``) also records the options each entry runs it with, defaults
     included, per phase (``options``: ``{entry: {train: ..., eval: ...}}``, :mod:`platoon.options`): the phases the
     config runs (:func:`platoon.options.config_phases`), or with ``split`` that split's phase only, for a command that
@@ -1196,6 +1197,7 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
     problems += _check_service_options(environments, records)
     samplers: list[dict[str, Any]] = []
     rules: list[dict[str, Any]] = []
+    credit: list[dict[str, Any]] = []
     if getattr(config, "train", None) is not None:
         problems += _check_entry_settings_workflow(environments, records)
         if not unimported:  # a package that does not import may register the samplers the config names
@@ -1203,9 +1205,11 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
             problems += found
             rules, found = _group_admissions(config, environments, records)
             problems += found
+            credit, found = _credit_estimators(config, environments, records)
+            problems += found
     if problems:
         raise ConfigError(problems)
-    return [*records.values(), *samplers, *rules]
+    return [*records.values(), *samplers, *rules, *credit]
 
 
 def _task_samplers(config: Any) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1255,6 +1259,31 @@ def _group_admissions(
     except ConfigError as exc:
         return [], list(exc.problems)
     return admission_lock_records(choices), []
+
+
+def _credit_estimators(
+    config: Any, environments: Sequence[Any], records: Mapping[tuple[str, str], dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Resolve the credit estimators a training config's entries choose (``environments[].credit``), check their
+    options and run their checks (:func:`platoon.train.credit.registry.choose_credit`), refusing them beside a
+    training workflow class that does not apply them, and describe each for ``lock.json``.  Returns the records and
+    the problems; neither in a run whose entries set no ``credit``."""
+
+    from platoon.registry import resolve_component
+    from platoon.train.components import merge_run_level_settings
+    from platoon.train.credit import registry as credit_registry
+    from platoon.utils.config import ConfigError
+
+    try:
+        choices = credit_registry.choose_credit(config)
+    except ConfigError as exc:
+        return [], list(exc.problems)
+    workflow = merge_run_level_settings(environments).workflow
+    problems: list[str] = []
+    # The default workflow, GroupRolloutWorkflow, applies them; another that does not resolve is reported already.
+    if choices and workflow != "group_rollout" and ("workflow", workflow) in records:
+        problems = credit_registry.workflow_problems(choices, resolve_component("workflow", workflow), workflow)
+    return credit_registry.credit_lock_records(choices), problems
 
 
 def _check_entry_settings_workflow(

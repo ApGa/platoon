@@ -38,6 +38,7 @@ version you build against.
 
 | You add | You write | A config selects it with | Where it is described |
 |---|---|---|---|
+| A credit estimator (experimental, since 0.5.0) | a class with `async assign(group)` over every member and agent of a group, registered with `@credit_estimator(name)` from `platoon.experimental` | an entry's `credit:`, a registered name or `module:Class`, with `credit_options:` | [Write a credit estimator](credit-estimators.md) |
 | A credit rule | a `GroupRolloutWorkflow` subclass that overrides `compute_baselines` or `assign_advantages` | `environments[].workflow: package.module.MyWorkflow` and `workflow_kwargs` | [Credit assignment](../tutorials/credit-assignment.md#reference-settings) |
 | A batch transform | a `BatchTransform`, run at the trainer's microbatch boundary | not from a config: `PlatoonTinkerRLTrainer(..., batch_transforms=[...])` in a training script of your own | [`platoon/train/step/batch_transforms.py`](../../platoon/train/step/batch_transforms.py) |
 | Config sections of your own | a subclass of the training config | `trainer_config: module:Class` | [Write and override configs](../how-to/configs.md#5-keep-keys-strict) |

@@ -35,6 +35,7 @@ from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
+    PolicyRolloutWorkerRequest,
     RefResolutionError,
     RolloutWorkerRequest,
     dump_response,
@@ -680,3 +681,25 @@ def test_the_response_names_the_reward_key_its_roots_scored_outcome_trained(tmp_
     assert _run(_request(tmp_path), platoons_zero, result=result, monkeypatch=monkeypatch).reward_key is None
     empty = _result(num_datums=0, stats_datums=0)  # no result: the key still travels
     assert _run(_request(tmp_path), graded, result=empty, monkeypatch=monkeypatch).reward_key == "correctness"
+
+
+@pytest.mark.parametrize("tagging", [False, True])
+def test_the_conversion_tags_the_datums_when_the_request_asks(tmp_path, monkeypatch, tagging):
+    """A protocol 3 request (a credit estimator that reads agents) has its rollout's datums tagged; protocol 2's not."""
+
+    seen: dict = {}
+
+    def convert(**kwargs):
+        seen.update(kwargs)
+        return _result(num_datums=1, stats_datums=1)
+
+    async def rollout_fn(_task, _config):
+        return {"trajectories": {"root": {"steps": [{}]}}}
+
+    monkeypatch.setattr(run_module, "get_train_data_for_trajectory_collection", convert)
+    request = _request(tmp_path)
+    if tagging:
+        request = PolicyRolloutWorkerRequest.tagging(request)
+    response = _run(request, rollout_fn)
+    assert response.status == "completed" and seen["tag_datums"] is tagging
+    assert response.protocol_version == PROTOCOL_VERSION  # the response is protocol 2's either way

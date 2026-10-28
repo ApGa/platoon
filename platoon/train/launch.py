@@ -31,6 +31,7 @@ from platoon.train.auto import (
 )
 from platoon.train.components import EnvironmentConfig
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, evaluates, training_problems
+from platoon.train.credit import registry as credit_registry
 from platoon.train.exclusion import TaskExclusion, record_exclusions
 from platoon.train.identity import check_run_identity, check_training_run, run_identity
 from platoon.train.labels import check_labels, label_column
@@ -210,7 +211,8 @@ def _record_run(
 class _Components:
     """What the run's environments give training and evaluation to roll out with (the Auto factories of
     :mod:`platoon.train.auto`): each split's rollout function and task loader, the reward processor, the workflow
-    class, and the arguments the environment gives each split's workflow."""
+    class, the arguments the environment gives each split's workflow, and the credit estimator each entry that sets one
+    chooses, resolved (:func:`~platoon.train.credit.registry.choose_credit`)."""
 
     rollout_fn: Any
     eval_rollout_fn: Any
@@ -220,11 +222,12 @@ class _Components:
     workflow_cls: Any
     workflow_kwargs: dict[str, Any]
     eval_workflow_kwargs: dict[str, Any]
+    credit: dict[str, credit_registry.CreditChoice]
 
 
 def _build_components(config: PlatoonTinkerRLTrainerConfig, environment: EnvironmentConfig) -> _Components:
-    """The run's components (:class:`_Components`); a workflow class that does not apply an entry's own settings stops
-    the run, before the trainer is built."""
+    """The run's components (:class:`_Components`); a workflow class that does not apply an entry's own settings, or
+    an entry's credit estimator, stops the run, before the trainer is built."""
 
     components = _Components(
         rollout_fn=AutoRollout.from_config(config, "train"),
@@ -235,9 +238,14 @@ def _build_components(config: PlatoonTinkerRLTrainerConfig, environment: Environ
         workflow_cls=AutoWorkflow.from_config(config, default=GroupRolloutWorkflow),
         workflow_kwargs=environment.workflow_kwargs,
         eval_workflow_kwargs=environment.eval_workflow_kwargs,
+        credit=credit_registry.choose_credit(config, check=False),  # checked as the config loaded
     )
-    # A workflow class that does not apply an entry's own settings would ignore them without a word (exit 78).
-    if problems := entry_settings.workflow_problems(config.environments, components.workflow_cls, environment.workflow):
+    # A workflow class that does not apply an entry's own settings, or its credit estimator, would ignore them without
+    # a word (exit 78).
+    workflow_cls, reference = components.workflow_cls, environment.workflow
+    problems = entry_settings.workflow_problems(config.environments, workflow_cls, reference)
+    problems += credit_registry.workflow_problems(components.credit, workflow_cls, reference)
+    if problems:
         raise ConfigError(problems)
     return components
 
@@ -253,14 +261,17 @@ def _build_workflows(
     """The training and the evaluation workflow, of the run's workflow class, each built from its phase's
     :class:`~platoon.train.workflow.protocol.WorkflowSetup` (:func:`_workflow_setup`, :func:`_built`): each rolls out
     its split's tasks on the policy (``model_info``), into the run directory; under entries with settings of their
-    own, each group runs with its entry's; and a workflow whose rollout workers fork from a fork server gets what that
-    server imports and builds ahead of them (:func:`set_worker_preload`, over the training tasks and
-    ``eval_dataset``)."""
+    own, each group runs with its entry's; the training workflow credits the groups of each entry that sets a credit
+    estimator with it, built here (the evaluation's never does); and a workflow whose rollout workers fork from a fork
+    server gets what that server imports and builds ahead of them (:func:`set_worker_preload`, over the training tasks
+    and ``eval_dataset``)."""
 
     workflow_cls = components.workflow_cls
     group_kwargs = {**worker_package_kwargs(workflow_cls, config), **label_kwargs(workflow_cls, config)}
+    entry_credit = credit_registry.build_entry_credit(components.credit, settings)
     setups = [
-        _workflow_setup(phase, config, components, model_info, settings, group_kwargs) for phase in ("train", "eval")
+        _workflow_setup(phase, config, components, model_info, settings, group_kwargs, entry_credit)
+        for phase in ("train", "eval")
     ]
     train_workflow = _built(workflow_cls, setups[0])
     eval_workflow = _built(workflow_cls, setups[1])
@@ -280,18 +291,22 @@ def _workflow_setup(
     model_info: ModelInfo,
     settings: dict[str, entry_settings.EntrySettings],
     group_kwargs: dict[str, Any],
+    entry_credit: dict[str, Any] | None = None,
 ) -> WorkflowSetup:
     """What ``phase``'s workflow is built with: the phase's rollout function, task loader and settings (``train`` or
-    ``eval``), each entry's own when an entry sets any, the run's one policy (``model_info``), the run directory, the
-    phase's stats scope and ``filter_errors`` (an environment's workflow arguments may set either), the reward
-    processor, the environments' packages and the run's label column for a workflow that runs rollout workers
-    (``group_kwargs``), and the environment's other workflow arguments."""
+    ``eval``), each entry's own when an entry sets any or, in training, a credit estimator (``entry_credit``, which
+    only training gets), the run's one policy (``model_info``), the run directory, the phase's stats scope and
+    ``filter_errors`` (an environment's workflow arguments may set either), the reward processor, the environments'
+    packages and the run's label column for a workflow that runs rollout workers (``group_kwargs``), and the
+    environment's other workflow arguments."""
 
     training = phase == "train"
     section = config.train if training else config.eval
     options = {**group_kwargs, **(components.workflow_kwargs if training else components.eval_workflow_kwargs)}
+    entry_credit = (entry_credit or {}) if training else {}
     entry_configs = None
-    if entry_settings.sets_settings(config.environments):  # each group runs with its entry's settings
+    # Each group runs with its entry's settings, which name its entry, whose estimator credits it.
+    if entry_settings.sets_settings(config.environments) or entry_credit:
         if training:
             entry_configs = {label: own.train for label, own in settings.items()}
         else:
@@ -311,6 +326,7 @@ def _workflow_setup(
         packages=options.pop("packages", None),
         label_by=options.pop("label_by", None),
         options=options,
+        entry_credit=entry_credit,
     )
 
 

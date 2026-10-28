@@ -6,6 +6,7 @@
 - ``start_limit``: limits the rollouts starting at once;
 - ``requests``: builds a member's worker request;
 - ``output``: the group's output and its members';
+- ``crediting``: a group's credit under its entry's credit estimator;
 - ``telemetry``: the rollout workers' telemetry;
 - ``settings``: typed reads of a group's settings (``GroupSettings``);
 - ``protocol``: what the trainer needs of a workflow (``RolloutWorkflow``).

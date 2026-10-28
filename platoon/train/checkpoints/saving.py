@@ -19,6 +19,7 @@ import tinker
 
 from platoon.train.checkpoints.dispatch_state import save_state
 from platoon.train.checkpoints.pruning import RECOVERY_CHECKPOINT_PREFIX
+from platoon.train.credit.runtime import CREDIT_KEY, credit_states
 from platoon.train.policy.checkpoints import Waiter, sampler_from
 from platoon.train.task_stats import DISPATCH_KEY
 from platoon.train.trainer.signals import Watchdog
@@ -154,9 +155,12 @@ async def _checkpoint_state(source: "RolloutSource", checkpoint: str, loop_state
     taken at the same point, before anything else runs; the dispatcher's files are written in a thread, since the
     groups they keep can take seconds to encode.  Each record is left out when it was not written: the statistics are
     not kept or stopped, or a file could not be written.  Under a group admission rule, the row also records where the
-    order stands (``next_position``), which a resume that cannot read the dispatcher's state goes on from.  The run's
-    checkpoints call it with an empty ``loop_state``: they hold the counters themselves
-    (:class:`~platoon.train.checkpoints.participants.RunCheckpoints`)."""
+    order stands (``next_position``), which a resume that cannot read the dispatcher's state goes on from.  When the
+    workflow's credit estimators have state, the row records it too (``credit``), taken with the groups the dispatcher
+    keeps (:func:`~platoon.train.credit.runtime.credit_states`), but only beside a dispatcher's record that kept them
+    (their file, when there are any): a resume that rolls them out again starts the estimators afresh, rather than
+    settle their groups twice.  The run's checkpoints call it with an empty ``loop_state``: they hold the counters
+    themselves (:class:`~platoon.train.checkpoints.participants.RunCheckpoints`)."""
 
     loop_state = dict(loop_state)
     recorder = source.recorder
@@ -164,9 +168,11 @@ async def _checkpoint_state(source: "RolloutSource", checkpoint: str, loop_state
         loop_state["tasks"] = record
     dispatcher = source.dispatcher
     if dispatcher is not None:
-        state, kept = dispatcher.state(), dispatcher.kept()
+        state, kept, credit = dispatcher.state(), dispatcher.kept(), credit_states(source.workflow)
         if source.admissions is not None:  # under a rule: where the order stands, in the row too
             loop_state[ORDER_POSITION_KEY] = state["next_position"]
         if (record := await asyncio.to_thread(save_state, source.run_dir, checkpoint, state, kept)) is not None:
             loop_state[DISPATCH_KEY] = record
+            if credit is not None and (not kept or "kept" in record):  # the groups the state settled are kept
+                loop_state[CREDIT_KEY] = credit
     return loop_state

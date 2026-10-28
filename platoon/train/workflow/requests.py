@@ -21,6 +21,7 @@ from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
+    PolicyRolloutWorkerRequest,
     RolloutWorkerRequest,
     ipc_dir,
 )
@@ -57,7 +58,8 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
     parent-side, which also removes the shared-mutable-``Task`` aliasing some plugin datasets have.  It applies
     ``max_steps``, snapshots the checkpoint version and joins ``output_dir`` with it.  A training draw's provenance in
     ``data`` (under ``DRAW_KEY``, when the trainer asks for it) goes into the rollout config's ``extra``, where the
-    episode reads it (``ctx.draw``)."""
+    episode reads it (``ctx.draw``).  For a group whose entry's credit estimator reads agents, the request asks for
+    each datum's tags (protocol 3, ``PolicyRolloutWorkerRequest``)."""
 
     task_id = data["task_id"]
     task = workflow.get_task_fn(task_id)
@@ -86,7 +88,7 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
     settings = GroupSettings(workflow.config)
     depth_level_weighting = workflow.config.depth_level_weighting
     depth_discount = settings.depth_level_discount_gamma is not None
-    return RolloutWorkerRequest(
+    request = RolloutWorkerRequest(
         protocol_version=PROTOCOL_VERSION,
         request_id=request_id,
         task_id=task_id,
@@ -114,6 +116,9 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
         sandbox_labels=sandbox_cleanup.labels(),
         signal_first_call=held_slot() is not None,
     )
+    if workflow.entry_credit and getattr(workflow._entry_estimator(), "needs_agents", False):
+        return PolicyRolloutWorkerRequest.tagging(request)
+    return request
 
 
 def _rollout_budget_seconds(

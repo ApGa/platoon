@@ -117,7 +117,8 @@ platoon train my_run.yaml
 [renderers and tool-call parsers](extending/renderers.md),
 [hooks, telemetry and metrics](extending/hooks-and-metrics.md) and, experimental,
 [task samplers](extending/task-samplers.md), [group admission rules](extending/group-admission.md),
-[rollout leases](extending/rollout-leases.md) and [step hooks](extending/step-hooks.md).
+[rollout leases](extending/rollout-leases.md), [step hooks](extending/step-hooks.md) and
+[credit estimators](extending/credit-estimators.md).
 
 **Reference**: [CLI](reference/cli.md), [config](reference/config.md), [Python API](reference/api.md),
 [experimental API](reference/experimental.md).
