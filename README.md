@@ -2,6 +2,9 @@
 
 Build and train systems of agents.
 
+_**Note:** This is a snapshot of the code used in the RAO paper. For the latest version of the codebase
+with many enhancements and new features, please refer to the `main` branch._
+
 ## Install
 
 Use `uv` for the main development workflow:
