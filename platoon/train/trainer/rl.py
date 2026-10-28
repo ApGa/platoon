@@ -52,7 +52,7 @@ from platoon.train.evaluation.record import EVALUATIONS_NAME, completed_evaluati
 from platoon.train.policy import service
 from platoon.train.policy.policy import Policy, adam_params
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, policy_specs
+from platoon.train.policy.spec import MAIN, agent_bindings, policy_specs
 from platoon.train.sampler_runtime import SamplerSet, TaskSampling
 from platoon.train.startup import RolloutStartup
 from platoon.train.step import publish
@@ -133,7 +133,8 @@ class PlatoonTinkerRLTrainer(TrainerBase):
     # How the run draws its training tasks through task samplers, as platoon train hands it the run's
     # (AutoDataset.training); None: each position of the dataloader's order, as it is.
     train_sampling: TaskSampling | None = None
-    # The run's policies (platoon.train.policy): main, as train: declares it, with its model gateway.
+    # The run's policies (platoon.train.policy): main, as train: declares it, and the others policies: declares, each
+    # with its model gateway.
     policies: PolicySet
     # The start that train() runs (TrainerRun), which train() records before it begins, so that the steps save through
     # its checkpoints whatever a subclass's hooks do; None before the first.  As it runs: the rollouts' startup and the
@@ -160,9 +161,14 @@ class PlatoonTinkerRLTrainer(TrainerBase):
         self.train_sampling = train_sampling
         self.batch_transforms = self._build_batch_transforms(batch_transforms)
         # The run's policies as the config declares them now (a later change of the config does not reach them), and
-        # main's model gateway, this process's default, on the service train() opens main's training client on; or
-        # the policies given, such as a test's over a fake service.
-        self.policies = policies if policies is not None else PolicySet.build(policy_specs(self.config))
+        # the model gateway of the policy its agents sample by default, this process's default (main's, on the
+        # service train() opens main's training client on, unless agents: says otherwise); or the policies given,
+        # such as a test's over a fake service.
+        self.policies = (
+            policies
+            if policies is not None
+            else PolicySet.build(policy_specs(self.config), agent_bindings(self.config))
+        )
 
     @classmethod
     def needs(cls, config: Any, options: Any) -> TrainerNeeds:

@@ -19,6 +19,8 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 - [`CheckpointConfig`](#checkpointconfig)
 - [`StatsConfig`](#statsconfig)
 - [`WatchdogConfig`](#watchdogconfig)
+- [`PolicyConfig`](#policyconfig)
+- [`AgentsConfig`](#agentsconfig)
 - [`AdamParams`](#adamparams)
 - [`WorkflowConfig`](#workflowconfig)
 - [`RefillConfig`](#refillconfig)
@@ -27,6 +29,7 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 - [`EvalOverrides`](#evaloverrides)
 - [`AgentTreeConfig`](#agenttreeconfig)
 - [`WandBConfig`](#wandbconfig)
+- [`AgentRoleConfig`](#agentroleconfig)
 - [`RolloutConfig`](#rolloutconfig)
 - [`StragglerPolicy`](#stragglerpolicy)
 - [`EntryRolloutSettings`](#entryrolloutsettings)
@@ -60,6 +63,8 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 | `checkpoint` | [CheckpointConfig](#checkpointconfig) | `CheckpointConfig()` |  |
 | `stats` | [StatsConfig](#statsconfig) | `StatsConfig()` |  |
 | `watchdog` | [WatchdogConfig](#watchdogconfig) | `WatchdogConfig()` |  |
+| `policies` | dict[str, [PolicyConfig](#policyconfig)] | `{}` | The run's other policies, by id (a lowercase name such as `teacher`), besides main, which train: declares: frozen ones its agents sample or its credit estimators score with (experimental). |
+| `agents` | [AgentsConfig](#agentsconfig) | `AgentsConfig()` | Which policy each agent samples, by role (experimental); without it, every agent samples main. |
 
 <a id="trainconfig"></a>
 
@@ -241,6 +246,47 @@ The `watchdog:` section: a timer that ends a training process that stops making 
 | `timeout_seconds` | float | `600` | Seconds without progress after which the watchdog ends the process. |
 | `exit_code` | int | `2` | Exit code of a process the watchdog ends. |
 | `max_restarts` | int | `0` | Restarts after a failure (0: none). Above 0, `platoon train` trains in a child process and starts it again after any exit but success (0), a configuration error (78) and an interrupt, at most this many times, each start resuming from the newest checkpoint once the run's leftover rollout workers and sandboxes are reaped. It stops after three starts in a row that saved no new checkpoint. |
+
+<a id="policyconfig"></a>
+
+## PolicyConfig
+
+`platoon.train.config_defs.PolicyConfig`
+
+In a training config: `policies.<key>`.
+
+A `policies:` entry: a model the run samples or scores with besides `main`, under `train:`'s names for the
+same settings (experimental).  This release trains one policy, `main`: every other one is frozen
+(`trainable: false`), sampled by the agents `agents:` binds to it or scoring for a credit estimator (a
+teacher), and never stepped, saved or pruned.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `model_name` | str | required | Hugging Face model name of the base model. |
+| `renderer_name` | str | required | Renderer that turns chat messages into the model's tokens, as train.renderer_name. |
+| `renderer_kwargs` | dict | `{}` | Renderer attribute overrides, as train.renderer_kwargs. |
+| `context_window_length` | int \| None | `null` | Its context window, as train.context_window_length. |
+| `sample_timeout_seconds` | float \| None | `null` | The bound on one of its sampling calls, as train.sample_timeout_seconds. |
+| `tinker_base_url` | str \| None | `null` | Its Tinker service (None: the run's tinker_base_url, else TINKER_BASE_URL, else hosted Tinker). It opens a session of its own there, also on the run's service. |
+| `trainable` | bool | `true` | Whether the run trains it. This release trains main only, so every other policy says false: a frozen policy. A trained policy's own adapter rank, optimizer and loss arrive with lockstep multi-policy training. |
+| `load_checkpoint_path` | str \| None | `null` | The sampler a frozen policy serves (a `tinker://` sampler path; None: its base model). |
+
+<a id="agentsconfig"></a>
+
+## AgentsConfig
+
+`platoon.train.config_defs.AgentsConfig`
+
+In a training config: `agents`.
+
+`agents:`: which policy each agent samples, for its whole life (experimental).  The root agent samples
+`policy`; an agent its harness or program opens with a role samples that role's policy, and `policy` when
+`roles` names none for it.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `policy` | str \| None | `null` | The root agent's policy, and that of every role roles leaves out (None: main). |
+| `roles` | dict[str, [AgentRoleConfig](#agentroleconfig)] | `{}` | The policy of the agents of each role, by role (the role a harness mints a subagent with, such as `judge`). |
 
 <a id="adamparams"></a>
 
@@ -432,6 +478,20 @@ Configuration for Weights & Biases logging.
 | `api_key` | str \| None | `null` | API key (None: `WANDB_API_KEY`). |
 | `base_url` | str \| None | `null` | URL of a self-hosted W&B server. |
 | `resume_run_id` | str \| None | `null` | W&B run id to resume. |
+
+<a id="agentroleconfig"></a>
+
+## AgentRoleConfig
+
+`platoon.train.config_defs.AgentRoleConfig`
+
+In a training config: `agents.roles.<key>`.
+
+`agents.roles.<role>`: the policy the agents of that role sample.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `policy` | str | required | A policy of the run: main, or a policies: entry. |
 
 <a id="rolloutconfig"></a>
 
@@ -784,6 +844,7 @@ long, and how each conversation is cut and which of its turns train.
 |---|---|---|
 | `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards (the group mean, or with the entry's `leave_one_out_baseline` the leave-one-out mean), value for value. An entry without `credit` gets the same credit from the workflow itself. | none |
 | `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, `policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the subagents'. Reads agents: the rollout workers tag each row with its agent. | [below](#keyed-options) |
+| `reverse_kl` | On-policy distillation: a frozen teacher (a `policies:` entry with `trainable: false`) scores every token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share the student's tokenizer. | [below](#reverse-kl-options) |
 
 <a id="keyed-options"></a>
 
@@ -795,3 +856,15 @@ long, and how each conversation is cut and which of its turns train.
 |---|---|---|---|
 | `key` | list[str] | `["task", "policy", "role"]` | What an agent's baseline is keyed by: one or more of task, policy, role and depth, each once. A group holds one task, so task alone keys every agent of the group together. |
 | `leave_one_out` | bool | `false` | Center each agent on the mean of the others of its key, not of all of them (an agent alone in its key gets 0). |
+
+<a id="reverse-kl-options"></a>
+
+### `reverse_kl`'s options
+
+`platoon.train.credit.reverse_kl.ReverseKLOptions`: the keys of `credit_options` under `credit: reverse_kl`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `teacher` | str | required | The frozen policy that scores the student's tokens: the id of a policies: entry with trainable: false. |
+| `kl_coef` | float | `1.0` | The weight of the reverse KL term in each token's advantage. |
+| `reward_coef` | float | `0.0` | The weight of the centered reward term (0: distillation alone). |

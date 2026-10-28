@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,10 +36,11 @@ from platoon.train.credit import registry as credit_registry
 from platoon.train.exclusion import TaskExclusion, record_exclusions
 from platoon.train.identity import check_run_identity, check_training_run, run_identity
 from platoon.train.labels import check_labels, label_column
-from platoon.train.policy.spec import MAIN, policy_specs
+from platoon.train.policy import spec as policy_spec
+from platoon.train.policy.policy import Policy
+from platoon.train.policy.set import PolicySet
 from platoon.train.sampling import log_sampling_plan
 from platoon.train.startup import worker_preload
-from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.trainer import registry
 from platoon.train.trainer.api import TrainerSetup
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
@@ -65,7 +67,7 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
 
     The steps, in that order: :func:`_load`, :func:`_check_environments`, :func:`_list_tasks`,
     :func:`_check_listed`, :func:`_record_run` and :func:`_build_components` before the trainer is built, then
-    :func:`_build_workflows` in the trainer's context, on the trainer's policy, and the trainer trains.  A trainer
+    :func:`_build_workflows` in the trainer's context, on the trainer's policies, and the trainer trains.  A trainer
     that rolls nothing out trains after :func:`_load` (:func:`_train_without_rollouts`).
     """
 
@@ -88,7 +90,7 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
     )
     async with trainer:
         train_workflow, eval_workflow = _build_workflows(
-            config, components, trainer.model_info, settings, training, eval_dataset
+            config, components, trainer.policies, settings, training, eval_dataset
         )
         await trainer.train(train_workflow=train_workflow, eval_workflow=eval_workflow)
 
@@ -119,7 +121,9 @@ async def _train_without_rollouts(config: PlatoonTinkerRLTrainerConfig) -> None:
     run_dir = Path(config.log_path, config.stats.experiment_name, config.stats.trial_name)
     check_run_identity(run_dir, run_identity(config, ()), {})
     update_run_lock(run_dir, {"trainer": registry.lock_record(config)})
-    setup = TrainerSetup(config=config, policy_specs=policy_specs(config), options=registry.options_of(config))
+    setup = TrainerSetup(
+        config=config, policy_specs=policy_spec.policy_specs(config), options=registry.options_of(config)
+    )
     trainer = registry.trainer_class(config).from_setup(setup)
     async with trainer:
         await trainer.run()
@@ -227,7 +231,8 @@ class _Components:
 
 def _build_components(config: PlatoonTinkerRLTrainerConfig, environment: EnvironmentConfig) -> _Components:
     """The run's components (:class:`_Components`); a workflow class that does not apply an entry's own settings, or
-    an entry's credit estimator, stops the run, before the trainer is built."""
+    an entry's credit estimator, or that cannot bind the several policies the agents sample, stops the run, before
+    the trainer is built."""
 
     components = _Components(
         rollout_fn=AutoRollout.from_config(config, "train"),
@@ -245,32 +250,37 @@ def _build_components(config: PlatoonTinkerRLTrainerConfig, environment: Environ
     workflow_cls, reference = components.workflow_cls, environment.workflow
     problems = entry_settings.workflow_problems(config.environments, workflow_cls, reference)
     problems += credit_registry.workflow_problems(components.credit, workflow_cls, reference)
+    problems += policy_spec.workflow_problems(config, workflow_cls, reference)
     if problems:
         raise ConfigError(problems)
+    for line in policy_spec.policy_warnings(config):
+        logger.warning("%s", line)
     return components
 
 
 def _build_workflows(
     config: PlatoonTinkerRLTrainerConfig,
     components: _Components,
-    model_info: ModelInfo,
+    policies: PolicySet,
     settings: dict[str, entry_settings.EntrySettings],
     training: TrainingTasks,
     eval_dataset: Any,
 ) -> tuple[Any, Any]:
     """The training and the evaluation workflow, of the run's workflow class, each built from its phase's
     :class:`~platoon.train.workflow.protocol.WorkflowSetup` (:func:`_workflow_setup`, :func:`_built`): each rolls out
-    its split's tasks on the policy (``model_info``), into the run directory; under entries with settings of their
-    own, each group runs with its entry's; the training workflow credits the groups of each entry that sets a credit
-    estimator with it, built here (the evaluation's never does); and a workflow whose rollout workers fork from a fork
-    server gets what that server imports and builds ahead of them (:func:`set_worker_preload`, over the training tasks
-    and ``eval_dataset``)."""
+    its split's tasks on the policies its agents sample (``policies``), into the run directory; under entries with
+    settings of their own, each group runs with its entry's; the training workflow credits the groups of each entry
+    that sets a credit estimator with it, built here on the run's policies (the evaluation's never does, so an
+    evaluation never calls a teacher); and a workflow whose rollout workers fork from a fork server gets what that
+    server imports and builds ahead of them (:func:`set_worker_preload`, over the training tasks and
+    ``eval_dataset``)."""
 
     workflow_cls = components.workflow_cls
     group_kwargs = {**worker_package_kwargs(workflow_cls, config), **label_kwargs(workflow_cls, config)}
-    entry_credit = credit_registry.build_entry_credit(components.credit, settings)
+    views = credit_registry.policy_views(policies) if components.credit else {}  # what estimators read of each
+    entry_credit = credit_registry.build_entry_credit(components.credit, settings, views)
     setups = [
-        _workflow_setup(phase, config, components, model_info, settings, group_kwargs, entry_credit)
+        _workflow_setup(phase, config, components, policies, settings, group_kwargs, entry_credit, views)
         for phase in ("train", "eval")
     ]
     train_workflow = _built(workflow_cls, setups[0])
@@ -288,20 +298,24 @@ def _workflow_setup(
     phase: Phase,
     config: PlatoonTinkerRLTrainerConfig,
     components: _Components,
-    model_info: ModelInfo,
+    policies: PolicySet,
     settings: dict[str, entry_settings.EntrySettings],
     group_kwargs: dict[str, Any],
     entry_credit: dict[str, Any] | None = None,
+    policy_views: Mapping[str, Any] | None = None,
 ) -> WorkflowSetup:
     """What ``phase``'s workflow is built with: the phase's rollout function, task loader and settings (``train`` or
     ``eval``), each entry's own when an entry sets any or, in training, a credit estimator (``entry_credit``, which
-    only training gets), the run's one policy (``model_info``), the run directory, the phase's stats scope and
-    ``filter_errors`` (an environment's workflow arguments may set either), the reward processor, the environments'
-    packages and the run's label column for a workflow that runs rollout workers (``group_kwargs``), and the
-    environment's other workflow arguments."""
+    only training gets, with the policies as the estimators read them, ``policy_views``), the policies the agents
+    sample (``policies``: each one's model info, the agents' default first, and when there are several, which agent
+    samples which and the policies the run trains), the run directory, the phase's stats scope and ``filter_errors``
+    (an environment's workflow arguments may set either), the reward processor, the environments' packages and the
+    run's label column for a workflow that runs rollout workers (``group_kwargs``), and the environment's other
+    workflow arguments."""
 
     training = phase == "train"
     section = config.train if training else config.eval
+    sampled = policies.sampled()
     options = {**group_kwargs, **(components.workflow_kwargs if training else components.eval_workflow_kwargs)}
     entry_credit = (entry_credit or {}) if training else {}
     entry_configs = None
@@ -317,7 +331,7 @@ def _workflow_setup(
         get_task_fn=components.get_task_fn if training else components.eval_get_task_fn,
         config=section.workflow_config,
         entry_configs=entry_configs,
-        policies={MAIN: model_info},
+        policies={policy.id: policy.info for policy in sampled},
         # The run directory, the trainer's run_log_path.
         log_path=os.path.join(config.log_path, config.stats.experiment_name, config.stats.trial_name),
         stats_scope=options.pop("stats_scope", phase),
@@ -327,7 +341,18 @@ def _workflow_setup(
         label_by=options.pop("label_by", None),
         options=options,
         entry_credit=entry_credit,
+        policy_views=dict(policy_views or {}) if training else {},
+        **_several_policies(policies, sampled),
     )
+
+
+def _several_policies(policies: PolicySet, sampled: list[Policy]) -> dict[str, Any]:
+    """What a workflow whose agents sample several policies is also built with: which agent samples which, and the
+    policies the run trains; nothing when they sample one."""
+
+    if len(sampled) < 2:
+        return {}
+    return {"agents": policies.agents, "trained": frozenset(policy.id for policy in policies.trainable())}
 
 
 def _built(workflow_cls: Any, setup: WorkflowSetup) -> Any:

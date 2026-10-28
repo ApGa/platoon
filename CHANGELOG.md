@@ -374,6 +374,51 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   [`examples/credit-by-role`](examples/credit-by-role/README.md) gives each role of a delegating rollout a baseline of
   its own). A run whose entries set no `credit` runs as before, request for request.
 
+- **Several policies in one run: frozen policies that agents sample or a credit estimator scores with
+  (experimental).** `policies:` declares the run's other policies under `train:`'s names (`model_name`,
+  `renderer_name`, `renderer_kwargs`, `context_window_length`, `sample_timeout_seconds`, `tinker_base_url`,
+  `load_checkpoint_path`) and `trainable`; `train:` still declares `main`, the policy the run trains, as before. This
+  release trains `main` only: every other policy says `trainable: false` and is frozen, sampled or scoring and never
+  stepped, saved or pruned; it opens only the sampling client it needs, of its base model or of the `tinker://`
+  sampler its `load_checkpoint_path` names. A policy without `tinker_base_url` uses the run's service; each policy
+  opens a Tinker session of its own, also on a shared service, so that a fatal error on one policy's session never
+  ends another's, and an error opening a policy other than `main` names it and its service. `agents:` binds agent
+  roles to policies (`agents.roles.<role>.policy`): the root agent samples `main`, and an agent opened with a role
+  (`ctx.agents.spawn(role=...)`, `POST /v1/platoon/agents`, a program's judge) samples its role's policy for its whole
+  life, through the gateway's runtime of that policy, with its own renderer and tokenizer
+  (`ModelGateway.serve_policies`); each of its interactions names that policy (`TinkerLLMInteraction.policy`). A
+  frozen policy's agents make no rows, but their rewards and tags reach the credit, each row is stamped with its own
+  policy's version, and rollout workers follow one binding file per sampled policy (`model_binding.<id>.pkl`, worker
+  protocol 3), which the trainer publishes before the first rollout and each evaluation (the workflow capability
+  `binds_policies`, which `GroupRolloutWorkflow` declares). `identity.json` records each policy's model, renderer and
+  training, a frozen one's sampler, and each role's policy, never a URL, and a resume that changes them stops with
+  exit code 78, naming each change. Loading, and `platoon config validate`, refuse an id that is no lowercase name,
+  `policies.main`, a second trainable policy (training several arrives with lockstep multi-policy training, RFC 0021's
+  milestone B4), a policy's `sample_timeout_seconds` that is not a positive number (as `train:`'s), a role bound to
+  an undeclared policy, `agents.policy` other than `main`, roles bound to several policies beside a workflow that
+  binds one, and either key under `trainer: sft`, which rolls nothing out, and warn of a frozen policy nothing uses
+  ([Sample several policies](docs/how-to/train-and-eval.md#sample-several-policies-experimental)).
+  `platoon.experimental` exports `AgentBindings`, and `TrainerSetup` takes `agents`. A run without `policies:` or
+  `agents:` runs as before, request for request.
+- **On-policy distillation from a frozen teacher (experimental): `credit: reverse_kl`.** For each training group, a
+  frozen teacher (`credit_options.teacher`, a policy of `policies:`) scores every token the student sampled
+  (`compute_logprobs`), and each action token's advantage is `-kl_coef * (student logprob - teacher logprob)`, plus
+  `reward_coef` times the row's reward centered on its member's baseline (0 by default); with `reward_coef: 1` this is
+  tinker-cookbook's on-policy distillation advantage, without its discounted KL. The teacher's calls run in the
+  trainer after the group's rollouts returned their permits, at most 32 in flight, each bounded by the teacher's
+  `sample_timeout_seconds`; one that fails or runs out of time, or a response of the wrong length or without a
+  target token's logprob, fails its group alone (verdict `failed`, counted under `credit/failures`), which trains
+  nothing, and the run goes on. An evaluation never calls the teacher, and the step logs `credit/reverse_kl/avg`.
+  Loading, and `platoon config validate`, refuse a teacher that is no frozen policy of `policies:`, and one whose
+  tokenizer differs from the student's (exit 78, before any Tinker session opens; when a tokenizer cannot be loaded
+  then, `platoon train` compares the ones it loaded for the two policies as it builds the estimator). A credit
+  estimator reads the run's policies from `CreditSetup.policy_views` and `CreditGroup.policies` (`PolicyView.score`:
+  a policy's logprobs of each datum's target tokens, which raises `ScoringFailed` to fail the group; its `tokenizer`
+  and `version`) ([Distill a frozen
+  teacher](docs/how-to/train-and-eval.md#distill-a-frozen-teacher-experimental);
+  [`examples/on-policy-distillation`](examples/on-policy-distillation/README.md) distills Qwen3-32B into the
+  quickstart's Qwen3-4B, the teacher on the student's service and on its own).
+
 ### Changes
 
 - A `process` sandbox whose working directory is `/` runs in its own `/tmp`, since no path maps to the host's root; the

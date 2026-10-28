@@ -257,10 +257,11 @@ class GatewayServer:
 
     async def _models(self, request: web.Request) -> web.Response:
         try:
-            self._agent(request)
+            agent = self._agent(request)
         except GatewayError as exc:
             return _error_response(self._chat, exc)
-        model = {"id": self.gateway.model_name, "object": "model", "created": 0, "owned_by": "platoon"}
+        model_name = self.gateway.runtime(agent.policy).model_name  # the model of the agent's policy
+        model = {"id": model_name, "object": "model", "created": 0, "owned_by": "platoon"}
         return web.json_response({"object": "list", "data": [model]})
 
     async def _create_agent(self, request: web.Request) -> web.Response:
@@ -289,7 +290,8 @@ class GatewayServer:
                 relay = await self.gateway.count_tokens(agent, body, request.query_string, request.headers)
                 return _relay_response(relay)
             chat_request = self._messages.chat_request(body)
-            input_tokens = self.gateway.render(chat_request.messages, chat_request.render).length
+            runtime = self.gateway.runtime(agent.policy)  # rendered as the agent's policy renders it
+            input_tokens = runtime.render(chat_request.messages, chat_request.render).length
         except web.HTTPException:
             raise
         except Exception as exc:
@@ -323,7 +325,7 @@ class GatewayServer:
         if isinstance(self.gateway, HostedGateway):
             return await self._forward(request, agent, dialect, body, kind=kind)
         try:
-            call = self.gateway.prepare(
+            call = self.gateway.runtime(agent.policy).prepare(
                 dialect.chat_request(body), defaults=agent.sampling_defaults, kind=agent.sampling_kind(kind)
             )
         except ContextWindowExceededError as exc:

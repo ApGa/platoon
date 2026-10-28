@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 if TYPE_CHECKING:
     import tinker
 
+    from platoon.train.policy.spec import AgentBindings
     from platoon.train.task_stats import MemberResult
     from platoon.utils.rollout_stats import RolloutStats
     from platoon.utils.rollout_workload import RolloutWorkload
@@ -41,7 +42,9 @@ class RolloutWorkflow(Protocol):
     The optional members, which the trainer uses when a workflow has them:
 
     - ``publish_model_binding(sampling_client, version)``: hand the sampling client of a new policy version to the
-      workflow's rollout workers (training does after each version it publishes, an evaluation before it starts);
+      workflow's rollout workers (training does after each version it publishes, an evaluation before it starts); a
+      workflow that binds several policies (``binds_policies``) also takes ``policy=``, another policy its agents
+      sample, whose binding is a file of its own;
     - ``warm_up()``: start, as training starts, what its rollouts need before the first one (awaited);
     - ``rollout_isolation``: ``"process"`` when its rollouts run in rollout workers, which read the published client;
     - ``start_limit``: the run's limit on rollouts starting at once, which the trainer sets on a workflow that takes it
@@ -66,7 +69,7 @@ class RolloutWorkflow(Protocol):
 class WorkflowCapabilities:
     """What a workflow class can do beyond ``arun_episode``, which the trainer reads (:func:`capabilities_of`) instead
     of testing whether the class is a ``GroupRolloutWorkflow``.  A class declares them in a ``capabilities`` class
-    attribute, or as class flags of the same names; ``GroupRolloutWorkflow`` sets seven of them as flags."""
+    attribute, or as class flags of the same names; ``GroupRolloutWorkflow`` sets all eight as flags."""
 
     # It applies an environment entry's own settings to the entry's groups (``entry_configs``): loading refuses an
     # entry's settings beside a workflow that does not (platoon.train.entry_settings).
@@ -173,20 +176,35 @@ class WorkflowSetup:
     # Each environment entry's credit estimator, by entry, for the entries that set one (environments[].credit,
     # platoon.train.credit.api); always empty for the eval phase, whose groups train nothing.
     entry_credit: Mapping[str, Any] = field(default_factory=dict)
+    # The run's policies as the estimators read them, by id (platoon.train.credit.api.PolicyView), beside entry_credit;
+    # empty for the eval phase.
+    policy_views: Mapping[str, Any] = field(default_factory=dict)
+    # With more than one sampled policy: which policy each agent samples, whose default is the first of ``policies``,
+    # and the policies the run trains, whose agents alone make datums.  None and empty with one.
+    agents: "AgentBindings | None" = None
+    trained: frozenset[str] = frozenset()
 
 
 def _built_by_keywords(workflow_cls: Any, setup: WorkflowSetup) -> Any:
     """A workflow of ``workflow_cls`` built as ``platoon train`` always built one: with the keyword arguments of
     ``GroupRolloutWorkflow``'s constructor that ``setup`` stands for (:func:`_keywords`), each environment entry's
-    own settings as its ``entry_configs`` when an entry sets any, and the entries' credit estimators as its
-    ``entry_credit`` when an entry sets one.  ``GroupRolloutWorkflow.from_setup`` builds it so, as ``platoon train``
-    builds a class without ``from_setup``."""
+    own settings as its ``entry_configs`` when an entry sets any, the entries' credit estimators as its
+    ``entry_credit`` and the policies' views as its ``policy_views`` when an entry sets one, and, when its rollouts
+    sample more than one policy (``agents``), the model infos of those but the agents' default as its
+    ``sampled_policies``, with its ``agents`` and ``trained_policies``.  ``GroupRolloutWorkflow.from_setup`` builds it
+    so, as ``platoon train`` builds a class without ``from_setup``."""
 
     workflow = workflow_cls(**_keywords(setup))
     if setup.entry_configs is not None:
         workflow.entry_configs = dict(setup.entry_configs)
     if setup.entry_credit:
         workflow.entry_credit = dict(setup.entry_credit)
+        workflow.policy_views = dict(setup.policy_views)
+    if setup.agents is not None:
+        default = setup.agents.default  # the workflow's model_info
+        workflow.sampled_policies = {policy: info for policy, info in setup.policies.items() if policy != default}
+        workflow.agents = setup.agents
+        workflow.trained_policies = frozenset(setup.trained)
     return workflow
 
 

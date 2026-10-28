@@ -75,13 +75,20 @@ def test_set_advantages_takes_one_value_per_target_token_and_sets_the_action_tok
 def test_core_names_resolve_to_core_s_estimators():
     assert resolve_credit_estimator("group") is GroupCredit
     assert resolve_credit_estimator("keyed") is Keyed
+    assert resolve_credit_estimator("reverse_kl").__name__ == "ReverseKL"
     assert GroupCredit.needs_agents is False and Keyed.needs_agents is True
 
 
-@pytest.mark.parametrize("name", ["reverse_kl", "gae", "Reverse-KL"])
+@pytest.mark.parametrize("name", ["gae", "GAE"])
 def test_the_names_platoon_adds_are_reserved(name, registry):
     with pytest.raises(ExtensionError, match="reserved for one platoon will add"):
         resolve_credit_estimator(name)
+    with pytest.raises(ValueError, match="is core's"):
+        credit_estimator(name)
+
+
+@pytest.mark.parametrize("name", ["reverse_kl", "Reverse-KL"])
+def test_core_s_names_are_core_s_whatever_their_case(name, registry):
     with pytest.raises(ValueError, match="is core's"):
         credit_estimator(name)
 

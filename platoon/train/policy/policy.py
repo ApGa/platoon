@@ -1,17 +1,20 @@
 """One policy in the trainer process (:class:`Policy`): its spec, its state as training moves it on, and what each start
 does with it: open its training client at the start point, save it whole (a checkpoint) or for its sampler, and take a
-snapshot of its published sampler for inference outside the rollouts.
+snapshot of its published sampler for inference outside the rollouts; and what others read of it: its scores of other
+rows (a teacher's, :meth:`Policy.score`).
 
 Rollout workers never hold one: they sample the sampling client that the trainer publishes for them
 (:mod:`platoon.train.policy.binding`).
 """
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 import tinker
 from tinker_cookbook import checkpoint_utils
 
+from platoon.gateway.core import resolve_sample_timeout
 from platoon.train.policy import service
 from platoon.train.policy.checkpoints import Waiter, save_full_checkpoint, save_weights_only
 from platoon.train.policy.snapshot import PolicySnapshot
@@ -20,8 +23,13 @@ from platoon.train.tinker.key_refusal import key_refusals
 from platoon.train.tinker.proxy import ModelInfo
 
 if TYPE_CHECKING:
+    import torch
+
     from platoon.train.checkpoints.resume import PolicyStart
     from platoon.train.config_defs import AdamParams
+
+# How many of a policy's scoring calls (Policy.score) are in flight at once, over every group that it scores.
+SCORE_CONCURRENCY = 32
 
 
 class Policy:
@@ -29,24 +37,38 @@ class Policy:
     samples it and keeps its version), and what each start opens and moves on.  The training loops read and write the
     latter through their shared state, whose leader the policy is
     (:class:`~platoon.train.trainer.state.TrainLoopSharedState`), and a step updates it through its learner
-    (:class:`~platoon.train.policy.learner.Learner`)."""
+    (:class:`~platoon.train.policy.learner.Learner`).  A frozen policy (``spec.trainable`` False) opens nothing as a
+    start begins: it samples or scores with the sampling client it was built with, and is never stepped, saved or
+    pruned."""
 
     # Set as a start opens the policy: its Tinker service client (connect), the training client on that service, the
-    # sampling client of its newest weights (the launch save's, then each step's) and its optimizer's parameters.
+    # sampling client of its newest weights (the launch save's, then each step's) and its optimizer's parameters.  A
+    # frozen policy's sampling client is the one it was built with.
     service_client: tinker.ServiceClient
     training_client: tinker.TrainingClient
     sampling_client: tinker.SamplingClient
     optimizer_params: tinker.AdamParams
+    # The slots of its scoring calls in flight (SCORE_CONCURRENCY), made at its first score().
+    _scoring: asyncio.Semaphore | None = None
 
     def __init__(self, spec: PolicySpec, info: ModelInfo) -> None:
         self.spec = spec
         self.info = info
         # The optimizer steps the policy took over the run, its earlier starts' among them.
         self.optimizer_steps = 0
+        if not spec.trainable:
+            self.sampling_client = cast(tinker.SamplingClient, info.llm.sampling_client)
 
     @property
     def id(self) -> PolicyId:
         return self.spec.id
+
+    @property
+    def trainable(self) -> bool:
+        """Whether the run trains the policy; a frozen one is sampled or scores, and is never stepped, saved or
+        pruned."""
+
+        return self.spec.trainable
 
     @property
     def version(self) -> int:
@@ -127,7 +149,7 @@ class Policy:
     def snapshot(self) -> PolicySnapshot:
         """The policy's published sampler as it is now, at its version, with its renderer, tokenizer, model name,
         context window and sample timeout (:class:`~platoon.train.policy.snapshot.PolicySnapshot`), whose samples
-        are refused once the policy publishes again."""
+        are refused once the policy publishes again (a frozen policy never does: it keeps the sampler it serves)."""
 
         llm = self.info.llm
         return PolicySnapshot(
@@ -141,6 +163,48 @@ class Policy:
             sample_timeout_seconds=llm.sample_timeout_seconds,
             version_now=lambda: self.version,
         )
+
+    async def score(self, datums: Sequence[tinker.Datum]) -> "list[torch.Tensor]":
+        """The policy's logprobs of each datum's target tokens under its sampling client, one per target token, aligned
+        as the datum's own sampled logprobs are: a teacher's scores of a student's rows.  The sequence scored is the
+        datum's prompt and its last target token (``compute_logprobs_async``), whose first position has no logprob.
+        At most :data:`SCORE_CONCURRENCY` of the policy's calls are in flight at once, whatever the groups they score,
+        and each is bounded by the policy's ``sample_timeout_seconds``: one that does not return in time raises
+        ``TimeoutError``, and a response of another length than the sequence scored, or with no logprob of a target
+        token, ``ValueError``.  The first call that fails cancels the datums' other calls, and its error is raised once
+        they ended.  The datums' tokens are another policy's: loading refuses a scorer whose tokenizer differs."""
+
+        import torch
+
+        if self._scoring is None:
+            self._scoring = asyncio.Semaphore(SCORE_CONCURRENCY)
+        slots, seconds = self._scoring, resolve_sample_timeout(self.spec.sample_timeout_seconds)
+
+        async def scored(datum: tinker.Datum) -> torch.Tensor:
+            sequence = datum.model_input.append_int(int(datum.loss_fn_inputs["target_tokens"].data[-1]))
+            async with slots:
+                try:
+                    logprobs = await asyncio.wait_for(self.sampling_client.compute_logprobs_async(sequence), seconds)
+                except TimeoutError as exc:
+                    raise TimeoutError(f"a scoring call did not return within {seconds:g} s") from exc
+            if len(logprobs) != sequence.length:  # one per token of the sequence, else not aligned with the targets
+                raise ValueError(
+                    f"the service gave {len(logprobs)} logprobs for a sequence of {sequence.length} tokens (a row's "
+                    "prompt and its last target token)"
+                )
+            targets = logprobs[1:]
+            scores = [float(logprob) for logprob in targets if logprob is not None]
+            if len(scores) != len(targets):
+                raise ValueError(f"the service gave no logprob of target token {targets.index(None)} of a row")
+            return torch.tensor(scores)
+
+        calls: list[asyncio.Task[torch.Tensor]] = []
+        try:
+            async with asyncio.TaskGroup() as group:
+                calls.extend(group.create_task(scored(datum)) for datum in datums)
+        except ExceptionGroup as failed:  # the first call's error, with its own cause; the others were cancelled
+            raise failed.exceptions[0]
+        return [call.result() for call in calls]
 
 
 def adam_params(optimizer: "AdamParams") -> tinker.AdamParams:

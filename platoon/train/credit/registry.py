@@ -1,13 +1,14 @@
 """Which credit estimator each environment entry credits its groups with: the ``credit`` component kind (RFC 0013's one
 discovery rule), and what a config chooses (``environments[].credit`` with its ``credit_options``, RFC 0016).
 
-An estimator is named by core's name (:data:`BUILTIN_CREDIT_ESTIMATORS`: ``group``, ``keyed``), by a name that a module
-an entry's ``package`` names registers (:func:`credit_estimator`), or as ``module:Class``
+An estimator is named by core's name (:data:`BUILTIN_CREDIT_ESTIMATORS`: ``group``, ``keyed``, ``reverse_kl``), by a
+name that a module an entry's ``package`` names registers (:func:`credit_estimator`), or as ``module:Class``
 (:func:`resolve_credit_estimator`).  When the config loads, each entry's estimator resolves, its options are parsed
 against its schema and its ``check`` runs (:func:`choose_credit`, exit 78 for any problem), and ``lock.json`` records
 it (:func:`credit_lock_records`); ``platoon train`` then builds each entry's estimator for the training workflow
-(:func:`build_entry_credit`).  An entry without ``credit`` keeps the workflow's own credit, today's ``group``, run as it
-always ran.  Core's built-ins are imported by name, so this module imports none of them.
+(:func:`build_entry_credit`), with the run's policies as estimators read them (:func:`policy_views`).  An entry without
+``credit`` keeps the workflow's own credit, today's ``group``, run as it always ran.  Core's built-ins are imported by
+name, so this module imports none of them.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from platoon.train.credit.api import CreditCheckContext, CreditSetup
-from platoon.train.policy.spec import MAIN
+from platoon.train.credit.api import CreditCheckContext, CreditSetup, PolicyView
+from platoon.train.policy.spec import MAIN, PolicyId, policy_ids
 
 R = TypeVar("R", bound=type)
 
@@ -31,9 +32,12 @@ REGISTRY_KIND = "credit"
 BUILTIN_CREDIT_ESTIMATORS: dict[str, str] = {
     "group": "platoon.train.credit.group:GroupCredit",
     "keyed": "platoon.train.credit.keyed:Keyed",
+    "reverse_kl": "platoon.train.credit.reverse_kl:ReverseKL",
 }
-# Core's names, those of the estimators platoon adds included (reverse_kl, gae): no package may register them.
-RESERVED_CREDIT_NAMES = frozenset({*BUILTIN_CREDIT_ESTIMATORS, "reverse_kl", "gae"})
+# Core's names, that of the estimator platoon adds included (gae): no package may register them.
+RESERVED_CREDIT_NAMES = frozenset({*BUILTIN_CREDIT_ESTIMATORS, "gae"})
+# Core's estimators, as messages name them.
+_CORE = "group, keyed and reverse_kl"
 # What a registered name may be: no spaces, and neither ``:`` (module:Class) nor ``@``.
 _NAME = re.compile(r"[^\s:@]+")
 
@@ -43,7 +47,7 @@ def credit_estimator(
 ) -> Callable[[R], R]:
     """Register a credit estimator class under ``name``, from a module that an environment entry's ``package`` names,
     so that configs can name it (``credit: <name>``); ``options`` sets its ``options_schema`` and ``check`` its
-    load-time check.  Core's names (``group``, ``keyed``, and ``reverse_kl`` and ``gae``, which platoon adds) are
+    load-time check.  Core's names (``group``, ``keyed``, ``reverse_kl``, and ``gae``, which platoon adds) are
     reserved, whatever their case and their ``-`` or ``_``; a name registered twice is an error."""
 
     if not isinstance(name, str) or not _NAME.fullmatch(name):
@@ -88,13 +92,9 @@ def resolve_credit_estimator(ref: str) -> type:
     if ref in BUILTIN_CREDIT_ESTIMATORS:
         return import_from_string(BUILTIN_CREDIT_ESTIMATORS[ref])
     if _plain(ref) in BUILTIN_CREDIT_ESTIMATORS:
-        raise ExtensionError(
-            f"unknown credit estimator {ref!r}; did you mean {_plain(ref)}? Core's are group and keyed"
-        )
+        raise ExtensionError(f"unknown credit estimator {ref!r}; did you mean {_plain(ref)}? Core's are {_CORE}")
     if _plain(ref) in RESERVED_CREDIT_NAMES:
-        raise ExtensionError(
-            f"credit estimator {ref!r} is reserved for one platoon will add; core's are group and keyed"
-        )
+        raise ExtensionError(f"credit estimator {ref!r} is reserved for one platoon will add; core's are {_CORE}")
     registry = get_registry(REGISTRY_KIND)
     if ":" not in ref:
         if ref not in registry.names():
@@ -102,7 +102,7 @@ def resolve_credit_estimator(ref: str) -> type:
             raise ExtensionError(
                 f"unknown credit estimator {ref!r}"
                 + (f"; did you mean {close[0]}?" if close else ";")
-                + " Core's: group and keyed; a package an entry names registers others with @credit_estimator, or "
+                + f" Core's: {_CORE}; a package an entry names registers others with @credit_estimator, or "
                 "name one as module:Class"
             )
         cls = registry.get(ref)
@@ -184,7 +184,7 @@ def choose_credit(config: Any, *, check: bool = True) -> dict[str, CreditChoice]
         method = getattr(cls, "check", None)
         if check and not found and callable(method):
             try:
-                method(parsed, CreditCheckContext(entry=label, policies=(MAIN,), config=config))
+                method(parsed, CreditCheckContext(entry=label, policies=policy_ids(config), config=config))
             except Exception as exc:
                 problems.append(f"{where}.credit: {name}: {str(exc) or type(exc).__name__}")
         choices[label] = CreditChoice(label, name, cls, parsed, written)
@@ -216,14 +216,42 @@ def workflow_problems(choices: Mapping[str, CreditChoice], workflow_cls: Any, re
     ]
 
 
-def build_entry_credit(choices: Mapping[str, CreditChoice], settings: Mapping[str, Any]) -> dict[str, Any]:
-    """Each entry's estimator, by entry label, built as ``Class(setup, options)`` with the entry's training settings
-    (``settings``: each entry's :class:`~platoon.train.entry_settings.EntrySettings`, by label) and the run's one
-    policy, ``main``."""
+def policy_views(policies: Mapping[PolicyId, Any]) -> dict[PolicyId, PolicyView]:
+    """Each of the run's policies (its ``PolicySet``) as an estimator may read it, by id (:func:`_view`)."""
 
+    return {policy_id: _view(policy) for policy_id, policy in policies.items()}
+
+
+def _view(policy: Any) -> PolicyView:
+    """A policy of the run (a ``Policy``) as an estimator may read it: its id, its renderer and tokenizer, its version
+    as it moves on (``Policy.version``), and its scores of other rows (``Policy.score``)."""
+
+    llm = policy.info.llm
+    return PolicyView(
+        policy.id,
+        renderer=getattr(llm, "renderer", None),
+        tokenizer=getattr(llm, "tokenizer", None),
+        scorer=policy.score,
+        current_version=lambda: policy.version,
+    )
+
+
+def build_entry_credit(
+    choices: Mapping[str, CreditChoice],
+    settings: Mapping[str, Any],
+    policy_views: Mapping[PolicyId, PolicyView] | None = None,
+) -> dict[str, Any]:
+    """Each entry's estimator, by entry label, built as ``Class(setup, options)`` with the entry's training settings
+    (``settings``: each entry's :class:`~platoon.train.entry_settings.EntrySettings`, by label), and the run's policies
+    with their views (``policy_views``, the trainer's; without them, the one policy ``main``)."""
+
+    views = dict(policy_views or {})
+    policies = tuple(views) or (MAIN,)
     return {
         label: choice.cls(
-            CreditSetup(name=choice.name, entry=label, settings=settings[label].train, policies=(MAIN,)),
+            CreditSetup(
+                name=choice.name, entry=label, settings=settings[label].train, policies=policies, policy_views=views
+            ),
             choice.options,
         )
         for label, choice in choices.items()

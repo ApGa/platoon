@@ -82,6 +82,46 @@ def test_a_collection_gives_the_versions_of_the_datums_it_keeps_and_stamps_them_
     assert [datum_version(datum) for datum in result.datums] == [4, 2, 9]
 
 
+def test_in_a_rollout_of_several_policies_each_datum_falls_back_to_its_own_policy_s_version():
+    """A datum one of whose calls recorded no version carries, and keeps as its own, the version its trajectory's
+    policy is stamped with (``RolloutPolicies``), not the one the conversion was given; a frozen policy's trajectory
+    gives no datum and no own version."""
+
+    helper_calls = {"h1": _interaction([40], [41], None), "h2": _interaction([50], [51], 3)}
+    judge_calls = {"j1": _interaction([60], [61], 0)}
+
+    def agent(policy: str) -> dict:
+        return {tdp.AGENT_MISC_KEY: {"agent_id": policy, "role": policy, "policy": policy}}
+
+    collection = {
+        "trajectories": {
+            "root": {"steps": [_step(call) for call in CALLS], "reward": 1.0},
+            "helper": {
+                "steps": [_step(call) for call in helper_calls],
+                "reward": 1.0,
+                "parent_info": {"id": "root"},
+                "misc": agent("helper"),
+            },
+            "judge": {"steps": [_step("j1")], "reward": 0.0, "parent_info": {"id": "root"}, "misc": agent("judge")},
+        }
+    }
+    result = tdp.get_train_data_for_trajectory_collection(
+        trajectory_collection=collection,
+        interactions={**CALLS, **helper_calls, **judge_calls},
+        task_id="task",
+        checkpoint_version=99,  # not read: each policy's own version is
+        policies=tdp.RolloutPolicies(
+            default="main", versions={"main": 4, "helper": 2, "judge": 0}, trained=frozenset({"main", "helper"})
+        ),
+    )
+    assert result.num_policy_excluded_datums == 1  # the frozen judge's
+    assert [datum_version(datum) for datum in result.datums] == [4, 4, 4, 2, 2]
+    # A call of the root's second datum and the helper's first recorded none: each its own policy's version.
+    assert result.own_versions == (4, 4, 9, 2, 3)
+    assert result.stamp_own_versions()
+    assert [datum_version(datum) for datum in result.datums] == [4, 4, 9, 2, 3]
+
+
 def _one_datum_result(**fields) -> tdp.TrajectoryCollectionResult:
     datums = tdp.trajectory_to_data(
         trajectory={"steps": [_step("c5")]},

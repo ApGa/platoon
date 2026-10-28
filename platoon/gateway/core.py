@@ -14,6 +14,11 @@ sampling defaults.  Each transport only translates its wire format into a :class
 sampled tokens as a :class:`TinkerLLMInteraction` under ``agent.interactions[call_id]`` and appends the call to
 the agent's ordered call list, from which :mod:`platoon.gateway.trace` builds the rollout's trajectories.
 
+A run that samples several policies serves them through one gateway, the agents' default policy's
+(:meth:`ModelGateway.serve_policies`): each other policy has a gateway of its own, its runtime (its sampler,
+renderer, tokenizer and sampling defaults), and every agent samples one policy for its whole life, the one its role is
+bound to (``AgentSession.policy``), whose runtime renders, samples and parses its calls.
+
 :meth:`ModelGateway.shut_down` stops a gateway for good, for a process that is exiting (a rollout worker told to
 stop): it closes every agent, so their model calls and tool-plane calls fail with :class:`AgentClosedError` (HTTP
 410), and refuses to open new ones, so no subagent or verifier can start.  It is how a worker stops harnesses that
@@ -158,6 +163,9 @@ class TinkerLLMInteraction:
     action: TokensWithLogprobs
     # The server's routing handle for the sampled sequence (R3); None when the server did not send one.
     routing_id: int | None = None
+    # The policy that sampled it, in a gateway that serves several (ModelGateway.serve_policies), so that a program
+    # that trains on an agent tree's interactions keeps each policy's apart; None in a gateway of one policy.
+    policy: str | None = None
     # The policy version the call sampled (``ChatResponse.version``); None when its gateway does not know it.
     version: int | None = None
 
@@ -757,6 +765,8 @@ class ChatResponse:
     recovered_tool_calls: int = 0
     unparsed_tool_calls: int = 0
     provider: ProviderRecord | None = None
+    # The policy that sampled it, in a gateway that serves several (ModelGateway.serve_policies); None in one of one.
+    policy: str | None = None
     # The policy version the call sampled (``ModelGateway.version``, or its sampler's own); None when the gateway does
     # not know it, or the call sampled nothing.
     version: int | None = None
@@ -830,6 +840,7 @@ class ChatResponse:
             obs=self.prompt,
             action=TokensWithLogprobs(tokens=self.tokens, maybe_logprobs=list(self.logprobs or [])),
             routing_id=self.routing_id,
+            policy=self.policy,
             version=self.version,
         )
 
@@ -894,6 +905,9 @@ class AgentSession:
     interactions: dict[str, TinkerLLMInteraction] = field(repr=False)
     parent_agent_id: str | None = None
     role: str = "policy"
+    # The policy the agent samples for its whole life, in a gateway that serves several (ModelGateway.serve_policies):
+    # its role's; None in a gateway that serves one.
+    policy: str | None = None
     goal: str | None = None
     fork_step: int = 0
     calls: list[ChatResponse] = field(default_factory=list, repr=False)
@@ -1124,6 +1138,39 @@ class ModelGateway:
         self._minted: dict[str, int] = {}  # rollout id -> agents minted over HTTP
         self._shut_down = False
         self._unparsed_calls = 0  # tool-call blocks that did not parse, for the warnings
+        # A gateway that serves several policies (serve_policies): the id of the policy it samples, the other
+        # policies' gateways by id, and the policy of each role bound to one.  None and empty in a gateway of one.
+        self.policy: str | None = None
+        self.runtimes: dict[str, ModelGateway] = {}
+        self.role_policies: dict[str, str] = {}
+
+    # ------------------------------------------------------------------ policies
+
+    def serve_policies(self, policy: str, *, runtimes: Mapping[str, ModelGateway], roles: Mapping[str, str]) -> None:
+        """Serve several policies: this gateway samples ``policy``, the agents' default, which every root agent and
+        every agent of a role ``roles`` leaves out samples; each other policy is sampled by its own gateway
+        (``runtimes``, by policy id), which renders, samples and parses the calls of the agents whose role ``roles``
+        binds to it.  The agents stay this gateway's: it opens, authenticates and records them all."""
+
+        self.policy = policy
+        self.runtimes = dict(runtimes)
+        self.role_policies = dict(roles)
+        for other, runtime in self.runtimes.items():
+            runtime.policy = other
+
+    def runtime(self, policy: str | None) -> ModelGateway:
+        """The gateway that samples ``policy`` (an agent's, ``AgentSession.policy``): this one for its own policy, and
+        for None, the policy of every agent of a gateway that serves one."""
+
+        return self if policy is None or policy == self.policy else self.runtimes[policy]
+
+    def _policy_of(self, role: str, *, root: bool) -> str | None:
+        """The policy an agent of ``role`` samples (None in a gateway that serves one): the default for a root
+        agent, else its role's."""
+
+        if self.policy is None or root:
+            return self.policy
+        return self.role_policies.get(role, self.policy)
 
     # ------------------------------------------------------------------ render
 
@@ -1317,6 +1364,7 @@ class ModelGateway:
             routing_id=routing_id_of(result),
             recovered_tool_calls=int(cast(dict, parsed).get("recovered_tool_calls") or 0),
             unparsed_tool_calls=len(unparsed),
+            policy=self.policy,
         )
 
     def _log_unparsed(self, unparsed: Sequence[Any]) -> None:
@@ -1341,11 +1389,12 @@ class ModelGateway:
     async def chat(
         self, agent: AgentSession, request: ChatRequest | PreparedCall, *, kind: str = "policy"
     ) -> ChatResponse:
-        """Sample a call for ``agent`` and record it there as a ``kind`` call (``policy``, ``aux`` or ``judge``).
+        """Sample a call for ``agent`` and record it there as a ``kind`` call (``policy``, ``aux`` or ``judge``), in the
+        runtime of the agent's policy (:meth:`runtime`).
 
-        ``request`` may already be prepared, e.g. by a server that must report rendering errors before it
-        starts a stream.  An agent closed while its call was sampling records nothing.  A kind the agent may not
-        make (``AgentSession.check_kind``) raises :class:`CallKindRefusedError`, and a ``judge`` call of an agent
+        ``request`` may already be prepared (by that runtime), e.g. by a server that must report rendering errors
+        before it starts a stream.  An agent closed while its call was sampling records nothing.  A kind the agent may
+        not make (``AgentSession.check_kind``) raises :class:`CallKindRefusedError`, and a ``judge`` call of an agent
         whose judges are off (``AgentSession.judges``) :class:`JudgesOffError`, before anything is sampled.
         """
         check_call_kind(kind)
@@ -1354,11 +1403,12 @@ class ModelGateway:
             raise agent.refuse_judge("A judge call")
         self._ensure_running()
         self._ensure_open(agent)
+        runtime = self.runtime(agent.policy)
         if isinstance(request, PreparedCall):
             call = request
         else:
             try:
-                call = self.prepare(request, defaults=agent.sampling_defaults, kind=agent.sampling_kind(kind))
+                call = runtime.prepare(request, defaults=agent.sampling_defaults, kind=agent.sampling_kind(kind))
             except ContextWindowExceededError:
                 agent.context_overflows += 1
                 raise
@@ -1373,7 +1423,7 @@ class ModelGateway:
         agent.policy_calls_in_flight += counted
         agent.call_tally.in_flight += counted
         try:
-            response = await self.sample(call)
+            response = await runtime.sample(call)
         except Exception:
             agent.gateway_errors += 1
             raise
@@ -1403,7 +1453,7 @@ class ModelGateway:
         agent.misc[BUDGET_MISC_KEY] = {"enforce": "gateway", "max_steps": agent.call_cap, "stops": agent.budget_stops}
         return ChatResponse(
             call_id=generate_id("platoon-budget-"),
-            model=self.model_name,
+            model=self.runtime(agent.policy).model_name,
             prompt=ModelInput(chunks=[]),
             tokens=[],
             logprobs=None,
@@ -1415,6 +1465,7 @@ class ModelGateway:
             tool_calls=None,
             parsed_tool_calls=0,
             routing_id=None,
+            policy=agent.policy,
         )
 
     def open_agent(
@@ -1439,6 +1490,8 @@ class ModelGateway:
         unset.  A child is one level deeper than its parent and inherits its tool access and sampling defaults
         unless they are given, and its parent's ``judges``: a ``judge``-role child of a parent whose judges are off
         is refused (:class:`JudgesOffError`).  A gateway that is shut down refuses (:class:`GatewayShutDownError`).
+        In a gateway that serves several policies the agent samples, for its whole life, the default policy if it is
+        a root agent, else its role's (:meth:`serve_policies`).
         """
         self._ensure_running()
         fork_step, depth, inherited_access, inherited_sampling = 0, 0, "full", None
@@ -1462,6 +1515,7 @@ class ModelGateway:
             interactions=interactions,
             parent_agent_id=parent_agent_id,
             role=role,
+            policy=self._policy_of(role, root=parent_agent_id is None),
             goal=goal,
             fork_step=fork_step,
             timeline=timeline,

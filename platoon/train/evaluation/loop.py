@@ -30,6 +30,7 @@ from platoon.train.dispatch.settled import (
 from platoon.train.evaluation.protocol import EvaluatedTrainer, LoopState
 from platoon.train.evaluation.record import record_evaluation
 from platoon.train.labels import label_column, metric_labels, metric_prefix
+from platoon.train.policy.binding import publish_frozen_bindings
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.trainer.signals import TerminateEvalLoop, TrainInterrupted
 from platoon.train.workflow.protocol import RolloutWorkflow, report_of
@@ -183,6 +184,10 @@ class EvaluationLoop:
         if getattr(workflow, "rollout_isolation", "inprocess") == "process":
             version = self.publication.version()
             self.trainer._publish_worker_binding(workflow, self.publication.sampling_client(), version)
+            # The frozen policies the agents sample, if any.  A state a test made as platoon 0.4.0 did has no
+            # policies and samples one, as the train loop allows (trainer.loops._test_state_policy).
+            if (policies := getattr(shared_state, "policies", None)) is not None:
+                publish_frozen_bindings(policies, workflow, self.trainer._publish_worker_binding)
 
         total_eval_tasks, label_stats = await self._run_groups()
 

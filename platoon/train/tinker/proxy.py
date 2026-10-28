@@ -358,6 +358,33 @@ def register_tinker_llm(
     A ``TINKER_API_KEY`` that the server refuses raises :class:`~platoon.eval.config_defs.TinkerKeyRefusedError`, a
     configuration error that names the key and the server (:mod:`platoon.train.tinker.key_refusal`).
     """
+    info = open_tinker_llm(
+        model_name,
+        renderer_name,
+        context_window_length,
+        renderer_kwargs,
+        model_path=model_path,
+        base_url=base_url,
+        sample_timeout_seconds=sample_timeout_seconds,
+    )
+    info.llm.set_as_default()
+    return info
+
+
+def open_tinker_llm(
+    model_name: str,
+    renderer_name: str,
+    context_window_length: int | None = None,
+    renderer_kwargs: dict[str, Any] | None = None,
+    *,
+    model_path: str | None = None,
+    base_url: str | None = None,
+    sample_timeout_seconds: float | None = None,
+) -> ModelInfo:
+    """:func:`register_tinker_llm` without making the gateway this process's default: a model gateway that samples
+    ``model_name`` (or ``model_path``) through a Tinker session of its own on ``base_url``, for a run's other
+    policies (:class:`~platoon.train.policy.set.PolicySet`), each in its own session."""
+
     # The client opens its session as it is built, so the server must be known here.
     with key_refusals():
         service_client = tinker.ServiceClient(base_url=base_url) if base_url is not None else tinker.ServiceClient()
@@ -372,7 +399,6 @@ def register_tinker_llm(
         renderer_kwargs=renderer_kwargs,
         sample_timeout_seconds=sample_timeout_seconds,
     )
-    tinker_llm.set_as_default()
     return ModelInfo(
         llm=tinker_llm,
         model_name=model_name,

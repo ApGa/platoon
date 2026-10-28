@@ -447,6 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     extra_allow = _import_stack()  # 4. tinker, torch and the policy client, which R3 needs
     _import_environment_packages(request)  # 5. what registers the environments' harnesses, programs and loaders
     llm = _build_llm(request.model)  # 6. the policy, following the trainer's sampling client
+    _serve_policies(request, llm)  # and in a rollout of several policies, each other one, following its own
     startup_seconds = time.monotonic() - started
     _print_header(request, startup_seconds=startup_seconds, extra_allow=extra_allow)  # 7. the header line
     return _run(request, llm, startup_seconds=startup_seconds, extra_allow=extra_allow)  # 8. ready, then the rollout
@@ -567,31 +568,9 @@ def _build_llm(binding: ModelBinding) -> Any:
     the binding names no model.  NEVER register_tinker_llm(): it constructs a ServiceClient, i.e. a second gateway
     session per rollout."""
 
-    from platoon.train.tinker import proxy  # imported with the stack (_import_stack)
-    from platoon.train.workers.binding import FollowingSamplingClient
-
     llm = None
     if binding.model_name:
-        sampling_client = FollowingSamplingClient(
-            binding.binding_path,
-            binding.bootstrap_blob,
-            binding.follow_poll_seconds,
-            bootstrap_version=binding.checkpoint_version,
-        )
-        llm = proxy.build_tinker_llm(
-            model_name=binding.model_name,
-            renderer_name=binding.renderer_name,
-            sampling_client=sampling_client,
-            context_window_length=binding.context_window_length,
-            renderer_kwargs=binding.renderer_kwargs,
-            sample_timeout_seconds=binding.sample_timeout_seconds,
-            max_tokens=binding.max_tokens,
-            temperature=binding.temperature,
-            top_k=binding.top_k,
-            top_p=binding.top_p,
-            seed=binding.seed,
-        )
-        llm.set_version(binding.checkpoint_version)
+        llm = _following_llm(binding)
         llm.set_as_default()
     else:
         # A binding with no model name deliberately sets no default gateway.
@@ -601,6 +580,49 @@ def _build_llm(binding: ModelBinding) -> Any:
         logger_message = "[rollout-worker] no model bound; running without a sampling provider"
         print(logger_message, flush=True)
     return llm
+
+
+def _following_llm(binding: ModelBinding) -> Any:
+    """A policy's ``TinkerLLM`` as the binding describes it, its sampler following the binding's file, at the
+    binding's version."""
+
+    from platoon.train.tinker import proxy  # imported with the stack (_import_stack)
+    from platoon.train.workers.binding import FollowingSamplingClient
+
+    sampling_client = FollowingSamplingClient(
+        binding.binding_path,
+        binding.bootstrap_blob,
+        binding.follow_poll_seconds,
+        bootstrap_version=binding.checkpoint_version,
+    )
+    llm = proxy.build_tinker_llm(
+        model_name=binding.model_name,
+        renderer_name=binding.renderer_name,
+        sampling_client=sampling_client,
+        context_window_length=binding.context_window_length,
+        renderer_kwargs=binding.renderer_kwargs,
+        sample_timeout_seconds=binding.sample_timeout_seconds,
+        max_tokens=binding.max_tokens,
+        temperature=binding.temperature,
+        top_k=binding.top_k,
+        top_p=binding.top_p,
+        seed=binding.seed,
+    )
+    llm.set_version(binding.checkpoint_version)
+    return llm
+
+
+def _serve_policies(request: RolloutWorkerRequest, llm: Any) -> None:
+    """In a rollout that samples several policies (protocol 3's ``policies``), serve each one besides the default
+    (``llm``'s) through its own runtime, following its own binding, and bind each agent role to its policy, as the
+    trainer's gateway does (``ModelGateway.serve_policies``)."""
+
+    from platoon.train.workers.protocol import PolicyRolloutWorkerRequest
+
+    if llm is None or not isinstance(request, PolicyRolloutWorkerRequest) or request.agents is None:
+        return
+    runtimes = {policy: _following_llm(binding).gateway for policy, binding in request.policies.items()}
+    llm.gateway.serve_policies(request.agents.default, runtimes=runtimes, roles=request.agents.roles)
 
 
 def _print_header(request: RolloutWorkerRequest, *, startup_seconds: float, extra_allow: bool) -> None:

@@ -14,7 +14,9 @@ baseline, say) changes it in ``settle(group)`` and only there, and gives it as `
 ``load_state(state)``: the run settles each group as it files the group with the groups a full checkpoint keeps, and
 takes the estimators' state at the point it takes the kept groups, so that a checkpoint never holds an estimator's
 state for a group it does not hold, nor the reverse (:mod:`platoon.train.credit.runtime`, which also says what stops
-a run: an estimator that raises, or an ``assign`` that does not return within ``assign_timeout_seconds``).
+a run: an estimator that raises, or an ``assign`` that does not return within ``assign_timeout_seconds``).  A policy's
+scoring that fails (:class:`ScoringFailed`, from :meth:`PolicyView.score`) fails the group it was crediting instead,
+which then trains nothing.
 
 This module imports neither Tinker nor torch, so that ``platoon.experimental`` re-exports it; the rows' methods import
 torch when they are called.
@@ -22,7 +24,7 @@ torch when they are called.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -134,22 +136,59 @@ class MemberRollout:
     result: TrajectoryCollectionResult
 
 
+class ScoringFailed(RuntimeError):
+    """A policy's scoring of rows that failed (:meth:`PolicyView.score`): its service raised or did not answer within
+    the policy's ``sample_timeout_seconds``, or gave a response of the wrong length or no logprob of a target token.
+    An estimator lets it propagate: the group it was crediting then fails (verdict ``failed``, counted under
+    ``credit/failures``) and trains nothing, and the run goes on."""
+
+
 @dataclass(frozen=True)
 class PolicyView:
-    """What an estimator may read of a policy: its id, and the renderer that turns its token ids into text."""
+    """What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into
+    text, its version now, and its scores of other rows (:meth:`score`), for a policy that scores: a frozen
+    teacher."""
 
     id: PolicyId
     renderer: Any = None
+    tokenizer: Any = None
+    # Its scores of rows (the trainer's Policy.score); None for a view that scores nothing.
+    scorer: Callable[[Sequence[tinker.Datum]], Awaitable[list[torch.Tensor]]] | None = None
+    # Its version now (the trainer's Policy.version); None for a view that knows none, whose version reads 0.
+    current_version: Callable[[], int] | None = None
+
+    @property
+    def version(self) -> int:
+        """The policy's version now: how many samplers it published over the run (0 for a frozen policy)."""
+
+        return self.current_version() if self.current_version is not None else 0
+
+    async def score(self, datums: Sequence[tinker.Datum]) -> list[torch.Tensor]:
+        """The policy's logprobs of each datum's target tokens under its current sampler, one per target token,
+        aligned as the datum's own sampled logprobs are (``loss_fn_inputs["logprobs"]``).  :class:`ScoringFailed`
+        when its scoring fails, which fails the group being credited; a ``RuntimeError`` for a view that scores
+        nothing."""
+
+        if self.scorer is None:
+            raise RuntimeError(f"policy {self.id} scores no rows here")
+        try:
+            return await self.scorer(datums)
+        except ScoringFailed:
+            raise
+        except Exception as exc:
+            raise ScoringFailed(
+                f"policy {self.id} could not score {len(datums)} row(s): {type(exc).__name__}: {exc}"
+            ) from exc
 
 
 @dataclass
 class CreditGroup:
     """One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its
     environment entry, the entry's training settings (``settings``), the members that returned a result, in the group's
-    order, the run's policies, each policy's version when ``assign`` began (``versions``; it does not move during the
-    call, although the policies may publish meanwhile), and where the group's own statistics go (``stats``: in a
-    training group the ``DeferredStats`` that the step that consumes the group records, outside one the stats tracker;
-    an estimator's metrics belong under ``credit/``)."""
+    order, the run's policies (``policies``, each as an estimator may read it), each policy's version when ``assign``
+    began (``versions``; it does not move during the call, although the policies may publish meanwhile), and where the
+    group's own statistics go (``stats``: in a training group the ``DeferredStats`` that the step that consumes the
+    group records, outside one the stats tracker; an estimator's metrics belong under ``credit/``)."""
 
     task_id: str
     label: str | None
@@ -182,8 +221,11 @@ class CreditSetup:
     entry: str
     # The entry's training settings (train.workflow_config with the entry's own laid over it).
     settings: WorkflowConfig
-    # The run's policies, by id: the one the run trains, main, in this release.
+    # The run's policies, by id: main, the one the run trains in this release, then its frozen ones.
     policies: tuple[PolicyId, ...]
+    # Each policy as the estimator may read it (its renderer, its tokenizer, its scores), by id: what an estimator that
+    # scores with another policy (a teacher) reads it from.  Empty outside a run (a test's setup).
+    policy_views: Mapping[PolicyId, PolicyView] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -206,7 +248,8 @@ class CreditEstimator(Protocol):
     place where an estimator with state changes it; ``state()`` and ``load_state(state)``, which give and take that
     state as JSON data; and ``assign_timeout_seconds``, how long ``assign`` may take on one group
     (:data:`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit).  An estimator that raises in any of them, or
-    whose ``assign`` runs out of time, stops the run with an error that names it, its entry and the group."""
+    whose ``assign`` runs out of time, stops the run with an error that names it, its entry and the group; but a
+    policy's failed scoring that its ``assign`` lets through (:class:`ScoringFailed`) fails only the group."""
 
     needs_agents: ClassVar[bool]
 

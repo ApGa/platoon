@@ -24,6 +24,7 @@ from platoon.train.components import (
     _sampler_checks,
     normalize_environment_configs,
 )
+from platoon.train.policy.spec import policy_problems
 from platoon.train.trainer.registry import rolls_out, trainer_problems
 from platoon.train.workflow.protocol import StaleFilterSetting
 from platoon.utils.config import ConfigError, value_hint
@@ -575,16 +576,7 @@ class TrainConfig:
     def __post_init__(self):
         rollouts = self.batch_size * self.workflow_config.group_size  # every rollout of a batch
         self.max_concurrent_rollouts = rollouts_at_once("train", self, default=rollouts)
-        seconds = self.sample_timeout_seconds
-        if seconds is not None and (
-            isinstance(seconds, bool)
-            or not isinstance(seconds, (int, float))
-            or not math.isfinite(seconds)
-            or seconds <= 0
-        ):
-            raise ValueError(
-                f"train.sample_timeout_seconds must be a positive number of seconds or null, got {seconds!r}"
-            )
+        _check_sample_timeout("train.sample_timeout_seconds", self.sample_timeout_seconds)
         sampler = self.task_sampler if self.task_sampler is not None else "auto"
         if not isinstance(sampler, str) or not sampler:  # which names a sampler is the trainer config's to say
             raise ValueError(f"train.task_sampler must name a task sampler, got {sampler!r}")
@@ -619,6 +611,69 @@ class TrainConfig:
             raise ValueError(
                 f"train.max_starting_rollouts must be a whole number, 1 or more, or null for no limit, got {limit!r}"
             )
+
+
+def _check_sample_timeout(key: str, seconds: Any) -> None:
+    """Refuse a ``sample_timeout_seconds`` (``key``, as the message names it) that is neither null nor a positive
+    number of seconds."""
+
+    if seconds is not None and (
+        isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds <= 0
+    ):
+        raise ValueError(f"{key} must be a positive number of seconds or null, got {seconds!r}")
+
+
+@dataclass
+class PolicyConfig:
+    """A ``policies:`` entry: a model the run samples or scores with besides ``main``, under ``train:``'s names for the
+    same settings (experimental).  This release trains one policy, ``main``: every other one is frozen
+    (``trainable: false``), sampled by the agents ``agents:`` binds to it or scoring for a credit estimator (a
+    teacher), and never stepped, saved or pruned."""
+
+    # Hugging Face model name of the base model.
+    model_name: str
+    # Renderer that turns chat messages into the model's tokens, as train.renderer_name.
+    renderer_name: str
+    # Renderer attribute overrides, as train.renderer_kwargs.
+    renderer_kwargs: dict = field(default_factory=dict)
+    # Its context window, as train.context_window_length.
+    context_window_length: int | None = None
+    # The bound on one of its sampling calls, as train.sample_timeout_seconds.
+    sample_timeout_seconds: float | None = None
+    # Its Tinker service (None: the run's tinker_base_url, else TINKER_BASE_URL, else hosted Tinker).  It opens a
+    # session of its own there, also on the run's service.
+    tinker_base_url: str | None = None
+    # Whether the run trains it.  This release trains main only, so every other policy says false: a frozen policy.
+    # A trained policy's own adapter rank, optimizer and loss arrive with lockstep multi-policy training.
+    trainable: bool = True
+    # The sampler a frozen policy serves (a ``tinker://`` sampler path; None: its base model).
+    load_checkpoint_path: str | None = None
+
+    def __post_init__(self) -> None:
+        # As train:'s own; the loader checks the other keys' types, as it does train:'s.
+        _check_sample_timeout(
+            f"policies: the sample_timeout_seconds of the policy of {self.model_name}", self.sample_timeout_seconds
+        )
+
+
+@dataclass
+class AgentRoleConfig:
+    """``agents.roles.<role>``: the policy the agents of that role sample."""
+
+    # A policy of the run: main, or a policies: entry.
+    policy: str
+
+
+@dataclass
+class AgentsConfig:
+    """``agents:``: which policy each agent samples, for its whole life (experimental).  The root agent samples
+    ``policy``; an agent its harness or program opens with a role samples that role's policy, and ``policy`` when
+    ``roles`` names none for it."""
+
+    # The root agent's policy, and that of every role roles leaves out (None: main).
+    policy: str | None = None
+    # The policy of the agents of each role, by role (the role a harness mints a subagent with, such as ``judge``).
+    roles: dict[str, AgentRoleConfig] = field(default_factory=dict)
 
 
 # The units ``every`` counts in (``TrainEventTriggerConfig.strategy``): training steps, or passes over the training
@@ -871,6 +926,7 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
         )
     # Loading checks these too, but a config class whose __post_init__ skips this class's loads without them.
     problems.extend(trainer_problems(config))
+    problems.extend(policy_problems(config))
     problems.extend(entry_settings.problems(config))
     problems.extend(config_pruning_problems(config))
     problems.extend(task_sampler_problems(config))
@@ -938,6 +994,11 @@ class PlatoonTinkerRLTrainerConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
+    # The run's other policies, by id (a lowercase name such as ``teacher``), besides main, which train: declares:
+    # frozen ones its agents sample or its credit estimators score with (experimental).
+    policies: dict[str, PolicyConfig] = field(default_factory=dict)
+    # Which policy each agent samples, by role (experimental); without it, every agent samples main.
+    agents: AgentsConfig = field(default_factory=AgentsConfig)
 
     def __post_init__(self):
         self.environments = normalize_environment_configs(self.environments)
@@ -945,6 +1006,7 @@ class PlatoonTinkerRLTrainerConfig:
         # pruning, which keeps the checkpoints within the largest staleness bound of the run and its entries.
         if problems := [
             *trainer_problems(self),
+            *policy_problems(self),
             *entry_settings.problems(self),
             *config_pruning_problems(self),
             *task_sampler_problems(self),

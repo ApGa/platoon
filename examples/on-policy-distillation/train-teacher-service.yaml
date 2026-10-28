@@ -1,0 +1,16 @@
+# The same distillation, with the teacher on a Tinker service of its own: for a backend that cannot serve the teacher
+# beside the student, such as a self-hosted service of one base model. The job script that starts the teacher's
+# service passes its URL:
+#
+#   export PYTHONPATH=$PWD/examples/quickstart
+#   uv run platoon train examples/on-policy-distillation/train-teacher-service.yaml \
+#     policies.teacher.tinker_base_url=http://<teacher host>:<port>
+
+extends: train.yaml
+
+policies:
+  teacher:
+    tinker_base_url: http://localhost:8001
+
+stats:
+  trial_name: guess-distilled-teacher-service

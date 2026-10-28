@@ -96,15 +96,11 @@ def test_building_the_policies_registers_main_s_gateway_as_the_trainer_did(monke
     ]
 
 
-def test_building_refuses_more_than_one_policy_which_would_each_become_the_default_gateway(monkeypatch):
+def test_building_refuses_a_run_of_no_policy(monkeypatch):
     calls = []
     monkeypatch.setattr(set_module, "register_tinker_llm", lambda *args, **kwargs: calls.append(args))
-    main = PolicySpec(MAIN, model_name="m", renderer_name="r")
-    teacher = PolicySpec("teacher", model_name="t", renderer_name="r")
 
-    with pytest.raises(ValueError, match="one policy, main, not 2: main, teacher"):
-        PolicySet.build({MAIN: main, "teacher": teacher})
-    with pytest.raises(ValueError, match="one policy, main, not 0"):
+    with pytest.raises(ValueError, match="at least one policy"):
         PolicySet.build({})
     assert calls == []  # no gateway registered
 

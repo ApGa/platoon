@@ -30,7 +30,7 @@ import pickle
 import stat
 import sys
 from dataclasses import dataclass, field, fields
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from platoon.task import Task
 from platoon.train.tinker.rollout_metrics import RolloutTimingSummary
@@ -38,6 +38,9 @@ from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.scratch import node_scratch
 from platoon.utils.subagent_sampling import DeterministicSubagentDatumSampler
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult
+
+if TYPE_CHECKING:
+    from platoon.train.policy.spec import AgentBindings
 
 logger = logging.getLogger(__name__)
 
@@ -197,20 +200,36 @@ class RolloutWorkerRequest:
 
 @dataclass(frozen=True)
 class PolicyRolloutWorkerRequest(RolloutWorkerRequest):
-    """A rollout whose datums carry who produced them (protocol 3): ``tag_datums`` has the conversion give every
-    trajectory's agent and each datum's trajectory (``TrajectoryCollectionResult.agents``, ``datum_trajectories``),
-    which a credit estimator that reads agents needs.  The trainer sends it only for such an entry's groups; every other
+    """A rollout whose datums carry who produced them, or that samples several policies (protocol 3).
+
+    ``tag_datums`` has the conversion give every trajectory's agent and each datum's trajectory
+    (``TrajectoryCollectionResult.agents``, ``datum_trajectories``), which a credit estimator that reads agents needs.
+    A rollout of several policies also carries the binding of each sampled policy but the agents' default, whose
+    binding is ``model`` (``policies``, by id), which agent samples which (``agents``), and the policies training
+    trains (``trained``): the worker serves each policy from its own binding, and only the trained policies' agents
+    make datums, each stamped with its own policy's version.  The trainer sends it only for such groups; every other
     rollout is protocol 2's :class:`RolloutWorkerRequest`, field for field as before."""
 
     tag_datums: bool = True
+    policies: dict[str, ModelBinding] = field(default_factory=dict)
+    # Which policy each agent samples; None for a rollout of one policy.
+    agents: AgentBindings | None = None
+    trained: frozenset[str] = frozenset()
 
     @classmethod
     def tagging(cls, request: RolloutWorkerRequest) -> "PolicyRolloutWorkerRequest":
         """``request``, asking for its datums' tags."""
 
+        return cls.extending(request)
+
+    @classmethod
+    def extending(cls, request: RolloutWorkerRequest, **extra: Any) -> "PolicyRolloutWorkerRequest":
+        """``request`` as a protocol 3 request, with the fields of this class that ``extra`` gives (the others at
+        their defaults)."""
+
         values: dict[str, Any] = {item.name: getattr(request, item.name) for item in fields(request)}
         values["protocol_version"] = POLICY_PROTOCOL_VERSION
-        return cls(**values)
+        return cls(**{**values, **extra})
 
 
 @dataclass(frozen=True)
@@ -257,6 +276,19 @@ class RolloutWorkerResponse:
 # --------------------------------------------------------------------------
 # Files
 # --------------------------------------------------------------------------
+
+
+def binding_path(directory: str, policy: str | None = None) -> str:
+    """Where the trainer publishes a policy's sampling client for its rollout workers in ``directory``:
+    ``model_binding.pkl`` for the agents' default policy, ``model_binding.<policy>.pkl`` for another one."""
+
+    return os.path.join(directory, "model_binding.pkl" if policy is None else f"model_binding.{policy}.pkl")
+
+
+def is_binding_file(name: str) -> bool:
+    """Whether ``name`` names a policy's binding file (:func:`binding_path`), not the temporary file of one."""
+
+    return name.startswith("model_binding.") and name.endswith(".pkl")
 
 
 def ipc_dir() -> str:

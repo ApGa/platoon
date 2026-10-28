@@ -3,7 +3,9 @@ is written against (:mod:`platoon.train.credit.api`): its ``assign`` over a grou
 (:func:`assign_credit`); its ``settle`` as the run files the group (:func:`settle_credit`); and its state in a full
 checkpoint (:func:`credit_states`, :func:`load_credit_states`).  An estimator that raises in any of them, or whose
 ``assign`` does not return in time, stops the run with a :class:`CreditEstimatorError` that names it, its entry and
-the group: a group it could not credit is never trained otherwise, nor counted as a failed rollout.
+the group: a group it could not credit is never trained otherwise, nor counted as a failed rollout.  The one exception
+is a policy's scoring that failed (:class:`~platoon.train.credit.api.ScoringFailed`: a teacher's service that raised
+or did not answer in time), which :func:`assign_credit` lets through: the group fails, and the run goes on.
 
 This module is part of the training code's contract (``tests/train/test_layers.py``): the rollout source, the runner
 and the checkpoint saves, which are generic code, call the estimators through it.  It imports neither Tinker nor
@@ -19,7 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from platoon.train.credit.api import DEFAULT_ASSIGN_TIMEOUT_SECONDS, CreditGroup, TrainingSample
+from platoon.train.credit.api import DEFAULT_ASSIGN_TIMEOUT_SECONDS, CreditGroup, ScoringFailed, TrainingSample
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +55,8 @@ def class_ref(estimator: Any) -> str:
 async def assign_credit(estimator: Any, group: CreditGroup) -> Credit:
     """Await ``estimator.assign(group)``, within its ``assign_timeout_seconds`` (600 by default; None: no limit), and
     return its credit of the group.  A :class:`CreditEstimatorError` when it raises or runs out of time, the call
-    cancelled; a cancellation of the group itself goes on."""
+    cancelled; a policy's failed scoring (:class:`~platoon.train.credit.api.ScoringFailed`), which fails the group
+    alone, and a cancellation of the group itself go on."""
 
     samples = tuple(group.samples())
     seconds = getattr(estimator, "assign_timeout_seconds", DEFAULT_ASSIGN_TIMEOUT_SECONDS)
@@ -61,6 +64,8 @@ async def assign_credit(estimator: Any, group: CreditGroup) -> Credit:
     try:
         async with limit:
             await estimator.assign(group)
+    except ScoringFailed:
+        raise
     except Exception as exc:
         what = f"did not return within {seconds:g} s" if limit.expired() else f"raised {type(exc).__name__}: {exc}"
         what = f"assign(group) {what}, on task {group.task_id}"

@@ -20,6 +20,9 @@ from platoon.train import entry_settings, launch
 from platoon.train.auto import AutoEnvironment
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.credit.keyed import Keyed, KeyedOptions
+from platoon.train.policy.policy import Policy
+from platoon.train.policy.set import PolicySet
+from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.utils.config import ConfigError, resolve_config
 
 HERE = __name__
@@ -101,7 +104,8 @@ def test_a_named_environment_cannot_choose_the_credit():
     ("fields", "says"),
     [
         ({"credit": "keyd"}, "environments.0.credit: unknown credit estimator 'keyd'; did you mean keyed?"),
-        ({"credit": "reverse_kl"}, "environments.0.credit: credit estimator 'reverse_kl' is reserved"),
+        ({"credit": "gae"}, "environments.0.credit: credit estimator 'gae' is reserved"),
+        ({"credit": "reverse_kl"}, "environments.0.credit_options.teacher: required key is missing"),
         ({"credit": "keyed", "credit_options": {"keys": ["role"]}}, "environments.0.credit_options"),
         ({"credit": "keyed", "credit_options": {"key": ["member"]}}, "environments.0.credit_options"),
         ({"credit": "group", "credit_options": {"leave_one_out": True}}, "takes no options"),
@@ -160,8 +164,9 @@ def _workflows(config: Any) -> tuple[Any, Any]:
     model_info: Any = SimpleNamespace(
         model_name="m", renderer_name="r", renderer_kwargs={}, llm=SimpleNamespace(version=0)
     )
+    policies = PolicySet([Policy(PolicySpec(MAIN, model_name="m", renderer_name="r"), model_info)])
     training: Any = SimpleNamespace(tasks=[])
-    return launch._build_workflows(config, components, model_info, settings, training, None)
+    return launch._build_workflows(config, components, policies, settings, training, None)
 
 
 def test_the_training_workflow_credits_with_each_entry_s_estimator_and_the_evaluation_s_with_none(tmp_path):

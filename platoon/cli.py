@@ -1027,8 +1027,9 @@ def config_validate(
 
 def _entry_settings_lines(resolved: ResolvedConfig) -> list[str]:
     """``config validate``'s lines about the entries' own settings: one per entry of a training config with settings
-    that differ from the run's, saying what differs, then each warning (``warning: ...``); for an evaluation config,
-    the entry keys ``platoon eval`` does not apply, as warnings."""
+    that differ from the run's, saying what differs, then each warning (``warning: ...``), those about the run's
+    policies among them (a frozen policy nothing uses); for an evaluation config, the entry keys ``platoon eval`` does
+    not apply, as warnings."""
 
     from platoon.train import entry_settings
 
@@ -1036,9 +1037,12 @@ def _entry_settings_lines(resolved: ResolvedConfig) -> list[str]:
     if resolved.schema is None or not getattr(config, "environments", None):
         return []
     if getattr(config, "train", None) is not None:
+        from platoon.train.policy.spec import policy_warnings
+
         settings = entry_settings.run_settings(config)
         lines = entry_settings.summary(config, settings)
-        return [*lines, *(f"warning: {line}" for line in entry_settings.warnings(config, settings))]
+        warned = [*entry_settings.warnings(config, settings), *policy_warnings(config)]
+        return [*lines, *(f"warning: {line}" for line in warned)]
     if getattr(config, "inference", None) is not None:
         return [f"warning: {line}" for line in entry_settings.evaluation_unapplied(config)]
     return []

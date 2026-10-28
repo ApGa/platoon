@@ -1130,11 +1130,12 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
     and their options, defaults included, their options and their checks run as a run's start runs them; and its group
     admission rules other than ``all`` (``kind: group_admission``), likewise, ``informative`` refused beside a workflow
     that gives its groups no verdict; and its entries' credit estimators (``kind: credit``), likewise, refused beside a
-    workflow that does not apply them.  A harness
-    with an option schema (a TOML spec's ``[options]``) also records the options each entry runs it with, defaults
-    included, per phase (``options``: ``{entry: {train: ..., eval: ...}}``, :mod:`platoon.options`): the phases the
-    config runs (:func:`platoon.options.config_phases`), or with ``split`` that split's phase only, for a command that
-    runs one split whatever the config says (``platoon rollout``).  A reference that does not resolve, and options its
+    workflow that does not apply them; agents bound to several policies are refused beside a workflow that binds one,
+    as an entry's own settings are beside one that does not apply them.  A harness with an option schema (a TOML
+    spec's ``[options]``) also records the options each entry runs it with, defaults included, per phase
+    (``options``: ``{entry: {train: ..., eval: ...}}``, :mod:`platoon.options`): the phases the config runs
+    (:func:`platoon.options.config_phases`), or with ``split`` that split's phase only, for a command that runs one
+    split whatever the config says (``platoon rollout``).  A reference that does not resolve, and options its
     component does not take, raise :class:`~platoon.utils.config.ConfigError` with every problem, which the CLI
     reports with exit 78 before the run starts.
     """
@@ -1200,6 +1201,7 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
     credit: list[dict[str, Any]] = []
     if getattr(config, "train", None) is not None:
         problems += _check_entry_settings_workflow(environments, records)
+        problems += _check_binding_workflow(config, environments, records)
         if not unimported:  # a package that does not import may register the samplers the config names
             samplers, found = _task_samplers(config)
             problems += found
@@ -1301,6 +1303,23 @@ def _check_entry_settings_workflow(
     if workflow == "group_rollout" or ("workflow", workflow) not in records:
         return []
     return entry_settings.workflow_problems(environments, resolve_component("workflow", workflow), workflow)
+
+
+def _check_binding_workflow(
+    config: Any, environments: Sequence[Any], records: Mapping[tuple[str, str], dict[str, Any]]
+) -> list[str]:
+    """Agents bound to several policies beside a training workflow class that binds one
+    (:func:`platoon.train.policy.spec.workflow_problems`), which ``platoon train`` refuses too.  The default workflow
+    binds them; one that does not resolve is reported already."""
+
+    from platoon.registry import resolve_component
+    from platoon.train.components import merge_run_level_settings
+    from platoon.train.policy.spec import workflow_problems
+
+    workflow = merge_run_level_settings(environments).workflow
+    if workflow == "group_rollout" or ("workflow", workflow) not in records:
+        return []
+    return workflow_problems(config, resolve_component("workflow", workflow), workflow)
 
 
 def _check_service_options(environments: Sequence[Any], records: Mapping[tuple[str, str], dict[str, Any]]) -> list[str]:

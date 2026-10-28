@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
     from platoon.train.dataloader import PlatoonTinkerDataloader
     from platoon.train.dispatch.permits import _Rows
+    from platoon.train.policy.set import PolicySet
     from platoon.train.tinker.proxy import ModelInfo
     from platoon.train.trainer.signals import Watchdog
     from platoon.utils.rollout_stats import RolloutStats
@@ -22,10 +23,11 @@ if TYPE_CHECKING:
 
 class LoopState(Protocol):
     """The loops' shared state, as the evaluation reads it: the run's config, the step training is at, the shutdown
-    request, the event of each published policy and the policy (its sampling client and model info), the evaluation's
-    split, the stats logger and the watchdog; where the start began and whether an earlier start evaluated that step;
-    the evaluation's cadence and record.  It sets one field, the step it handled last (``eval_handled_step``), and sets
-    the event of its progress."""
+    request, the event of each published policy and the policy (its sampling client and model info) among the run's
+    policies (``policies``, whose frozen ones an evaluation publishes the bindings of), the evaluation's split, the
+    stats logger and the watchdog; where the start began and whether an earlier start evaluated that step; the
+    evaluation's cadence and record.  It sets one field, the step it handled last (``eval_handled_step``), and sets the
+    event of its progress."""
 
     eval_handled_step: int | None
 
@@ -41,6 +43,8 @@ class LoopState(Protocol):
     def sampling_client(self) -> "tinker.SamplingClient": ...
     @property
     def model_info(self) -> "ModelInfo": ...
+    @property
+    def policies(self) -> "PolicySet | None": ...
     @property
     def eval_dataloader(self) -> "PlatoonTinkerDataloader | None": ...
     @property
@@ -90,5 +94,5 @@ class EvaluatedTrainer(Protocol):
         label_stats: "dict[str, RolloutStats] | None" = None,
     ) -> None: ...
     def _publish_worker_binding(
-        self, workflow: Any, sampling_client: Any, version: int, *, required: bool = False
+        self, workflow: Any, sampling_client: Any, version: int, *, required: bool = False, policy: str | None = None
     ) -> None: ...

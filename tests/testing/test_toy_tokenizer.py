@@ -84,7 +84,8 @@ def test_auto_tokenizer_and_tinker_cookbook_load_it():
 
     loaded = AutoTokenizer.from_pretrained(str(TOY_TOKENIZER_DIR))
 
-    assert get_tokenizer(TOY_MODEL_NAME) is toy_tokenizer()
+    tokenizer = toy_tokenizer()  # registers it with tinker-cookbook, in a process whose tests had not loaded it yet
+    assert get_tokenizer(TOY_MODEL_NAME) is tokenizer
     assert loaded.encode("<|im_start|>hi", add_special_tokens=False) == [257, 104, 105]
 
 

@@ -783,6 +783,7 @@ environments:
 |---|---|---|
 | `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards, value for value | none |
 | `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key: under `[task, role]` the roots on the roots' mean and the subagents on the subagents', where `group` centers every agent on its rollout's root baseline | `key`: one or more of `task`, `policy`, `role` and `depth` (default `[task, policy, role]`); `leave_one_out` (default false): the mean of the other agents of its key, an agent alone in its key getting 0 |
+| `reverse_kl` | On-policy distillation: a frozen teacher scores every token the student sampled, and each action token's advantage is the negative reverse KL between them ([Distill a frozen teacher](#distill-a-frozen-teacher-experimental)) | `teacher` (required): a frozen policy of `policies:`; `kl_coef` (default 1); `reward_coef` (default 0): the weight of the row's reward centered on its member's baseline |
 | a name an entry's `package` registers with `@credit_estimator`, or `module:Class` | yours ([Write a credit estimator](../extending/credit-estimators.md); [`examples/credit-by-role`](../../examples/credit-by-role/README.md) is one of about 40 lines) | its own |
 
 **Where it runs.** The training workflow awaits the entry's estimator once per group, in the trainer process, after
@@ -797,7 +798,9 @@ the converter loaded it onto its action tokens. An agent that was not scored, in
 gave no verdict (a judge error, an unparseable or a pending one), has no reward: it enters no baseline, and it has no
 rows. A row that reaches such an estimator without its tags (a workflow subclass that runs its members another way)
 fails its group, with an error that says why. An estimator that raises, or whose `assign` does not return within its
-`assign_timeout_seconds` (600 by default), stops the run with an error that names it and its entry.
+`assign_timeout_seconds` (600 by default), stops the run with an error that names it and its entry; but a policy's
+scoring that fails (a teacher's service that raised or did not answer within its `sample_timeout_seconds`) fails only
+the group it was crediting, whose verdict is then `failed` and which trains nothing, counted under `credit/failures`.
 
 **What loads.** The estimator resolves when the config loads (core's names, then names the entries' packages register,
 then `module:Class`), its options are checked against its schema and its `check` runs: an unknown name, an option it
@@ -815,6 +818,107 @@ takes up both; a resume whose entry names another estimator than the one that sa
 warning. Credit metrics go with the group, recorded in the step that trains it: `keyed` logs
 `credit/keyed/baselines` (the keys a group's agents fell into) and `credit/agent_advantage/abs_avg`, beside the
 `credit/baseline/*` of the workflow's own credit.
+
+## Distill a frozen teacher (experimental)
+
+On-policy distillation trains the policy on its own rollouts with a larger model's judgement of every token it sampled.
+Declare the teacher as a frozen policy beside `train:`, whose model is the student, `main`, and credit the entry's
+groups with `reverse_kl`:
+
+```yaml
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507      # the student, main
+  renderer_name: qwen3_instruct
+  loss_fn: importance_sampling
+  loss_fn_config: {}
+policies:
+  teacher:
+    model_name: Qwen/Qwen3-32B
+    renderer_name: qwen3
+    trainable: false                            # frozen: it scores, and is never stepped, saved or pruned
+    # tinker_base_url: http://<host>:<port>     # its own service; without it, the run's (the student's)
+environments:
+  - name: guess
+    # ...
+    credit: reverse_kl
+    credit_options: {teacher: teacher}          # kl_coef: 1 and reward_coef: 0 by default
+```
+
+For each training group, once its rollouts are done, the teacher scores the tokens the student sampled
+(`compute_logprobs` on its sampling client), and each action token's advantage becomes
+`-kl_coef * (student logprob - teacher logprob)`, plus `reward_coef` times the row's reward centered on its member's
+baseline when `reward_coef` is above 0. With `reward_coef: 1` this is tinker-cookbook's on-policy distillation
+advantage (the cookbook's discounted KL, `kl_discount_factor`, is not built); the default, 0, distills alone. The
+scoring runs in the trainer after the group's rollouts returned their permits, so it holds no rollout slot; an
+evaluation runs no estimator, so it never calls the teacher. The step's metrics add `credit/reverse_kl/avg`, the mean
+reverse KL per action token.
+
+- **The teacher's service.** Without `tinker_base_url` the teacher uses the run's service, the student's, in a Tinker
+  session of its own, so that a fatal error on the teacher's session never ends the student's. Give it a URL of its
+  own when the backend cannot serve it beside the student (a self-hosted service of one base model); a job script
+  passes it as `policies.teacher.tinker_base_url=http://<host>:<port>`. A service that cannot be reached stops
+  `platoon train` as the trainer is built, with an error that names the policy and its URL.
+- **When scoring fails.** At most 32 of the teacher's calls are in flight at once, over every group, and each is
+  bounded by the teacher's `sample_timeout_seconds` (`policies.teacher.sample_timeout_seconds`). A call that fails or
+  runs out of time, a response of the wrong length (not one logprob per token scored), or a token the service gives
+  no logprob for, fails that group alone: its verdict is `failed`, it trains nothing, the step counts it under
+  `credit/failures`, and the run goes on. The first call of a group that fails cancels the group's other calls.
+- **The sampler it serves.** A frozen policy samples its base model, or the `tinker://` sampler its
+  `load_checkpoint_path` names, such as a teacher trained earlier.
+- **What loading refuses** (exit 78, `platoon config validate` too): a `teacher` that names no frozen policy of
+  `policies:`, or names `main`; a teacher whose tokenizer differs from the student's (cross-tokenizer distillation is
+  not built), compared by model name before any Tinker session opens. A tokenizer that cannot be loaded there (no
+  network) leaves that comparison undone, with a warning; `platoon train` then compares the tokenizers it loaded for
+  the two policies as it builds the estimator, after their sessions opened, and stops with exit code 78 when they
+  differ.
+
+[`examples/on-policy-distillation`](../../examples/on-policy-distillation/README.md) distills Qwen3-32B into the
+quickstart's Qwen3-4B, with the teacher on the student's service and on its own.
+
+## Sample several policies (experimental)
+
+A run's agents may sample other policies than the one it trains: a frozen judge, a frozen helper that a harness mints
+as a subagent. Declare each under `policies:`, with `train:`'s names for the same settings, and bind agent roles to
+them under `agents:`:
+
+```yaml
+policies:
+  judge:
+    model_name: Qwen/Qwen3-32B
+    renderer_name: qwen3
+    trainable: false
+    tinker_base_url: http://<host>:<port>       # optional: without it, the run's tinker_base_url
+agents:
+  roles:
+    judge: {policy: judge}                      # agents opened with role judge sample the judge, for life
+```
+
+- **Which agent samples which policy.** The root agent samples `main`. An agent its harness or program opens with a
+  role (`ctx.agents.spawn(..., role=...)`, `POST /v1/platoon/agents {"role": ...}`, an episode program's judge) samples
+  that role's policy for its whole life, and `main` when `agents.roles` names none for its role. A request never
+  picks a policy, and only text crosses between policies: each agent renders, samples and parses with its own policy's
+  renderer and tokenizer.
+- **What trains.** This release trains one policy, `main`. A policy of `policies:` must say `trainable: false`, and a
+  frozen policy's agents make no rows: their rewards still reach the credit (an estimator that reads agents sees them,
+  with their policy), and `main`'s rows are stamped with `main`'s version, which the staleness bound measures.
+  Training several policies arrives with lockstep multi-policy training (RFC 0021, milestone B4).
+- **Rollout workers.** Under `rollout_isolation: process`, each worker follows one binding file per sampled policy
+  (`model_binding.pkl` for `main`, `model_binding.<id>.pkl` for each other), which the trainer publishes before the
+  first rollout and before each evaluation.
+- **What loading refuses** (exit 78, `platoon config validate` too): an id that is not a lowercase name
+  (`[a-z][a-z0-9_-]`, at most 32 characters); `policies.main`, which `train:` declares; a second trainable policy; a
+  `sample_timeout_seconds` that is not a positive number, as `train:`'s; a role bound to a policy the run does not
+  declare; `agents.policy` other than `main` in this release; roles bound to several policies beside a workflow that
+  cannot bind them (`binds_policies`, which `GroupRolloutWorkflow` declares); and either key under `trainer: sft`, which
+  rolls nothing out. A frozen policy that no agent samples and no entry's `credit_options` names is only warned of, and
+  so is a policy bound to the role `policy`, the root agent's, which the root never samples.
+- **What a resume checks.** A run with `policies:` or `agents:` records each policy's model, renderer and whether it
+  trains, a frozen one's `load_checkpoint_path`, and each role's policy, in its `identity.json`, never a URL: a resume
+  that adds or removes a policy, changes one of those, or binds a role elsewhere stops with exit code 78, naming each
+  change; one that reaches the services at new URLs resumes. A run without either key writes and checks what it always
+  did.
+- **What a program reads.** Each `TinkerLLMInteraction` of an agent tree names the policy that sampled it (`policy`,
+  None in a run of one policy), so a program that trains on its agents' interactions keeps the frozen policies' apart.
 
 ## Label tasks by a column
 
@@ -986,7 +1090,9 @@ checkpoint: {every: 200, recovery_every: 20, keep_recovery: 2}
 `train:` declares the policy (`model_name`, `renderer_name`, `renderer_kwargs`, `lora_rank`, `optimizer` and the
 deadlines of its updates). Its keys that only the rl trainer reads (its batch, duration, loss, staleness and rollout
 settings) are refused under `sft` when set, each with the `trainer_options` key to set instead when there is one, as
-`train.batch_size` names `trainer_options.batch_size`. An sft run rolls nothing out, so it needs no `environments`.
+`train.batch_size` names `trainer_options.batch_size`. An sft run rolls nothing out, so it needs no `environments`,
+and it refuses `policies:` and `agents:`, which only the rl trainer samples or scores with
+([Sample several policies](#sample-several-policies-experimental)).
 
 ### The datasets
 
@@ -1555,7 +1661,10 @@ train:
   had published when the call was issued; under process isolation, that of the binding the worker followed for it.
   A datum, a run of model calls whose prompts extend one another merged into one sequence, carries the oldest version
   among its own calls, where under `group` every datum of a rollout carries the rollout's oldest (the request's
-  version, in process). A rollout that spans a published policy then keeps the datums it sampled since.
+  version, in process). A rollout that spans a published policy then keeps the datums it sampled since. In a run that
+  samples several policies ([Sample several policies](#sample-several-policies-experimental)), each call records the
+  version of the policy that sampled it, and only the trained policy's datums are judged: a frozen policy's agents
+  make none.
 - **What it drops.** Each datum more versions old than the bound. The others train with the advantages their group's
   credit gave them: the credit ran over the whole group as it settled, so each term kept keeps its expectation. A group
   that keeps any datum is consumed: its statistics, its fate in the per-task statistics and its place in the batch are
