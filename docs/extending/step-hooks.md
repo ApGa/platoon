@@ -47,8 +47,8 @@ class ReplaySFT(px.StepHookBase):
         await end.train("main", datums, objective=CrossEntropy(), adam_params=self.adam_params())  # None: the policy's
 ```
 
-Platoon has no cross-entropy objective yet: an objective is any class of `platoon.experimental.Objective` (a Tinker
-loss and the metrics of each microbatch), and the example's
+An objective is any class of `platoon.experimental.Objective` (a Tinker loss and the metrics of each microbatch):
+platoon's cross-entropy is the sft trainer's, `platoon.train.objectives.cross_entropy.CrossEntropy`, and the example's
 [`CrossEntropy`](../../examples/replay-sft-hook/replay_sft.py) is one to copy.
 
 Every method is optional when the hook subclasses `StepHookBase`, whose methods are empty; a class of the `StepHook`
@@ -160,6 +160,11 @@ class MyTrainer(px.TrainerBase):
             await update.apply()
             await run.end_step()                  # the hooks, one publication, the next step
 ```
+
+A trainer whose policies nothing but a step hook samples (no rollouts, no sampling of its own, as the `sft` trainer)
+ends its steps with `run.end_step(sampled=False)`: a step without a hook, or one that neither it nor a hook updated,
+then publishes no sampler and saves only the full checkpoint the cadence asks for, while one with hooks publishes as
+above.
 
 A trainer that subclasses the `rl` trainer (`platoon.train.PlatoonTinkerRLTrainer`) registers its hooks in `check()`,
 calling `super().check(run)` first, and keeps the `rl` trainer's steps as they are. The `rl` trainer reads the hooks

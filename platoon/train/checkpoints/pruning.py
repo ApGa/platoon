@@ -13,7 +13,8 @@ What is never deleted (:func:`plan_deletions`):
 * the resume point: the newest record with a ``state_path``, which a start resumes from;
 * a recovery checkpoint a sampling client of this start may still use: one this start saved within the run's largest
   staleness bound of the policy (``train.max_staleness``, or an environment entry's ``max_staleness`` above it), or
-  whose version is unknown. A checkpoint an earlier start saved serves no sampling client of this one;
+  whose version is unknown. A checkpoint an earlier start saved serves no sampling client of this one, and under a
+  trainer that rolls nothing out (``trainer: sft``) none does;
 * anything that ``checkpoints.jsonl`` of this run does not list: another run's checkpoints, or the checkpoint
   ``load_checkpoint_path`` names.
 
@@ -113,12 +114,13 @@ def recovery_pruning_problems(
 def config_pruning_problems(config: Any) -> list[str]:
     """The :func:`recovery_pruning_problems` of a training config, against the largest staleness bound of the run and
     its environment entries (:func:`platoon.train.entry_settings.largest_staleness`): a slow entry's group may still
-    sample from an old checkpoint."""
+    sample from an old checkpoint.  None under a trainer that rolls nothing out, which no rollout samples."""
 
     from platoon.train.entry_settings import largest_staleness
+    from platoon.train.trainer.registry import rolls_out
 
     checkpoint = getattr(config, "checkpoint", None)
-    if getattr(config, "train", None) is None:
+    if getattr(config, "train", None) is None or not rolls_out(config):
         return []
     largest, bound = largest_staleness(config)
     return recovery_pruning_problems(
@@ -239,7 +241,7 @@ def plan_deletions(
     keep: int,
     deleted: Collection[str],
     policy_version: int,
-    max_staleness: int,
+    max_staleness: int | None,
     this_start: Collection[str],
 ) -> list[tuple[RecordedCheckpoint, str]]:
     """The paths to delete now, oldest first, each with its checkpoint: the paths left of every recovery checkpoint
@@ -247,7 +249,7 @@ def plan_deletions(
 
     ``records`` are ``checkpoints.jsonl``'s, in order; ``deleted`` the paths already deleted; ``this_start`` the
     first path (the state path) of each recovery checkpoint this start saved; ``policy_version`` the policy's
-    version now.
+    version now; ``max_staleness`` the run's largest staleness bound, or None when no rollout samples the policy.
     """
 
     if keep < 1:
@@ -259,7 +261,11 @@ def plan_deletions(
         if not _record_name(record).startswith(RECOVERY_CHECKPOINT_PREFIX):
             protected.update(_record_paths(record))
     for checkpoint in checkpoints:
-        sampled = checkpoint.paths[0] in this_start and _maybe_sampled(checkpoint, policy_version, max_staleness)
+        sampled = (
+            max_staleness is not None
+            and checkpoint.paths[0] in this_start
+            and _maybe_sampled(checkpoint, policy_version, max_staleness)
+        )
         if sampled or checkpoint in kept:
             protected.update(checkpoint.paths)
     return [
@@ -299,10 +305,13 @@ class RecoveryCheckpointPruner:
     """
 
     def __init__(
-        self, *, run_dir: str, keep: int, max_staleness: int, service_client_factory: Callable[[], Any]
+        self, *, run_dir: str, keep: int, max_staleness: int | None, service_client_factory: Callable[[], Any]
     ) -> None:
-        """``service_client_factory`` opens the Tinker session the deletes go through (a ``tinker.ServiceClient`` of
-        the training service): pruning calls it once, in a worker thread, before its first delete."""
+        """``max_staleness`` is the run's largest staleness bound, or None when no rollout samples the policy (an sft
+        run: ``k = 0``, and since its version never moves, none of this start's checkpoints is kept for a sampling
+        client either).  ``service_client_factory`` opens the Tinker session the deletes go through (a
+        ``tinker.ServiceClient`` of the training service): pruning calls it once, in a worker thread, before its first
+        delete."""
 
         if keep < 1:
             raise ValueError("keep must be at least 1")

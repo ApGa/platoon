@@ -1,4 +1,5 @@
-"""The conformance check of a trainer (RFC 0021): :func:`check_trainer`.
+"""The conformance check of a trainer (RFC 0021): :func:`check_trainer`; and the fake Tinker service it runs on, for a
+test of a run of one's own (:func:`fake_tinker_service`).
 
 It runs the trainer through RFC 0021's lifecycle: built from its setup, entered with ``async with``, and run (``platoon
 train`` itself still builds the rl trainer with its constructor and calls its ``train()``, which runs the same
@@ -6,7 +7,9 @@ lifecycle).  It runs on CPU: on a fake Tinker service (:class:`FakePolicyService
 and save to ``tinker://`` paths of their own while the run's ``checkpoints.jsonl`` gets its rows as in a real run, under
 a model gateway that samples nothing and renders with :func:`~platoon.testing.toy_renderer`, and, for a trainer that
 rolls out (``needs().rollouts``), over 16 training tasks with a workflow whose every group is one datum with a nonzero
-advantage.  It is made of named checks (:data:`CHECKS`), run on five starts:
+advantage.  A run is as long as ``train.max_training_steps`` says, or, for a trainer whose options say how long it
+trains, as long as the options that ``options_for_steps`` gives say.  It is made of named checks (:data:`CHECKS`), run
+on five starts:
 
 - ``trains``: a fresh run of two steps saves its launch checkpoint at step 0 and its final one at step 2, each row with
   the run's counters, its policy version and optimizer steps never going back;
@@ -32,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,37 +58,45 @@ STOP_WAIT_S = 0.5
 _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1, signal.SIGUSR2)
 
 
-def check_trainer(trainer: type[Trainer], *, options: Any = None) -> None:
+def check_trainer(
+    trainer: type[Trainer], *, options: Any = None, options_for_steps: Callable[[int], Any] | None = None
+) -> None:
     """Check a trainer class against RFC 0021's lifecycle (:data:`CHECKS`); raise ``AssertionError`` naming every
-    check it fails, with what it saw.  ``options`` are the trainer's options, as its setup gives them.  It installs
-    the signal handlers a start installs, and puts back the ones it found; call it outside a running event loop."""
+    check it fails, with what it saw.  ``options`` are the trainer's options, as its setup gives them; for a trainer
+    whose options say how long it trains (sft's ``max_training_steps``), ``options_for_steps(steps)`` gives those of a
+    run of ``steps`` steps instead.  It installs the signal handlers a start installs, and puts back the ones it
+    found; call it outside a running event loop."""
 
     from platoon.utils.scratch import temporary_directory
 
+    def options_of(steps: int) -> Any:
+        return options_for_steps(steps) if options_for_steps is not None else options
+
     with temporary_directory(prefix="platoon-check-trainer-") as directory, _restored_signals():
-        failures = _run_checks(trainer, options, Path(directory))
+        failures = _run_checks(trainer, options_of, Path(directory))
     if failures:
         lines = [f"{name}: {what}" for name, found in failures.items() for what in found]
         name = getattr(trainer, "__qualname__", repr(trainer))
         raise AssertionError(f"trainer {name} fails {len(failures)} check(s):\n  " + "\n  ".join(lines))
 
 
-def _run_checks(trainer: type[Trainer], options: Any, directory: Path) -> dict[str, list[str]]:
-    """Each check's problems, by name; the checks after one whose start fails do not run."""
+def _run_checks(trainer: type[Trainer], options_of: Callable[[int], Any], directory: Path) -> dict[str, list[str]]:
+    """Each check's problems, by name; the checks after one whose start fails do not run.  ``options_of(steps)``
+    gives the trainer's options for a run of ``steps`` steps."""
 
     failures: dict[str, list[str]] = {}
-    fresh = _start(trainer, options, directory / "fresh", steps=2)
+    fresh = _start(trainer, options_of(2), directory / "fresh", steps=2)
     failures.update(_found("trains", fresh, _trains))
-    stopped = _start(trainer, options, directory / "resumed", steps=4, stop_at=STOP_AT)
+    stopped = _start(trainer, options_of(4), directory / "resumed", steps=4, stop_at=STOP_AT)
     failures.update(_found("interrupts", stopped, _interrupts))
     if "interrupts" not in failures:
-        resumed = _start(trainer, options, directory / "resumed", steps=4)
+        resumed = _start(trainer, options_of(4), directory / "resumed", steps=4)
         failures.update(_found("resumes", resumed, lambda rows: _resumes(stopped.rows, rows)))
     probe = _Probe()
-    hooked = _start(trainer, options, directory / "hooked", steps=2, probe=probe)
+    hooked = _start(trainer, options_of(2), directory / "hooked", steps=2, probe=probe)
     failures.update(_found("runs step hooks", hooked, lambda rows: _runs_hooks(probe, fresh.rows, rows)))
-    atomic, stopper = _needs(trainer, options).atomic_steps, _Probe(stop_in=1)
-    whole = _start(trainer, options, directory / "whole", steps=4, probe=stopper)
+    atomic, stopper = _needs(trainer, options_of(4)).atomic_steps, _Probe(stop_in=1)
+    whole = _start(trainer, options_of(4), directory / "whole", steps=4, probe=stopper)
     failures.update(_found("keeps steps whole", whole, lambda rows: _keeps_steps_whole(atomic, stopper, rows)))
     return failures
 
@@ -242,7 +253,7 @@ def _start(
         workflow_builder=lambda policies: Workflows(_OneDatumGroups(), None),
     )
     error = None
-    with _faked(FakePolicyService(stop_at=stop_at)):
+    with fake_tinker_service(stop_at=stop_at):
         try:
             built = trainer.from_setup(setup)
             if probe is not None:
@@ -319,6 +330,19 @@ def _restored_signals() -> Generator[None]:
 
 
 @contextmanager
+def fake_tinker_service(*, stop_at: int | None = None) -> Generator[FakePolicyService]:
+    """A fake Tinker service on CPU in place of the real one for the ``with`` block, which yields it
+    (:class:`FakePolicyService`, which records what it was sent): ``tinker.ServiceClient`` opens it, each policy's
+    model gateway samples nothing and renders with :func:`~platoon.testing.toy_renderer`, and the signal handlers a
+    start installs are put back after the block.  ``stop_at``: the optimizer step in which it asks the run to stop.
+    A test runs ``platoon train`` (``platoon.cli.main``) or a trainer in it, as :func:`check_trainer` does."""
+
+    service = FakePolicyService(stop_at=stop_at)
+    with _restored_signals(), _faked(service):
+        yield service
+
+
+@contextmanager
 def _faked(service: FakePolicyService) -> Generator[None]:
     """``service`` in place of the Tinker service, and a model gateway that samples nothing in place of the one a
     trainer registers for its policy."""
@@ -382,19 +406,30 @@ class FakePolicyService:
     paths, while ``tinker_cookbook`` records each full save in the run's ``checkpoints.jsonl`` as it does for a real
     service.  ``stop_at``: the optimizer step, counted over the start, in which it raises ``SIGUSR2``, the stop request
     ``platoon train`` passes on.  ``calls`` lists what was asked of it, in order; ``losses`` the loss of each
-    forward_backward, and ``adam`` the Adam parameters of each optimizer step."""
+    forward_backward, ``datums`` every datum sent to it, ``adam`` the Adam parameters of each optimizer step, and
+    ``deleted`` the checkpoint paths its REST client deleted (the recovery pruning's)."""
 
     def __init__(self, *, stop_at: int | None = None) -> None:
         self.stop_at = stop_at
         self.optimizer_steps = 0
         self.calls: list[str] = []
         self.losses: list[str] = []
+        self.datums: list[Any] = []
         self.adam: list[Any] = []
+        self.deleted: list[str] = []
 
     def service_client(self, **kwargs: Any) -> FakePolicyService:
         """``tinker.ServiceClient(base_url=...)``: this service."""
 
         return self
+
+    def create_rest_client(self) -> FakePolicyService:
+        """The service's REST client: this service."""
+
+        return self
+
+    async def delete_checkpoint_from_tinker_path_async(self, path: str) -> None:
+        self.deleted.append(path)
 
     async def create_lora_training_client_async(self, base_model: str, rank: int = 32, **kwargs: Any) -> Any:
         return self._open(f"create_lora_training_client {base_model}")
@@ -430,6 +465,7 @@ class _FakeTrainingClient:
 
         self.service.calls.append(f"forward_backward {len(datums)}")
         self.service.losses.append(loss_fn)
+        self.service.datums += datums
         outputs = [
             {"logprobs": tinker.TensorData.from_torch(torch.zeros(len(datum.model_input.to_ints())))}
             for datum in datums

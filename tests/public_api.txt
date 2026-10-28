@@ -471,6 +471,8 @@ platoon.experimental.TrainerBase.run_log_path: property str
 platoon.experimental.TrainerBase.run_steps: async def run_steps(run: TrainerRun) -> None
 platoon.experimental.TrainerBase.setup: constant NoneType = None
 platoon.experimental.TrainerBase.started: async def started(run: TrainerRun) -> None
+platoon.experimental.TrainerBase.stats_logger: property StatsLogger
+platoon.experimental.TrainerBase.train_tracker: property StatsTracker
 platoon.experimental.TrainerNeeds: @dataclass(frozen=True) class TrainerNeeds
 platoon.experimental.TrainerNeeds.atomic_steps: field bool = True
 platoon.experimental.TrainerNeeds.draw_provenance: field bool = False
@@ -544,6 +546,14 @@ platoon.testing.EpisodeRun.policy: property ScriptedPolicy
 platoon.testing.EpisodeRun.reward: property float
 platoon.testing.EpisodeRun.root: property Trajectory
 platoon.testing.EpisodeRun.trajectories: property list[Trajectory]
+platoon.testing.FakePolicyService: class FakePolicyService
+platoon.testing.FakePolicyService.__init__: def __init__(*, stop_at: int | None = None) -> None
+platoon.testing.FakePolicyService.create_lora_training_client_async: async def create_lora_training_client_async(base_model: str, rank: int = 32, **kwargs: Any) -> Any
+platoon.testing.FakePolicyService.create_rest_client: def create_rest_client() -> FakePolicyService
+platoon.testing.FakePolicyService.create_training_client_from_state_async: async def create_training_client_from_state_async(path: str, **kwargs: Any) -> Any
+platoon.testing.FakePolicyService.create_training_client_from_state_with_optimizer_async: async def create_training_client_from_state_with_optimizer_async(path: str, **kwargs: Any) -> Any
+platoon.testing.FakePolicyService.delete_checkpoint_from_tinker_path_async: async def delete_checkpoint_from_tinker_path_async(path: str) -> None
+platoon.testing.FakePolicyService.service_client: def service_client(**kwargs: Any) -> FakePolicyService
 platoon.testing.PolicyCall: @dataclass(frozen=True) class PolicyCall
 platoon.testing.PolicyCall.completion: field Completion
 platoon.testing.PolicyCall.last_user_message: property str
@@ -566,7 +576,8 @@ platoon.testing.TOY_RENDERER_NAME: constant str = "qwen3_instruct"
 platoon.testing.TOY_TOKENIZER_DIR: constant Path
 platoon.testing.check_group_admission: def check_group_admission(rule: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('run', 'entry'), budget_ms: float | None = 2.0) -> None
 platoon.testing.check_task_sampler: def check_task_sampler(sampler: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('entry', 'run'), budget_ms: float | None = 20.0) -> None
-platoon.testing.check_trainer: def check_trainer(trainer: type[Trainer], *, options: Any = None) -> None
+platoon.testing.check_trainer: def check_trainer(trainer: type[Trainer], *, options: Any = None, options_for_steps: Callable[[int], Any] | None = None) -> None
+platoon.testing.fake_tinker_service: def fake_tinker_service(*, stop_at: int | None = None) -> Generator[FakePolicyService]
 platoon.testing.last_user_message: def last_user_message(prompt: str) -> str
 platoon.testing.make_gateway: def make_gateway(policy: ScriptedPolicy | Script = (), *, tokenizer: Tokenizer | None = None, renderer: Renderer | str | None = None, renderer_kwargs: Mapping[str, Any] | None = None, model_name: str = "platoon/toy", **settings: Any) -> ModelGateway
 platoon.testing.rules: def rules(table: Mapping[str, Reply], *, default: Reply | None = None) -> Callable[[str], Reply]

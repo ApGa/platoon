@@ -85,9 +85,10 @@ class Policy:
         """Open the policy's training client on its service, at its start point: the one its checkpoint resumes
         (``start.record``: its weights and its optimizer's state), else a new run's (:meth:`create_training_client`),
         asked again after each refusal that asking again may change
-        (:func:`~platoon.train.policy.service.open_training_client`).  False when ``stop`` was set before the service
-        accepted it.  A key the service refuses (401, 403) ends training with one line that names the key and the
-        service."""
+        (:func:`~platoon.train.policy.service.open_training_client`); a policy that trains then has its optimizer's
+        parameters (``optimizer_params``, from its spec's ``optimizer``).  False when ``stop`` was set before the
+        service accepted it.  A key the service refuses (401, 403) ends training with one line that names the key and
+        the service."""
 
         with key_refusals(asked="a training client"):
             training_client = await service.open_training_client(
@@ -96,6 +97,8 @@ class Policy:
         if training_client is None:
             return False
         self.training_client = training_client
+        if self.spec.optimizer is not None:  # a policy that trains: its optimizer's parameters, from its spec
+            self.optimizer_params = adam_params(self.spec.optimizer)
         return True
 
     async def create_training_client(

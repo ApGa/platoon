@@ -1,0 +1,29 @@
+# Supervised fine-tuning on a sharegpt dataset, in LLaMA-Factory's conventions: multi-turn conversations with system
+# prompts, tools, tool calls (function_call) and their results (observation). The loss is on the assistant's turns and
+# its tool calls; mask_history: true would train on each conversation's last one only.
+#
+#   uv run platoon train examples/sft/sharegpt.yaml    # needs TINKER_API_KEY
+
+trainer: sft
+trainer_options:
+  dataset: sharegpt_demo
+  batch_size: 4                 # conversations per step: 2 steps an epoch here
+  num_epochs: 3
+  num_microbatches: 2           # each step's conversations in two forward_backward calls, one optimizer step
+
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  optimizer:
+    learning_rate: 1.0e-4
+
+checkpoint:
+  recovery_every: 1             # a recovery checkpoint after every step, to resume from after a crash
+  keep_recovery: 2              # of which the newest 2 are kept
+
+log_path: ./runs
+stats:
+  experiment_name: sft
+  trial_name: sharegpt
+  wandb:
+    mode: disabled

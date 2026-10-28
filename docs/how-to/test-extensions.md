@@ -318,9 +318,45 @@ the run's end), `runs step hooks` (a hook of the check's own, which adds one opt
 hears the launch and each step's end in order, each step publishes once, and the run counts the hook's updates: end
 each step with `run.end_step`) and `keeps steps whole` (a stop request as that hook drains step 1, after the step's
 own updates, saves no checkpoint of the step when the trainer's steps are atomic, `needs().atomic_steps`, and lets the
-step end first when they are not, saving `000002_interrupted`). Call it outside a running event loop; it puts back the
+step end first when they are not, saving `000002_interrupted`). A run is as long as `train.max_training_steps` says;
+for a trainer whose options say how long it trains, `options_for_steps` gives the options of a run of so many steps,
+as for the sft trainer:
+
+```python
+from platoon.train.supervised.options import SupervisedOptions
+from platoon.train.trainer.sft import SupervisedTrainer
+
+check_trainer(
+    SupervisedTrainer,
+    options_for_steps=lambda steps: SupervisedOptions(
+        dataset="alpaca_demo",
+        dataset_dir="examples/sft/data",  # the sft example's datasets, from the repository's root
+        batch_size=4,
+        max_training_steps=steps,
+    ),
+)
+```
+
+Its policy renders with the toy renderer (`toy_renderer()`). Call it outside a running event loop; it puts back the
 signal handlers it found. `check_trainer` checks the experimental trainer API (`platoon.experimental`), and changes
 with it.
+
+The fake Tinker service it runs on is `fake_tinker_service()`, a context manager that yields the service
+(`FakePolicyService`): inside it, `platoon train` runs a config on CPU, and the service records what it was sent
+(`calls`, the `datums` it trained on, the checkpoint paths it `deleted`), as
+[`tests/examples/test_sft_example.py`](../../tests/examples/test_sft_example.py) does for the sft example:
+
+```python
+from platoon import cli
+from platoon.testing import fake_tinker_service
+
+
+def test_my_config_trains(tmp_path):
+    with fake_tinker_service() as service:
+        cli.main(["train", "my_sft.yaml", f"log_path={tmp_path}"])
+
+    assert service.calls.count("optim_step") == 6
+```
 
 ## Reference
 
@@ -342,8 +378,10 @@ with it.
 | `TOY_MODEL_NAME`, `TOY_RENDERER_NAME`, `TOY_TOKENIZER_DIR` | `"platoon/toy"`, `"qwen3_instruct"`, and the directory of the toy tokenizer's files |
 | `check_task_sampler` | `check_task_sampler(sampler, *, options=None, levels=("entry", "run"), budget_ms=20.0)`: raises `AssertionError` naming each check a task sampler fails ([Check a task sampler](#check-a-task-sampler)) |
 | `check_group_admission` | `check_group_admission(rule, *, options=None, levels=("run", "entry"), budget_ms=2.0)`: raises `AssertionError` naming each check a group admission rule fails ([Check a group admission rule](#check-a-group-admission-rule)) |
-| `check_trainer` | `check_trainer(trainer, *, options=None)`: raises `AssertionError` naming each check a trainer fails ([Check a trainer](#check-a-trainer)) |
+| `check_trainer` | `check_trainer(trainer, *, options=None, options_for_steps=None)`: raises `AssertionError` naming each check a trainer fails ([Check a trainer](#check-a-trainer)) |
+| `fake_tinker_service` | `fake_tinker_service(*, stop_at=None)`: a context manager that yields a `FakePolicyService` in place of the Tinker service, puts back the signal handlers a run installs, and with `stop_at` asks the run to stop in that optimizer step |
+| `FakePolicyService` | The fake service: `calls` (what it was asked, in order), `datums` (each datum sent to forward_backward), `deleted` (the checkpoint paths deleted), `optimizer_steps` |
 
-The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission` and
-`check_trainer`, which check the experimental sampler, admission and trainer APIs and change with them; its submodules
-are not.
+The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission`,
+`check_trainer`, `fake_tinker_service` and `FakePolicyService`, which serve the experimental sampler, admission and
+trainer APIs and change with them; its submodules are not.

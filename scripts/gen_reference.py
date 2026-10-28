@@ -8,8 +8,8 @@
 * ``config.md``: every config dataclass or pydantic model reachable from the training config
   (``PlatoonTinkerRLTrainerConfig``) and the evaluation config (``PlatoonEvalConfig``): each key's type,
   default and description.
-  It ends with core's task samplers, the levels each serves, and ``pass_rate``'s options, and core's group admission
-  rules, with ``informative``'s options.
+  It ends with core's task samplers, the levels each serves, and ``pass_rate``'s options, core's group admission
+  rules, with ``informative``'s options, and core's trainers, with the options of each that takes some.
 * ``api.md``: every name ``platoon`` exports (``platoon.__all__``), with its signature and docstring.
 * ``experimental.md``: every name ``platoon.experimental`` exports, the same way.
 
@@ -421,6 +421,8 @@ def _config_type_text(annotation: Any, links: Mapping[type, str]) -> str:
         return "None"
     if annotation is Any:
         return "Any"
+    if annotation is Ellipsis:  # tuple[X, ...]
+        return "..."
     if origin is typing.Annotated:
         return _config_type_text(args[0], links)
     if origin is typing.Literal:
@@ -500,6 +502,7 @@ def render_config() -> str:
             lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
     lines += _task_samplers(links)
     lines += _group_admissions(links)
+    lines += _trainers(links)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -621,6 +624,72 @@ def _group_admissions(links: Mapping[type, str]) -> list[str]:
         "|---|---|---|---|",
     ]
     for item in config_fields(InformativeOptions):
+        type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
+        lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
+    return lines
+
+
+# What each of core's trainers trains on.  config.md's "Trainers" table has a row for each name of
+# platoon.train.trainer.registry.CORE_TRAINERS; a name without its text here stops the generation, so that a new core
+# trainer cannot go missing from the page.
+TRAINER_TEXT: dict[str, str] = {
+    "rl": "The default: GRPO-style training on the rollouts of the run's training tasks, with `train:`'s settings.",
+    "sft": "Supervised fine-tuning on chat datasets in LLaMA-Factory's conventions (a `dataset_info.json` of "
+    "`alpaca` and `sharegpt` datasets), with the loss on the model's turns; `train:` declares the policy it trains.",
+}
+
+
+def _trainers(links: Mapping[type, str]) -> list[str]:
+    """config.md's "Trainers": a row for each of core's trainers, then a section of the options of each that takes
+    some."""
+
+    from platoon.train.config_defs import RL_ONLY_TRAIN_KEYS
+    from platoon.train.trainer.registry import CORE_TRAINERS
+
+    lines = [
+        "",
+        '<a id="trainers"></a>',
+        "",
+        "## Trainers",
+        "",
+        "`trainer:` chooses how a run trains, and `trainer_options` sets the trainer's options. Core's trainers are "
+        "below ([Fine-tune on a dataset](../how-to/train-and-eval.md#fine-tune-on-a-dataset) for `sft`). Under a "
+        "trainer other than `rl`, the `train:` keys that only `rl` reads are refused when set: "
+        + ", ".join(f"`{key}`" for key in RL_ONLY_TRAIN_KEYS)
+        + ".",
+        "",
+        "| Trainer | What it trains on | Options |",
+        "|---|---|---|",
+    ]
+    for name, trainer in CORE_TRAINERS.items():
+        if name not in TRAINER_TEXT:
+            raise ValueError(f"core's trainer {name!r} has no text in scripts/gen_reference.py's TRAINER_TEXT")
+        options = f"[below](#{name}-options)" if trainer.options is not None else "none"
+        lines.append(f"| `{name}` | {cell(TRAINER_TEXT[name])} | {options} |")
+    for name, trainer in CORE_TRAINERS.items():
+        if trainer.options is not None:
+            module, _, attr = trainer.options.partition(":")
+            lines += _trainer_options(name, getattr(importlib.import_module(module), attr), links)
+    return lines
+
+
+def _trainer_options(name: str, options: type, links: Mapping[type, str]) -> list[str]:
+    """The section of trainer ``name``'s options (``options``, its options class), which the trainers' table links."""
+
+    lines = [
+        "",
+        f'<a id="{name}-options"></a>',
+        "",
+        f"### `{name}`'s options",
+        "",
+        f"`{options.__module__}.{options.__qualname__}`: the keys of `trainer_options` under `trainer: {name}`.",
+        "",
+        markdown(inspect.getdoc(options)),
+        "",
+        "| Key | Type | Default | Description |",
+        "|---|---|---|---|",
+    ]
+    for item in config_fields(options):
         type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
         lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
     return lines

@@ -31,7 +31,7 @@ run's `TaskSources` and how its `Workflows` are built), saying what it asks of t
 lifecycle every trainer shares, calling its hooks in order, and `platoon.testing.check_trainer` checks one.  What
 every full checkpoint of the run holds besides its counters comes from its participants
 (`CheckpointParticipant`), and a policy's rows train under an `Objective`.  `trainer:` selects the
-trainer; this release has one, `rl`.
+trainer; this release has two, `rl` and `sft`.
 And step hooks (RFC 0021): work at the end of each step of any trainer (`StepHook`, `StepHookBase`),
 which hears what the step did (`StepEnd`): it drains side work, adds optimizer updates of the step's policy
 (`end.train`, `end.learner`), and hears what the step published; the rl trainer attaches those its config names
@@ -83,7 +83,7 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`RolloutLease`](#platoon-experimental-rolloutlease) | The rollout permits of the training draw whose workflow runs in this asyncio context (`rollout_lease`). |
 | [`rollout_lease`](#platoon-experimental-rollout-lease) | The lease of the training draw whose workflow runs in this asyncio context (`RolloutLease`). |
 | [`Trainer`](#platoon-experimental-trainer) | What `platoon train` runs: a trainer is resolved from the config's `trainer:` (`platoon.train.trainer.registry`), built from its setup, entered with `async with`, and run once per start. Supervising the run, its restarts, the reaping of what a dead start left, the run's lock, its config snapshot and its identity check stay `platoon train`'s. |
-| [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. |
+| [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (`stats_logger`, which resumes the W&B run of the checkpoint the start resumes from) and the train tracker (`train_tracker`), and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. The policies' training clients open before `prepare`, each trainable one with its optimizer's parameters. |
 | [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task (RFC 0021, rule 10 for the second and third). |
 | [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`). Building the setup does no I/O. |
 | [`TaskSources`](#platoon-experimental-tasksources) | The run's tasks as `platoon train` lists them: the training tasks (`train_dataset`, a weighted order's first epoch or the listing a dataloader shuffles), the order they are drawn in epoch by epoch and the task samplers that draw them (None: the dataset as it is), and the evaluation's (None when the run evaluates nothing). |
@@ -1107,8 +1107,10 @@ class TrainerBase
 An optional base of trainers.  `run()` takes the trainer through the lifecycle every trainer shares
 (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every
 hook has a default but `prepare` and `run_steps`, which a subclass writes.  `async with` opens what every
-start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train
-tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it.
+start logs to, the stats logger (`stats_logger`, which resumes the W&B run of the checkpoint the start
+resumes from) and the train tracker (`train_tracker`), and labels every sandbox the run starts with the run,
+so that the run's sandboxes can be reaped by it.  The policies' training clients open before `prepare`, each
+trainable one with its optimizer's parameters.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -1116,6 +1118,8 @@ tracker, and labels every sandbox the run starts with the run, so that the run's
 | `config` | `Any` |  |
 | `options` | `Any` |  |
 | `policies` | `PolicySet` | The run's policies, registered as the trainer is built. |
+| `stats_logger` | `StatsLogger` | The run's stats logger, which `async with` opens: each step's metrics go to it (`log(step=, stats=)`). Read-only. |
+| `train_tracker` | `StatsTracker` | The run's train tracker, which `async with` opens: what a step records (a learner's metrics among it), until the step exports it. Read-only. |
 | `run_log_path` | `str` | The run directory, `log_path/<stats.experiment_name>/<stats.trial_name>`, where the run writes everything: its checkpoints, its rollouts and its logs. Read-only. |
 
 #### `TrainerBase.needs`
@@ -1186,10 +1190,11 @@ async def run_steps(run: TrainerRun) -> None
 ```
 
 8. The steps, from `run.clock.step` to `run.clock.end`, stopping at a step boundary once a stop is asked
-for (`run.shutdown`).  Each step ends with `run.end_step`: the step hooks, the publication of the policies
-it updated, and the clock's advance.  Steps that the stop request stopped short of the end were interrupted:
-the run then saves `<step>_interrupted`, also when they did not set `run.interrupted`, which an interrupt
-of their own sets, and so does a `TrainInterrupted` they raise.
+for (`run.shutdown`); a step awaits the service with `run.wait`.  Each step ends with `run.end_step`: the
+step hooks, the publication of the policies it updated, and the clock's advance.  Steps that the stop request
+stopped short of the end were interrupted: the run then saves `<step>_interrupted`, also when they did not set
+`run.interrupted`, which an interrupt of their own sets, and so does a `TrainInterrupted` they raise.  The
+run stops the clock's watchdog after them.
 
 #### `TrainerBase.close`
 

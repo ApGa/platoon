@@ -20,6 +20,7 @@ from platoon.testing import check_trainer
 from platoon.testing import trainers as checks
 from platoon.train.checkpoints.participants import COUNTER_KEYS, RunCheckpoints
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.objectives.cross_entropy import CrossEntropy
 from platoon.train.policy import spec as spec_module
 from platoon.train.policy.spec import MAIN, policy_specs
 from platoon.train.trainer import api, registry
@@ -96,6 +97,63 @@ class _Unstoppable(_Counting):
     async def run_steps(self, run: TrainerRun) -> None:
         run.shutdown = asyncio.Event()
         await super().run_steps(run)
+
+
+class _FromTheDocs(px.TrainerBase):
+    """A trainer written from the trainer API's documentation alone: each step one optimizer step through the run's
+    learner under cross-entropy, then the step's end (``run.end_step``), its metrics from the train tracker logged to
+    the stats logger.  It neither sets its policy's optimizer parameters nor stops the watchdog; it records the
+    watchdog it ran under, and reads the optimizer parameters before any learner is built."""
+
+    watchdogs: ClassVar[list[Any]] = []
+
+    async def prepare(self, run: TrainerRun, start: Any) -> px.StepPlan:
+        return px.StepPlan(end_step=run.config.train.max_training_steps)
+
+    async def run_steps(self, run: TrainerRun) -> None:
+        import tinker
+        import torch
+
+        self.watchdogs.append(run.clock.watchdog)
+        policy = run.policies[run.policies.leader]
+        assert policy.optimizer_params.learning_rate == run.config.train.optimizer.learning_rate  # set as it opened
+        learner = run.learner(policy.id, objective=CrossEntropy())
+        datum = tinker.Datum(
+            model_input=tinker.ModelInput.from_ints([1, 2, 3]),
+            loss_fn_inputs={
+                "target_tokens": tinker.TensorData.from_torch(torch.tensor([2, 3, 4])),
+                "weights": tinker.TensorData.from_torch(torch.tensor([0.0, 1.0, 1.0])),
+            },
+        )
+        while run.clock.step < run.plan.end_step and not run.shutdown.is_set():
+            update = learner.update()
+            await update.submit([datum], [datum], minibatch=0, microbatch=0)
+            await update.apply()
+            await run.end_step()
+            self.stats_logger.log(step=run.clock.step, stats=self.train_tracker.export(reset=True))
+
+
+def test_a_trainer_written_from_the_api_alone_keeps_the_lifecycle_and_the_run_stops_its_watchdog(tmp_path, monkeypatch):
+    check_trainer(_FromTheDocs)
+
+    settings = checks._settings
+    monkeypatch.setattr(
+        checks, "_settings", lambda root, steps: {**settings(root, steps), "watchdog": {"enabled": True}}
+    )
+    monkeypatch.setattr(_FromTheDocs, "watchdogs", [])
+    trainer: Any = _FromTheDocs
+    with checks._restored_signals():
+        start = checks._start(trainer, None, tmp_path, steps=2)
+
+    assert start.error is None and [row["name"] for row in start.rows] == ["recovery-000000", "final"]
+    (watchdog,) = _FromTheDocs.watchdogs
+    assert watchdog is not None and not watchdog.running
+
+
+def test_each_core_trainer_s_needs_say_what_the_registry_says_of_its_rollouts():
+    for name, core in registry.CORE_TRAINERS.items():
+        trainer = registry.trainer_class(SimpleNamespace(trainer=name))
+        assert trainer.needs(None, None).rollouts is core.rolls_out, name
 
 
 class _Cursor:
@@ -313,11 +371,16 @@ def test_the_loops_state_reads_and_writes_the_step_and_the_event_on_the_run_s_cl
     ("name", "problem"),
     [
         ("rl", None),
-        ("sft", "trainer: 'sft' is reserved for a trainer platoon will add; this release trains with rl (the default)"),
-        ("acme-dpo", "trainer: 'acme-dpo' is not a trainer: this release has one, rl (the default)"),
+        (
+            "interleaved",
+            "trainer: 'interleaved' is reserved for a trainer platoon will add; this release has rl and sft",
+        ),
+        ("acme-dpo", "trainer: 'acme-dpo' is not a trainer: this release has rl and sft (rl, the default)"),
     ],
 )
-def test_the_trainer_key_takes_rl_and_refuses_any_other_name_when_the_config_loads(tmp_path, name, problem):
+def test_the_trainer_key_takes_core_s_trainers_and_refuses_any_other_name_when_the_config_loads(
+    tmp_path, name, problem
+):
     settings = {**checks._settings(tmp_path, 2), "trainer": name}
     if problem is None:
         assert build_config(PlatoonTinkerRLTrainerConfig, settings).trainer == "rl"

@@ -125,7 +125,7 @@ other component the config names is resolved, and the options set for them check
 do when they start, which imports them; a service's options (service_kwargs) are bound to what the service takes,
 without building it.  --no-resolve skips that, for a machine without the config's extensions.  The deprecated keys
 a config sets are listed under it, and --strict fails on them.  --tasks also lists a training config's tasks, as
-platoon train does, and shows how the run draws them.
+platoon train does, and shows how the run draws them; under trainer: sft, it loads the datasets instead.
 
 **Arguments**:
 
@@ -142,7 +142,8 @@ platoon train does, and shows how the run draws them.
 * `--tasks, --no-tasks`: Also list a training config's training tasks as platoon train lists them, which reads the datasets and may
     contact env servers, fail on what listing them finds wrong, as train does, and print how the run draws them:
     each environment's share and how often each of its tasks is drawn over the planned steps, with a warning for a
-    mixture's weights that leave tasks out of the run or draw some far more often than others. *[default: False]*
+    mixture's weights that leave tasks out of the run or draw some far more often than others.  Under
+    trainer: sft, load its datasets instead, and print how many conversations each has. *[default: False]*
 
 ### platoon harness
 

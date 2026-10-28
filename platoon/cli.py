@@ -967,7 +967,7 @@ def config_validate(
     do when they start, which imports them; a service's options (service_kwargs) are bound to what the service takes,
     without building it.  --no-resolve skips that, for a machine without the config's extensions.  The deprecated keys
     a config sets are listed under it, and --strict fails on them.  --tasks also lists a training config's tasks, as
-    platoon train does, and shows how the run draws them.
+    platoon train does, and shows how the run draws them; under trainer: sft, it loads the datasets instead.
 
     Parameters
     ----------
@@ -987,7 +987,8 @@ def config_validate(
         Also list a training config's training tasks as platoon train lists them, which reads the datasets and may
         contact env servers, fail on what listing them finds wrong, as train does, and print how the run draws them:
         each environment's share and how often each of its tasks is drawn over the planned steps, with a warning for a
-        mixture's weights that leave tasks out of the run or draw some far more often than others.
+        mixture's weights that leave tasks out of the run or draw some far more often than others.  Under
+        trainer: sft, load its datasets instead, and print how many conversations each has.
     """
 
     items = [str(item) for item in configs]
@@ -1045,7 +1046,8 @@ def _entry_settings_lines(resolved: ResolvedConfig) -> list[str]:
 
 def _training_tasks(resolved: ResolvedConfig) -> list[str]:
     """``config validate --tasks``: list a training config's training tasks, and its evaluation tasks when it
-    evaluates, as ``platoon train`` does, before it opens the training service, and describe how the run draws them
+    evaluates, as ``platoon train`` does, before it opens the training service (for a trainer that rolls out none, what
+    it trains on instead: sft's datasets, loaded), and describe how the run draws them
     (:class:`~platoon.train.sampling.SamplingPlan`), its warnings and those about the listed labels prefixed
     ``warning:``.  What train would refuse once the tasks are listed (an ``exclude_tasks`` item that names no task, a
     batch larger than the training tasks, a label's straggler quorum above the group size of an entry whose tasks carry
@@ -1055,6 +1057,10 @@ def _training_tasks(resolved: ResolvedConfig) -> list[str]:
     config = resolved.config
     if resolved.schema is None or getattr(config, "train", None) is None:
         return ["tasks: only a training config's tasks are listed"]
+    from platoon.train.trainer.registry import data_listing, rolls_out
+
+    if not rolls_out(config):  # a trainer that trains on data of its own (sft: its datasets' conversations)
+        return [f"tasks: trainer: {config.trainer} rolls out none", *data_listing(config)]
     from platoon.train.auto import AutoDataset, AutoEnvironment, check_mixture_pools
     from platoon.train.config_defs import evaluates, training_problems
 

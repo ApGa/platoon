@@ -889,6 +889,143 @@ goes on while an evaluation runs, so a later step's checkpoint can be saved befo
 of `checkpoint.recovery_every`: a failure after it resumes the run past the evaluation's step, from a later policy, and
 that evaluation does not run again. The held-out curve then has no point at its step.
 
+## Fine-tune on a dataset
+
+`trainer: sft` fine-tunes the policy on chat datasets instead of rollouts: supervised fine-tuning, with the loss on the
+model's turns. The datasets follow [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)'s conventions
+([`data/README.md`](https://github.com/hiyouga/LLaMA-Factory/blob/main/data/README.md)), so a dataset prepared for
+LLaMA-Factory trains here as it is, but for the few differences [listed below](#where-it-differs-from-llama-factory):
+a `dataset_info.json` names each dataset and says where its rows are and how to read them, in the `alpaca` or the
+`sharegpt` format. [`examples/sft`](../../examples/sft/README.md) trains on one of each.
+
+```yaml
+trainer: sft
+trainer_options:
+  dataset: alpaca_demo, sharegpt_demo     # names in dataset_dir/dataset_info.json; a list works too
+  dataset_dir: data                        # relative to this file (left out: data, beside it)
+  batch_size: 32                           # conversations per step, one optimizer step over them
+  num_epochs: 3                            # or max_training_steps; with both, the shorter
+  max_length: 4096                         # LLaMA-Factory's cutoff_len: tokens a conversation is cut to
+train:                                     # the policy: model, renderer, adapter and optimizer
+  model_name: Qwen/Qwen3-8B
+  renderer_name: qwen3
+  lora_rank: 32
+  optimizer: {learning_rate: 1.0e-4}
+checkpoint: {every: 200, recovery_every: 20, keep_recovery: 2}
+```
+
+`trainer_options` (the [config reference](../reference/config.md#trainers) lists every key):
+
+| Key | Default | What it does |
+|---|---|---|
+| `dataset` | required | The datasets, by name: one, several separated by commas (as LLaMA-Factory's `dataset`), or a list. Their conversations are put together in this order |
+| `dataset_dir` | `data` | The directory of `dataset_info.json` and the files it names (LLaMA-Factory's `dataset_dir`), relative to the config file; left out, `data` beside the config file |
+| `batch_size` | 32 | Conversations per step; an epoch's last step takes what is left |
+| `num_epochs`, `max_training_steps` | unset | How long the run trains: one of them is required, and with both it trains the shorter |
+| `num_microbatches` | 1 | forward_backward calls a step's conversations are sent in, before its one optimizer step |
+| `max_length` | unset | Tokens a rendered conversation is cut to, as LLaMA-Factory's `cutoff_len` cuts it: turn by turn from the first (with `mask_history`, from the last), each turn's prompt and reply sharing what is left, and the turns past it left out; unset, no cut |
+| `mask_history` | false | Train on the last model turn of each conversation only (LLaMA-Factory's `mask_history`) |
+| `seed` | 42 | Each epoch's order of the conversations, and the rows `num_samples` takes |
+
+`train:` declares the policy (`model_name`, `renderer_name`, `renderer_kwargs`, `lora_rank`, `optimizer` and the
+deadlines of its updates). Its keys that only the rl trainer reads (its batch, duration, loss, staleness and rollout
+settings) are refused under `sft` when set, each with the `trainer_options` key to set instead when there is one, as
+`train.batch_size` names `trainer_options.batch_size`. An sft run rolls nothing out, so it needs no `environments`.
+
+### The datasets
+
+`dataset_info.json` maps each dataset's name to where its rows are and how to read them, with LLaMA-Factory's keys and
+defaults:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `hf_hub_url` | | A dataset on the Hugging Face Hub; it wins over `file_name` |
+| `file_name` | | A file in `dataset_dir`, or a folder of files of one type: `json`, `jsonl`, `csv`, `parquet` or `arrow` |
+| `formatting` | `alpaca` | `alpaca` or `sharegpt` |
+| `split`, `subset`, `folder` | `train`, none, none | Which split, configuration and folder of the dataset to read |
+| `num_samples` | all | Rows to take: each row once, in an order `seed` decides, before any twice (again in that order when it asks for more than there are) |
+| `columns` | | Which column holds what: alpaca's `prompt` (`instruction`), `query` (`input`), `response` (`output`) and `history`; sharegpt's `messages` (`conversations`); either format's `system` and `tools` |
+| `tags` | | How a sharegpt message names its role and text: `role_tag` (`from`), `content_tag` (`value`), and the roles `user_tag` (`human`), `assistant_tag` (`gpt`), `observation_tag` (`observation`), `function_tag` (`function_call`) and `system_tag` (`system`) |
+
+The defaults in parentheses are those of an entry without `columns` (or `tags`). An entry that gives them replaces
+the defaults whole, as LLaMA-Factory does: a key it leaves out names nothing. LLaMA-Factory's own `firefly` entry,
+`{"prompt": "input", "response": "target"}`, reads no query; and a `tags` without `system_tag` reads no system message,
+so a row that opens with one is out of order, and skipped. A key that LLaMA-Factory does not read either, such as
+`file_sha1`, is ignored, with a warning.
+
+How a row becomes a conversation, as LLaMA-Factory's converters do it:
+
+- **alpaca:** the `history`'s prompt and response pairs come first, each a user turn and an assistant turn; then
+  `instruction` and `input` joined by a newline (an empty one left out) as the user's turn, and `output` as the
+  assistant's. A row without a text output is skipped.
+- **sharegpt:** the messages in order. The user's turns and the tools' results (`observation`) go at odd positions,
+  the assistant's turns and its tool calls (`function_call`) at even ones, and a conversation ends with one of the
+  latter. A first message with the system tag is the system prompt, in place of the `system` column. A row out of that
+  order is skipped. The OpenAI format of LLaMA-Factory's README is `sharegpt` with `messages` and the tags `role`,
+  `content`, `user`, `assistant` and `system`.
+- **Tools and tool calls:** `tools` is a JSON list of functions (`name`, `description`, `parameters`; an OpenAI tool
+  `{"type": "function", "function": ...}` too). A `function_call` message is JSON, one call (`name`, `arguments`) or
+  a list of them.
+
+A skipped row is counted in one warning per dataset, which names the first and says why it was skipped. Preference
+datasets (`ranking`, the `chosen`, `rejected` and `kto_tag` columns), multimodal ones (`images`, `videos`, `audios`),
+`formatting: openai` and rows from sources other than the Hub and files (`ms_hub_url`, `om_hub_url`, `script_url`,
+`cloud_file_name`, which LLaMA-Factory reads over `file_name` when there is no `hf_hub_url`) are refused by name.
+`platoon config validate` reads `dataset_info.json`, and refuses a dataset it does not name; `platoon config validate
+--tasks` loads the datasets, and says how many conversations each has.
+
+### What trains
+
+Each conversation is rendered by the policy's renderer, as the policy sees a conversation when it samples: the system
+prompt and the tools first, as the renderer puts them, each tool call as the assistant's `tool_calls` and each result as
+a `tool` message. The tokens of the model's turns, its replies and its tool calls, train (with `mask_history`, the last
+one's only); the system prompt, the tools, the user's turns, the tools' results, the renderer's headers and a system
+message the renderer adds of its own (as `kimi_k2` and `nemotron3` do) do not. The renderer must be a tinker-cookbook
+one, which renders message by message (`chat_template` renders whole conversations), and, for conversations with tools,
+one with tool calling, such as `qwen3`. Before the service opens, the run renders the first conversation, the first with
+tools, the first with a tool call and the first with neither a system prompt nor tools, and refuses a renderer that
+cannot render one or that renders a tool call without it (as `llama3` does), naming the conversation's dataset and row
+(exit 78); so is one that cannot render a later conversation, when a step comes to it. Each step's loss
+is the mean negative log-likelihood over its trained tokens (`train/nll`, over all its microbatches), as LLaMA-Factory's
+is, so a learning rate means the same whatever the batch size. `max_length` shares its tokens among a conversation's
+turns as LLaMA-Factory's `cutoff_len` does, so a reply keeps tokens to train on also behind a long prompt; a conversation
+left with none is left out of its step, the first of each dataset named in a warning, and
+`train/untrained_conversations` counts them. A run in which no conversation has a token to train within `max_length`
+stops (exit 78) once it has walked every conversation.
+
+### Epochs, checkpoints and resume
+
+Each epoch walks every conversation once, in an order that `seed` and the epoch's number decide. Every full
+checkpoint saves where the run is (`loop_state.sft`: the epoch and how far into it), so a resume goes on with the next
+conversation, and each conversation trains once an epoch, also across restarts. A resume may change `batch_size`: the
+run's end is counted on from where the checkpoint left the conversations. A resume with other conversations or another
+`seed` would walk another order, and is refused (exit 78): start a new run from the checkpoint's weights with
+`checkpoint.load_checkpoint_path` instead (and its optimizer's state, with `checkpoint.load_optimizer_state: true`).
+
+Checkpoints come as for any run ([Checkpoints and resume](#checkpoints-and-resume)). `checkpoint.keep_recovery` needs
+no staleness bound here: nothing samples the policy, so no recovery checkpoint is kept for a sampler. Nothing samples
+it during training either: the policy's version stays where the run began, and `optimizer_steps` counts the steps. A
+step hook that a subclass of the sft trainer registers runs at each step's end ([Write a step
+hook](../extending/step-hooks.md)): the policy then publishes once a step, for the hook, and `optimizer_steps` counts
+the hook's updates too.
+
+Evaluation during training is not there yet for `sft` (`eval.every` must be 0): evaluate its checkpoints with
+`platoon eval` ([Evaluate](#3-evaluate)).
+
+### Where it differs from LLaMA-Factory
+
+- The policy's renderer renders each conversation, as the policy sees it when it samples; LLaMA-Factory's templates
+  (its `template` argument) are not used.
+- `max_length` has no default: unset, nothing is cut (LLaMA-Factory's `cutoff_len` is 2048).
+- `dataset_dir` is relative to the config file, as every input path of a config is; LLaMA-Factory's is relative to the
+  working directory.
+- `num_samples` beyond a dataset's rows takes them again in the seeded order; LLaMA-Factory draws the extra ones at
+  random.
+- A `function_call` message that is not JSON skips its row; LLaMA-Factory stops with an error while it preprocesses.
+- Not read: `formatting: openai`, the sources besides the Hub and files, preference and multimodal datasets, and
+  LLaMA-Factory's training arguments `train_on_prompt`, `packing`, the `mix_strategy` other than `concat`,
+  `max_samples` and `streaming`.
+
 ## The training service
 
 platoon does not run the model. It talks to a service that implements the Tinker API: hosted Tinker (the
@@ -1050,7 +1187,8 @@ weights and sampler weights, through the training service's checkpoint deletion 
 - the checkpoint a resume would start from;
 - a recovery checkpoint this start saved within the run's largest staleness bound of the policy (`train.max_staleness`,
   or an environment's `max_staleness` above it), which rollouts may still sample from (one an earlier start saved
-  serves none of this start's rollouts);
+  serves none of this start's rollouts, and under `trainer: sft` none does: [Fine-tune on a
+  dataset](#fine-tune-on-a-dataset));
 - anything the run's own `checkpoints.jsonl` does not list, such as another run's checkpoints or the one
   `load_checkpoint_path` names.
 

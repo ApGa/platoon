@@ -27,7 +27,7 @@ run's :class:`TaskSources` and how its :class:`Workflows` are built), saying wha
 lifecycle every trainer shares, calling its hooks in order, and ``platoon.testing.check_trainer`` checks one.  What
 every full checkpoint of the run holds besides its counters comes from its participants
 (:class:`CheckpointParticipant`), and a policy's rows train under an :class:`Objective`.  ``trainer:`` selects the
-trainer; this release has one, ``rl``.
+trainer; this release has two, ``rl`` and ``sft``.
 And step hooks (RFC 0021): work at the end of each step of any trainer (:class:`StepHook`, :class:`StepHookBase`),
 which hears what the step did (:class:`StepEnd`): it drains side work, adds optimizer updates of the step's policy
 (``end.train``, ``end.learner``), and hears what the step published; the rl trainer attaches those its config names
