@@ -583,6 +583,7 @@ platoon.experimental.WorkflowSetup.phase: field Literal['train', 'eval']
 platoon.experimental.WorkflowSetup.policies: field Mapping[str, Any]
 platoon.experimental.WorkflowSetup.policy_views: field Mapping[str, Any] = <factory dict>
 platoon.experimental.WorkflowSetup.reward_processor: field Callable[..., Any]
+platoon.experimental.WorkflowSetup.role_tools: field Mapping[str, tuple[str, ...]] = <factory dict>
 platoon.experimental.WorkflowSetup.rollout_fn: field Callable[..., Any]
 platoon.experimental.WorkflowSetup.stats_scope: field str
 platoon.experimental.WorkflowSetup.trained: field frozenset[str] = frozenset([])

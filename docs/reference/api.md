@@ -134,7 +134,7 @@ What a function harness gets for one agent.
 | `depth` | `int` | Depth in the agent tree; the root is 0. |
 | `role` | `str` | The agent's role: `policy` for the root, the `role` its spawn named for a child (default `subagent`). |
 | `task` | `Task` | The task the agent works on. |
-| `session` | `EnvSession` | The environment session the agent acts on. |
+| `session` | `EnvSession` | The environment session the agent acts on. A call made on it directly bypasses the agent's tool access and its role's tool allowlist; `call_tool` applies both. |
 | `instruction` | `str` | The goal the agent works on. |
 | `max_steps` | `int \| None` | The agent's step limit (None: only the budget limits it). |
 | `access` | `ToolAccess` | The agent's tool access. |
@@ -164,7 +164,7 @@ One model call, recorded on this agent; `sampling` takes Chat Completions parame
 async def list_tools() -> list[ToolSpec]
 ```
 
-The env's tools, filtered by this agent's access.
+The env's tools, filtered by this agent's access and its role's allowlist (`agents.roles.<role>.tools`).
 
 #### `AgentContext.call_tool`
 
@@ -172,7 +172,7 @@ The env's tools, filtered by this agent's access.
 async def call_tool(name: str, arguments: Mapping[str, Any]) -> ToolResult
 ```
 
-Call an env tool; a tool outside this agent's access returns an error result.
+Call an env tool; a tool outside this agent's access or its role's allowlist returns an error result.
 
 #### `AgentContext.annotate`
 
@@ -553,6 +553,10 @@ deadlines add (`platoon.train.components.rollout_overhead_s`); and
 `agent_timeout_s(task_id) -> float | None`, the task's own time limit for its agent (its sessions'
 `agent_timeout_s`), which they count when the rollout sets no `timeout`
 (`platoon.train.components.harness_time_limit_s`), as long as the service has `rollout_overhead_s`.
+
+Its class may also name the tools its sessions serve, when it knows them all before any session opens
+(experimental): `declared_tools`, a tuple of names, against which a run's loading checks the tool patterns of
+its agent roles (`agents.roles.<role>.tools`, `service_declared_tools`).
 
 | Attribute | Type | Description |
 |---|---|---|

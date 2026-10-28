@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from platoon.gateway import default_gateway
 from platoon.options import Phase
 from platoon.train import entry_settings
 from platoon.train.auto import (
@@ -67,8 +68,8 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
 
     The steps, in that order: :func:`_load`, :func:`_check_environments`, :func:`_list_tasks`,
     :func:`_check_listed`, :func:`_record_run` and :func:`_build_components` before the trainer is built, then
-    :func:`_build_workflows` in the trainer's context, on the trainer's policies, and the trainer trains.  A trainer
-    that rolls nothing out trains after :func:`_load` (:func:`_train_without_rollouts`).
+    :func:`_limit_tools` and :func:`_build_workflows` in the trainer's context, on the trainer's policies, and the
+    trainer trains.  A trainer that rolls nothing out trains after :func:`_load` (:func:`_train_without_rollouts`).
     """
 
     config = _load(args, default_config_path)
@@ -89,6 +90,7 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
         train_sampling=training.sampling,  # the task samplers it draws through, which draw the order's rows
     )
     async with trainer:
+        _limit_tools(config)
         train_workflow, eval_workflow = _build_workflows(
             config, components, trainer.policies, settings, training, eval_dataset
         )
@@ -258,6 +260,15 @@ def _build_components(config: PlatoonTinkerRLTrainerConfig, environment: Environ
     return components
 
 
+def _limit_tools(config: PlatoonTinkerRLTrainerConfig) -> None:
+    """Limit the tools of the agent roles that ``agents.roles.<role>.tools`` lists in this process's gateway, which
+    the rollouts that run in the trainer's process sample; a rollout worker's gateway takes them from its requests
+    (``role_tools``, which :func:`_workflow_setup` gives the workflows)."""
+
+    if tools := policy_spec.role_tools(config):
+        default_gateway().limit_tools(tools)
+
+
 def _build_workflows(
     config: PlatoonTinkerRLTrainerConfig,
     components: _Components,
@@ -308,10 +319,10 @@ def _workflow_setup(
     ``eval``), each entry's own when an entry sets any or, in training, a credit estimator (``entry_credit``, which
     only training gets, with the policies as the estimators read them, ``policy_views``), the policies the agents
     sample (``policies``: each one's model info, the agents' default first, and when there are several, which agent
-    samples which and the policies the run trains), the run directory, the phase's stats scope and ``filter_errors``
-    (an environment's workflow arguments may set either), the reward processor, the environments' packages and the
-    run's label column for a workflow that runs rollout workers (``group_kwargs``), and the environment's other
-    workflow arguments."""
+    samples which and the policies the run trains), the tools of the agent roles whose tools are limited
+    (``role_tools``), the run directory, the phase's stats scope and ``filter_errors`` (an environment's workflow
+    arguments may set either), the reward processor, the environments' packages and the run's label column for a
+    workflow that runs rollout workers (``group_kwargs``), and the environment's other workflow arguments."""
 
     training = phase == "train"
     section = config.train if training else config.eval
@@ -343,6 +354,7 @@ def _workflow_setup(
         entry_credit=entry_credit,
         policy_views=dict(policy_views or {}) if training else {},
         **_several_policies(policies, sampled),
+        role_tools=policy_spec.role_tools(config),
     )
 
 

@@ -11,9 +11,9 @@ the ``agents`` settings), and :class:`InlineAgentContext` is one agent's view of
   own HTTP client; ``mcp`` is the agent's tool plane endpoint (:mod:`platoon.gateway.mcp`).
 * ``list_tools``/``call_tool`` go through the tool plane (``list_agent_tools``/``call_agent_tool``), filtered
   by the agent's tool access: ``no_terminal`` hides tools whose ``ToolSpec.terminal`` is set, ``read_only``
-  shows only tools whose ``ToolSpec.read_only`` is set.  Inline and MCP calls therefore share the listing
-  transform, the env session's call order (:mod:`platoon.envs.gate`) and one record format
-  (``AgentSession.tool_calls``).
+  shows only tools whose ``ToolSpec.read_only`` is set; and by its role's allowlists (``agents.roles.<role>.tools``,
+  :mod:`platoon.utils.role_tools`).  Inline and MCP calls therefore share the listing transform, the refusals, the
+  env session's call order (:mod:`platoon.envs.gate`) and one record format (``AgentSession.tool_calls``).
 * ``annotate``/``annotate_step`` land in the agent's trajectory misc and the last call's step misc.
 
 :func:`run_agent` runs a harness on a context and never raises for a harness failure: it returns a
@@ -181,8 +181,8 @@ class InlineAgentContext:
         return await tool_plane.list_agent_tools(self.agent)
 
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
-        """Call a visible tool and record it on the agent; a tool the agent does not see is an error result that
-        neither reaches the env nor is recorded."""
+        """Call a visible tool and record it on the agent; a tool the agent does not see (its access or the env hides
+        it, or its role does not allow it) is an error result that neither reaches the env nor is recorded."""
         from platoon.envs.service import ToolResult
 
         refused = ToolResult.text(

@@ -267,6 +267,10 @@ class EnvironmentService(Protocol):
     ``agent_timeout_s(task_id) -> float | None``, the task's own time limit for its agent (its sessions'
     ``agent_timeout_s``), which they count when the rollout sets no ``timeout``
     (:func:`platoon.train.components.harness_time_limit_s`), as long as the service has ``rollout_overhead_s``.
+
+    Its class may also name the tools its sessions serve, when it knows them all before any session opens
+    (experimental): ``declared_tools``, a tuple of names, against which a run's loading checks the tool patterns of
+    its agent roles (``agents.roles.<role>.tools``, :func:`service_declared_tools`).
     """
 
     # The service's name.
@@ -390,6 +394,29 @@ def service_path_options(name: str) -> dict[str, PathOption]:
             str(option): rule if isinstance(rule, PathOption) else PathOption() for option, rule in declared.items()
         }
     return {str(option): PathOption() for option in declared}
+
+
+def service_declared_tools(name: str) -> frozenset[str] | None:
+    """The names of every tool the sessions of the service reference ``name`` serve, read without building the
+    service, when it declares them all up front: an ORS environment run in process (``python://``) whose class
+    declares them (:func:`platoon.envs.ors.sdk.class_tool_names`), or a service class with a ``declared_tools``
+    attribute (a task table's: none).  None when the service does not say: ORS env servers, Harbor (its tasks' MCP
+    servers' tools are known once a session opens), a class without the attribute, and a reference that does not
+    import, which is reported where the service resolves."""
+
+    target = service_target(name)
+    if target is None:
+        return None
+    try:
+        factory = import_from_string(target)
+        if name.startswith("python://"):
+            from platoon.envs.ors.sdk import class_tool_names
+
+            return class_tool_names(factory)
+        declared = getattr(factory, "declared_tools", None)
+    except Exception:
+        return None
+    return None if declared is None else frozenset(declared)
 
 
 def service_deprecated_options(name: str) -> dict[str, DeprecatedKey]:

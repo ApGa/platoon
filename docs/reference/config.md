@@ -64,7 +64,7 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 | `stats` | [StatsConfig](#statsconfig) | `StatsConfig()` |  |
 | `watchdog` | [WatchdogConfig](#watchdogconfig) | `WatchdogConfig()` |  |
 | `policies` | dict[str, [PolicyConfig](#policyconfig)] | `{}` | The run's other policies, by id (a lowercase name such as `teacher`), besides main, which train: declares: frozen ones its agents sample or its credit estimators score with (experimental). |
-| `agents` | [AgentsConfig](#agentsconfig) | `AgentsConfig()` | Which policy each agent samples, by role (experimental); without it, every agent samples main. |
+| `agents` | [AgentsConfig](#agentsconfig) | `AgentsConfig()` | Which policy each agent samples, and which tools it may call, by role (experimental); without it, every agent samples main and may call every tool. |
 
 <a id="trainconfig"></a>
 
@@ -279,14 +279,16 @@ teacher), and never stepped, saved or pruned.
 
 In a training config: `agents`.
 
-`agents:`: which policy each agent samples, for its whole life (experimental).  The root agent samples
-`policy`; an agent its harness or program opens with a role samples that role's policy, and `policy` when
-`roles` names none for it.
+`agents:`: which policy each agent samples, for its whole life, and which tools it may call (experimental).
+The root agent samples `policy`; an agent its harness or program opens with a role samples that role's policy,
+and `policy` when `roles` names none for it.  An agent of a role that lists `tools` (the root agent's role is
+`policy`) sees and calls only those, and so does every agent under it but a verifier, which runs under the child
+it judges and is limited by the lists of that child's spawner and its own role's (`verifier`) instead.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `policy` | str \| None | `null` | The root agent's policy, and that of every role roles leaves out (None: main). |
-| `roles` | dict[str, [AgentRoleConfig](#agentroleconfig)] | `{}` | The policy of the agents of each role, by role (the role a harness mints a subagent with, such as `judge`). |
+| `roles` | dict[str, [AgentRoleConfig](#agentroleconfig)] | `{}` | The policy and the tools of the agents of each role, by role (the role a harness mints a subagent with, such as `judge`). |
 
 <a id="adamparams"></a>
 
@@ -487,11 +489,12 @@ Configuration for Weights & Biases logging.
 
 In a training config: `agents.roles.<key>`.
 
-`agents.roles.<role>`: the policy the agents of that role sample.
+`agents.roles.<role>`: the policy the agents of that role sample, and the tools they may see and call.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `policy` | str | required | A policy of the run: main, or a policies: entry. |
+| `policy` | str \| None | `null` | A policy of the run: main, or a policies: entry (None: agents.policy's). |
+| `tools` | list[str] \| None | `null` | The tools they, and the agents under them, may see and call (a verifier, which runs under the child it judges, takes the lists of that child's spawner instead): names or fnmatch patterns (`read_*`), as agents see them (a task MCP server's as `<server>__<tool>`); an empty list allows none (None: every tool). |
 
 <a id="rolloutconfig"></a>
 

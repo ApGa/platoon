@@ -448,6 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     _import_environment_packages(request)  # 5. what registers the environments' harnesses, programs and loaders
     llm = _build_llm(request.model)  # 6. the policy, following the trainer's sampling client
     _serve_policies(request, llm)  # and in a rollout of several policies, each other one, following its own
+    _limit_tools(request, llm)  # and the tools of the agent roles whose tools are limited
     startup_seconds = time.monotonic() - started
     _print_header(request, startup_seconds=startup_seconds, extra_allow=extra_allow)  # 7. the header line
     return _run(request, llm, startup_seconds=startup_seconds, extra_allow=extra_allow)  # 8. ready, then the rollout
@@ -623,6 +624,15 @@ def _serve_policies(request: RolloutWorkerRequest, llm: Any) -> None:
         return
     runtimes = {policy: _following_llm(binding).gateway for policy, binding in request.policies.items()}
     llm.gateway.serve_policies(request.agents.default, runtimes=runtimes, roles=request.agents.roles)
+
+
+def _limit_tools(request: RolloutWorkerRequest, llm: Any) -> None:
+    """Limit the tools of the agent roles that protocol 3's ``role_tools`` names, as the trainer's gateway does
+    (``ModelGateway.limit_tools``)."""
+
+    role_tools = getattr(request, "role_tools", None)
+    if llm is not None and role_tools:
+        llm.gateway.limit_tools(role_tools)
 
 
 def _print_header(request: RolloutWorkerRequest, *, startup_seconds: float, extra_allow: bool) -> None:

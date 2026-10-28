@@ -920,6 +920,62 @@ agents:
 - **What a program reads.** Each `TinkerLLMInteraction` of an agent tree names the policy that sampled it (`policy`,
   None in a run of one policy), so a program that trains on its agents' interactions keeps the frozen policies' apart.
 
+## Limit the tools each role may call (experimental)
+
+The agents of a role may be limited to some of their environment's tools: subagents that may only read, a reviewer
+that may not submit. List the tools under `agents.roles.<role>.tools`:
+
+```yaml
+agents:
+  roles:
+    subagent: {tools: [read]}                   # the children ctx.agents.spawn opens: read, and nothing else
+    reviewer: {tools: [view, "read_*"]}         # agents minted with POST /v1/platoon/agents {"role": "reviewer"}
+    judge: {policy: judge, tools: []}           # beside a policy (Sample several policies): no tool at all
+```
+
+- **What a list names.** Each item is a tool's name or an `fnmatch` pattern (`read_*`), matched case-sensitively
+  against the names the agents see: the environment's tools, and the tools of a Harbor task's MCP servers as the
+  gateway serves them, `<server>__<tool>` (`mcp_server__get_secret`, or `mcp_server__*` for all of one server's). A
+  role without `tools` keeps every tool, as before, and `tools: []` allows none.
+- **Which agents it limits.** Every agent opened with the role: a child its harness spawns
+  (`ctx.agents.spawn(..., role=...)`, whose role is `subagent` unless it says otherwise), mints (`POST
+  /v1/platoon/agents {"role": ...}`) or its program opens (a `judge`, a `verifier`), and the root agent when the list
+  is under its role, `policy`. An agent under a limited one keeps that limit, besides its own role's: a child never
+  sees more tools than its parent, as with tool access (`agents.child_access`). A verifier (`child_grading:
+  verifier`) is the exception, as for its access (`agents.verifier.access`): it runs under the child it judges, but
+  is limited by the lists of the agent that spawned that child and its own role's, `verifier`, not by the child's. A
+  role may give `tools` alone: its agents sample `agents.policy` (`main`), as a role `agents.roles` leaves out does.
+- **Where it holds.** In every listing of tools an agent gets (`ctx.list_tools()`, MCP `tools/list`), after its tool
+  access level, and where the gateway runs a call (`ctx.call_tool()`, MCP `tools/call`), so that a harness that calls
+  a tool its listing does not hold is refused too. A call to another tool comes back to the agent as an error result
+  that says why (`Tool 'answer' is not allowed: agents of role 'subagent' may call only read. The call was not run.`),
+  the environment never sees it, and the run goes on; the agent's trajectory counts the refusals in its misc
+  (`tools_refused: {count, first}`). `platoon train` applies the lists to its training and evaluation rollouts, in
+  process and in the rollout workers of its group workflow; a workflow class of your own whose rollouts run in
+  workers it starts itself passes them on as that workflow does (`WorkflowSetup.role_tools`, the workers' requests'
+  `role_tools`).
+- **What it does not reach.** A harness's own tools (the shell and editor an OpenHands or Codex harness runs in the
+  task's sandbox, the subagents example's `delegate`) and the MCP servers a harness reaches by itself
+  (`{task_mcp_servers}` in its spec) never pass through the gateway's tool plane: limit those in the harness. A
+  function harness that calls its environment session itself (`ctx.session.call_tool(...)`) passes the tool plane by
+  as well, its tool access included. An ORS bridge's `get_task` tool (`bridge_tools: true`), when a role allows it,
+  shows the environment's whole tool list, the tools the role does not allow included, though a call to one is still
+  refused. A task MCP tool is matched by the name the gateway serves, in which every character of its server's name
+  and its own but an ASCII letter, a digit and `_` is replaced by `_`: `mcp_server__*` matches the tools of a server
+  `mcp-server`, and `mcp-server__*` matches none, which loading does not warn of, as it does not check patterns
+  against a Harbor task's tools.
+- **What loading refuses** (exit 78, `platoon config validate` too): `tools` that is not a list (write `tools: [read]`,
+  not `tools: read`), an item that is not a non-empty string, a key of a role other than `policy` and `tools`, and a
+  role that is no name. A role that looks like a misspelling of one of platoon's own (`subagents` for `subagent`) is
+  only warned of, since a harness may mint agents of any role. A pattern that matches none of the tools of the run's
+  environments is only warned of, and only when every environment names its tools before a session opens: an ORS
+  environment run in process (`python://`) whose class declares them all, a task table (none), or a service class with
+  `declared_tools`. Harbor tasks, whose MCP servers list their tools once a session opens, and ORS env servers are not
+  checked.
+
+[`examples/subagents/read-only-subagents.yaml`](../../examples/subagents/read-only-subagents.yaml) trains the
+subagents example with subagents that may only read, so that only the root answers.
+
 ## Label tasks by a column
 
 Each task of a run is a dataset row: its `task_id` and the columns its environment gives it. A mixture gives each
