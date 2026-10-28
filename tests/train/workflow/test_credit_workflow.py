@@ -3,8 +3,9 @@ over the group, within its time limit, tags the rows of an estimator that reads 
 checkpoint keeps whole), whatever order the estimator leaves the members in, and refuses rows without tags; its
 requests ask the workers for tags (protocol 3) only then; a subclass with credit hooks of its own keeps them, unless it
 declares that it applies credit; the run settles a stateful estimator as it files each group and saves its state with
-the groups a checkpoint keeps; and an estimator that raises, in assign or in settle, or runs out of time, stops the run
-with an error that names it."""
+the groups a checkpoint keeps; an estimator sees the run's policies and each one's version; and an estimator that
+raises, in assign or in settle, or runs out of time, stops the run with an error that names it, while a policy's failed
+scoring fails only its group."""
 
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from tinker import TensorData
 from platoon.train.checkpoints import saving
 from platoon.train.checkpoints.kept_groups import decode_group, encode_group
 from platoon.train.config_defs import WorkflowConfig
-from platoon.train.credit.api import CreditEstimatorBase, CreditGroup, CreditSetup
+from platoon.train.credit.api import CreditEstimatorBase, CreditGroup, CreditSetup, PolicyView
 from platoon.train.credit.group import GroupCredit
 from platoon.train.credit.keyed import Keyed, KeyedOptions
 from platoon.train.credit.registry import workflow_problems
@@ -39,6 +40,7 @@ from platoon.train.workflow.context import _group_entry
 from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.train.workflow.output import GroupOutput, PolicyGroupOutput
 from platoon.train.workflow.protocol import capabilities_of, report_of, rows_by_policy
+from platoon.utils.stats_tracker import StatsTracker
 from platoon.utils.tinker_data_processing import AgentTag, TrajectoryCollectionResult, TrajectoryStats
 
 _SETUP = CreditSetup(name="test", entry="default", settings=WorkflowConfig(), policies=(MAIN,))
@@ -300,6 +302,56 @@ def test_an_estimator_that_raises_stops_the_run_and_its_group_counts_as_no_faile
     ):
         asyncio.run(runner._run_group(workflow, {"task_id": "task"}, watchdog=None, tracker=tracker))
     assert recorded == []
+
+
+class _ScoresWithTheTeacher(CreditEstimatorBase):
+    """Scores the group's rows with the teacher, as reverse_kl does, and records what it saw of the policies."""
+
+    seen: list[tuple[dict, list]] = []
+
+    async def assign(self, group: CreditGroup) -> None:
+        type(self).seen.append((dict(group.versions), sorted(group.policies)))
+        await group.policies["teacher"].score([sample.datum for sample in group.samples()])
+
+
+async def _unavailable(datums: Sequence[tinker.Datum]) -> list[torch.Tensor]:
+    raise RuntimeError("503 Service Unavailable")
+
+
+def test_a_policy_s_failed_scoring_fails_only_its_group(caplog):
+    workflow = _workflow(_ScoresWithTheTeacher(_SETUP))
+    versions = {MAIN: 6}
+    workflow.policy_views = {
+        MAIN: PolicyView(MAIN, current_version=lambda: versions[MAIN]),
+        "teacher": PolicyView("teacher", scorer=_unavailable),
+    }
+
+    async def single(data: dict, rollout_number: int) -> TrajectoryCollectionResult:
+        return [_rollout(1.0, 0.0), _rollout(0.0, 0.0)][rollout_number]
+
+    workflow.arun_episode_single = single
+    tracker: Any = SimpleNamespace(scalar=lambda **values: None)
+    output = asyncio.run(runner._run_group(workflow, {"task_id": "task"}, watchdog=None, tracker=tracker))
+
+    # The run goes on: the group's output says it failed, and it trains nothing.
+    report = report_of(output)
+    assert report.verdict == "failed" and not carries_datums(output)
+    stats = StatsTracker()
+    assert report.group_stats is not None
+    report.group_stats.record(stats)
+    assert stats.export()["credit/failures"] == 1.0
+    assert "Task task group trains nothing: its credit failed, policy teacher could not score 4 row(s)" in caplog.text
+    # The estimator saw the run's policies, each at its version when assign began (a frozen one's: 0).
+    assert _ScoresWithTheTeacher.seen[-1] == ({MAIN: 6, "teacher": 0}, [MAIN, "teacher"])
+
+
+def test_without_the_run_s_policies_a_group_has_main_s_from_the_workflow():
+    estimator = _ScoresWithTheTeacher(_SETUP)
+    with pytest.raises(
+        CreditEstimatorError, match="raised KeyError: 'teacher'"
+    ):  # an estimator's own bug stops the run
+        _run(_workflow(estimator), [_rollout(1.0, 0.0), _rollout(0.0, 0.0)])
+    assert _ScoresWithTheTeacher.seen[-1] == ({MAIN: 4}, [MAIN])
 
 
 def test_a_tagged_output_is_kept_whole_by_a_checkpoint():

@@ -707,13 +707,19 @@ CREDIT_ESTIMATOR_TEXT: dict[str, str] = {
     "keyed": "Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, "
     "`policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the "
     "subagents'. Reads agents: the rollout workers tag each row with its agent.",
+    "reverse_kl": "On-policy distillation: a frozen teacher (a `policies:` entry with `trainable: false`) scores every "
+    "token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher "
+    "logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share "
+    "the student's tokenizer.",
 }
 
 
 def _credit_estimators(links: Mapping[type, str]) -> list[str]:
     from platoon.train.credit.keyed import KeyedOptions
     from platoon.train.credit.registry import BUILTIN_CREDIT_ESTIMATORS
+    from platoon.train.credit.reverse_kl import ReverseKLOptions
 
+    schemas: dict[str, type] = {"keyed": KeyedOptions, "reverse_kl": ReverseKLOptions}
     lines = [
         "",
         '<a id="credit-estimators"></a>',
@@ -734,22 +740,23 @@ def _credit_estimators(links: Mapping[type, str]) -> list[str]:
             raise ValueError(
                 f"core's credit estimator {name!r} has no text in scripts/gen_reference.py's CREDIT_ESTIMATOR_TEXT"
             )
-        options = "[below](#keyed-options)" if name == "keyed" else "none"
+        options = f"[below](#{name.replace('_', '-')}-options)" if name in schemas else "none"
         lines.append(f"| `{name}` | {cell(CREDIT_ESTIMATOR_TEXT[name])} | {options} |")
-    lines += [
-        "",
-        '<a id="keyed-options"></a>',
-        "",
-        "### `keyed`'s options",
-        "",
-        f"`{KeyedOptions.__module__}.{KeyedOptions.__qualname__}`: the keys of `credit_options` under `credit: keyed`.",
-        "",
-        "| Key | Type | Default | Description |",
-        "|---|---|---|---|",
-    ]
-    for item in config_fields(KeyedOptions):
-        type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
-        lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
+    for name, schema in schemas.items():
+        lines += [
+            "",
+            f'<a id="{name.replace("_", "-")}-options"></a>',
+            "",
+            f"### `{name}`'s options",
+            "",
+            f"`{schema.__module__}.{schema.__qualname__}`: the keys of `credit_options` under `credit: {name}`.",
+            "",
+            "| Key | Type | Default | Description |",
+            "|---|---|---|---|",
+        ]
+        for item in config_fields(schema):
+            type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
+            lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
     return lines
 
 

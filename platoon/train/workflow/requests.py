@@ -23,6 +23,7 @@ from platoon.train.workers.protocol import (
     ModelBinding,
     PolicyRolloutWorkerRequest,
     RolloutWorkerRequest,
+    binding_path,
     ipc_dir,
 )
 from platoon.train.workflow.settings import GroupSettings
@@ -53,13 +54,30 @@ def _model_binding(workflow: "GroupRolloutWorkflow", checkpoint_version: int) ->
     )
 
 
+def _policy_bindings(workflow: "GroupRolloutWorkflow") -> dict[str, ModelBinding]:
+    """The binding of each policy the rollouts sample but the agents' default (``sampled_policies``), at its version
+    now, each followed at its own file (``model_binding.<id>.pkl``) by a worker, which ``process`` mode only
+    resolves, as :func:`_model_binding`."""
+
+    return {
+        policy: model_binding(
+            info,
+            binding_path=binding_path(workflow._ipc_dir(), policy) if workflow._isolation == "process" else "",
+            follow_poll_seconds=GroupSettings(workflow.config).worker_binding_poll_seconds,
+            checkpoint_version=info.llm.version,
+        )
+        for policy, info in workflow.sampled_policies.items()
+    }
+
+
 def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_number: int) -> RolloutWorkerRequest:
     """Everything the parent must decide before a rollout can run, in process or in a worker.  It resolves the task
     parent-side, which also removes the shared-mutable-``Task`` aliasing some plugin datasets have.  It applies
     ``max_steps``, snapshots the checkpoint version and joins ``output_dir`` with it.  A training draw's provenance in
     ``data`` (under ``DRAW_KEY``, when the trainer asks for it) goes into the rollout config's ``extra``, where the
-    episode reads it (``ctx.draw``).  For a group whose entry's credit estimator reads agents, the request asks for
-    each datum's tags (protocol 3, ``PolicyRolloutWorkerRequest``)."""
+    episode reads it (``ctx.draw``).  A rollout that samples several policies carries each one's binding, which agent
+    samples which and the policies the run trains, and a group whose entry's credit estimator reads agents asks for
+    each datum's tags: both are protocol 3's ``PolicyRolloutWorkerRequest``."""
 
     task_id = data["task_id"]
     task = workflow.get_task_fn(task_id)
@@ -116,7 +134,16 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
         sandbox_labels=sandbox_cleanup.labels(),
         signal_first_call=held_slot() is not None,
     )
-    if workflow.entry_credit and getattr(workflow._entry_estimator(), "needs_agents", False):
+    tag_datums = bool(workflow.entry_credit) and getattr(workflow._entry_estimator(), "needs_agents", False)
+    if workflow.sampled_policies:
+        return PolicyRolloutWorkerRequest.extending(
+            request,
+            tag_datums=tag_datums,
+            policies=workflow._policy_bindings(),
+            agents=workflow.agents,
+            trained=workflow.trained_policies,
+        )
+    if tag_datums:
         return PolicyRolloutWorkerRequest.tagging(request)
     return request
 
@@ -163,9 +190,9 @@ def _ipc_dir(workflow: "GroupRolloutWorkflow") -> str:
 
 def _warm_up_request(workflow: "GroupRolloutWorkflow") -> RolloutWorkerRequest:
     """A request like each of this workflow's rollouts', for what plans a fork server: the environments' packages,
-    the model the workers sample (whose renderer the server builds) and the startup budget.  It runs nowhere."""
+    the models the workers sample (whose renderers the server builds) and the startup budget.  It runs nowhere."""
 
-    return RolloutWorkerRequest(
+    request = RolloutWorkerRequest(
         protocol_version=PROTOCOL_VERSION,
         request_id=f"{workflow.stats_scope}-warm-up",
         task_id="",
@@ -180,6 +207,9 @@ def _warm_up_request(workflow: "GroupRolloutWorkflow") -> RolloutWorkerRequest:
         startup_budget_seconds=GroupSettings(workflow.config).worker_startup_budget_seconds,
         packages=tuple(workflow.packages),
     )
+    if workflow.sampled_policies:
+        return PolicyRolloutWorkerRequest.extending(request, tag_datums=False, policies=workflow._policy_bindings())
+    return request
 
 
 def _worker_log_dir(workflow: "GroupRolloutWorkflow", checkpoint_version: int) -> str | None:
@@ -193,4 +223,4 @@ def _worker_log_dir(workflow: "GroupRolloutWorkflow", checkpoint_version: int) -
 def _binding_path(workflow: "GroupRolloutWorkflow") -> str:
     """The file of the published sampling client, which the workflow's rollout workers follow."""
 
-    return os.path.join(workflow._ipc_dir(), "model_binding.pkl")
+    return binding_path(workflow._ipc_dir())

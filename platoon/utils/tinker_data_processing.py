@@ -8,6 +8,7 @@ https://raw.githubusercontent.com/thinking-machines-lab/tinker-cookbook/refs/hea
 """
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -190,8 +191,9 @@ class SubagentDatumSamplingStats:
         return metrics
 
 
-# The trajectory misc key under which the gateway records the agent that ran a trajectory: its ``agent_id`` and its
-# ``role`` (platoon.gateway.trace.AGENT_MISC_KEY), and the role of a trajectory that records none.
+# The trajectory misc key under which the gateway records the agent that ran a trajectory: its ``agent_id``, its
+# ``role`` and, in a run that samples several policies, its ``policy`` (platoon.gateway.trace.AGENT_MISC_KEY), and the
+# role of a trajectory that records none.
 AGENT_MISC_KEY = "agent"
 DEFAULT_ROLE = "policy"
 
@@ -210,6 +212,28 @@ class AgentTag:
     parent_id: str | None
     depth: int
     reward: float | None
+    # The policy the agent sampled, in a rollout of several policies (``policies``); None in a run of one.
+    policy: str | None = None
+
+
+@dataclass(frozen=True)
+class RolloutPolicies:
+    """The policies of a rollout that sampled several (worker protocol 3): the agents' default policy (``default``),
+    which a trajectory that records no policy sampled; the version of each, that of the oldest sample of it the rollout
+    used, which its trajectories' datums are stamped with; and the policies training trains (``trained``): only their
+    trajectories make datums, while a frozen policy's agents keep their rewards and tags."""
+
+    default: str
+    versions: Mapping[str, int]
+    trained: frozenset[str]
+
+    def of(self, trajectory: dict) -> str:
+        """The policy that sampled ``trajectory``, as the gateway recorded it in its misc; the default without one."""
+
+        misc = trajectory.get("misc")
+        agent = misc.get(AGENT_MISC_KEY) if isinstance(misc, dict) else None
+        policy = agent.get("policy") if isinstance(agent, dict) else None
+        return str(policy) if policy else self.default
 
 
 @dataclass
@@ -230,16 +254,17 @@ class TrajectoryCollectionResult:
     agents: tuple[AgentTag, ...] | None = None
     datum_trajectories: tuple[str, ...] | None = None
     # Each datum's own policy version, in the order of ``datums`` as the conversion returned them: the oldest version
-    # its merged calls sampled, or its rollout's (its ``checkpoint_version``) when a call recorded none.  Empty from a
-    # conversion that gives none (and in a result pickled before the field, by this class default).  Whatever changes
-    # ``datums`` afterwards, such as the group's error-token filter, leaves it as it was: stamp first.
+    # its merged calls sampled, or the one it carries (its ``checkpoint_version``: its rollout's, or in a rollout of
+    # several policies its own policy's) when a call recorded none.  Empty from a conversion that gives none (and in a
+    # result pickled before the field, by this class default).  Whatever changes ``datums`` afterwards, such as the
+    # group's error-token filter, leaves it as it was: stamp first.
     own_versions: tuple[int, ...] = ()
 
     def stamp_own_versions(self) -> bool:
-        """Stamp each datum with its own policy version (``own_versions``) in place of its rollout's, as the per-datum
-        stale filter judges it (``train.stale_filter: datum``).  Whether it did: a result whose ``own_versions`` do
-        not match its ``datums`` in number (none given, or datums dropped or added since the conversion) keeps its
-        rollout's."""
+        """Stamp each datum with its own policy version (``own_versions``) in place of the one it carries, as the
+        per-datum stale filter judges it (``train.stale_filter: datum``).  Whether it did: a result whose
+        ``own_versions`` do not match its ``datums`` in number (none given, or datums dropped or added since the
+        conversion) keeps the ones they carry."""
 
         if len(self.own_versions) != len(self.datums):
             return False
@@ -440,8 +465,9 @@ def trajectory_to_data(
         task_id: Task identifier for logging.
         trajectory_id: Trajectory identifier for logging.
         trajectory_advantage: The advantage for this trajectory (reward - mean_reward).
-        checkpoint_version: The rollout's checkpoint version, which every datum carries for staleness checking; each
-            datum's own, the oldest its merged calls sampled, is in the result's ``own_versions``.
+        checkpoint_version: The checkpoint version every datum carries for staleness checking (its rollout's, or in a
+            rollout of several policies its trajectory's policy's); each datum's own, the oldest its merged calls
+            sampled, is in the result's ``own_versions``.
         filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
         filter_message_actions: Exclude agent-message tokens from policy loss while retaining context.
         trajectory_reward: Retained for call-site compatibility. Error
@@ -589,6 +615,7 @@ def get_train_data_for_trajectory_collection(
     subagent_datum_sampler: SubagentDatumSampler | None = None,
     filter_message_actions: bool = False,
     tag_datums: bool = False,
+    policies: RolloutPolicies | None = None,
 ) -> TrajectoryCollectionResult:
     """Extract training data from all trajectories in a collection.
 
@@ -600,8 +627,8 @@ def get_train_data_for_trajectory_collection(
         trajectory_collection: Dictionary with 'trajectories' key mapping to trajectory dicts.
         interactions: Dict mapping completion_id to TinkerLLMInteraction.
         task_id: Task identifier for logging.
-        checkpoint_version: The rollout's checkpoint version, which every datum carries for staleness checking; each
-            datum's own is in the result's ``own_versions``.
+        checkpoint_version: The rollout's checkpoint version, which every datum carries for staleness checking
+            (under ``policies``, its own policy's instead); each datum's own is in the result's ``own_versions``.
         filter_errors: Whether to mark erroneous completion tokens for deferred filtering.
         filter_message_actions: Exclude agent-message tokens from policy loss while retaining context.
         reward_processor: Function to process trajectory rewards.
@@ -610,6 +637,11 @@ def get_train_data_for_trajectory_collection(
         tag_datums: Also give every trajectory's agent and each datum's
             trajectory (``agents``, ``datum_trajectories``), for a credit
             estimator that reads agents.
+        policies: For a rollout that sampled several policies: each
+            trajectory's datums are stamped with its own policy's version
+            (instead of ``checkpoint_version``), and only the trajectories
+            of the policies training trains make datums; the others count as
+            excluded from the policy, as a failed child's do.
 
     Returns:
         TrajectoryCollectionResult with datums and per-trajectory statistics.
@@ -665,6 +697,12 @@ def get_train_data_for_trajectory_collection(
         depth,
         policy_ineligible,
     ) in processed_trajectories:
+        policy, version = None, checkpoint_version
+        if policies is not None:
+            policy = policies.of(trajectory)
+            version = policies.versions[policy]  # its own policy's
+            # A policy training does not train (a frozen judge's) makes no datums, whatever its agent's role.
+            policy_ineligible = policy_ineligible or policy not in policies.trained
         # Advantage will be set later after all rollouts complete
         result = trajectory_to_data(
             trajectory=trajectory,
@@ -672,7 +710,7 @@ def get_train_data_for_trajectory_collection(
             task_id=task_id,
             trajectory_id=trajectory_id,
             trajectory_advantage=trajectory_reward,  # Will be further processed later.
-            checkpoint_version=checkpoint_version,
+            checkpoint_version=version,
             filter_errors=filter_errors,
             filter_message_actions=filter_message_actions,
             trajectory_reward=trajectory_reward,
@@ -701,14 +739,15 @@ def get_train_data_for_trajectory_collection(
                 )
 
         retained_datums: list[tinker.Datum] = []
-        # Each datum's own version; a trajectory conversion that gives none leaves each its rollout's.
-        versions = result.own_versions or [checkpoint_version] * len(result.datums)
-        for datum, version, retained in zip(result.datums, versions, keep_mask, strict=True):
+        # Each datum's own version; a trajectory conversion that gives none leaves each its trajectory's (``version``:
+        # its rollout's, or in a rollout of several policies its own policy's).
+        versions = result.own_versions or [version] * len(result.datums)
+        for datum, own_version, retained in zip(result.datums, versions, keep_mask, strict=True):
             if subagent_datum_sampler is not None and not policy_ineligible:
                 sampling_stats.record(datum, depth=depth, retained=retained)
             if retained:
                 retained_datums.append(datum)
-                own_versions.append(version)
+                own_versions.append(own_version)
 
         # Sampling may remove the datum which originally carried traj_start.
         # Mark the first *retained* datum so depth weighting counts only
@@ -726,7 +765,7 @@ def get_train_data_for_trajectory_collection(
 
         train_data.extend(retained_datums)
         if tag_datums:
-            agents.append(_agent_tag(trajectory_id, trajectory, depth, trajectory_reward))
+            agents.append(_agent_tag(trajectory_id, trajectory, depth, trajectory_reward, policy))
             datum_trajectories.extend([trajectory_id] * len(retained_datums))
 
         # Record per-trajectory stats
@@ -763,10 +802,10 @@ def get_train_data_for_trajectory_collection(
     )
 
 
-def _agent_tag(trajectory_id: str, trajectory: dict, depth: int, reward: float) -> AgentTag:
+def _agent_tag(trajectory_id: str, trajectory: dict, depth: int, reward: float, policy: str | None = None) -> AgentTag:
     """The :class:`AgentTag` of one converted trajectory: its agent as the gateway recorded it in its misc, its parent
-    (``parent_info``), its depth and its processed ``reward``, None when it was interrupted or its verifier gave no
-    verdict."""
+    (``parent_info``), its depth, its processed ``reward``, None when it was interrupted or its verifier gave no
+    verdict, and its ``policy`` (None in a run of one)."""
 
     misc = trajectory.get("misc")
     agent = misc.get(AGENT_MISC_KEY) if isinstance(misc, dict) else None
@@ -780,6 +819,7 @@ def _agent_tag(trajectory_id: str, trajectory: dict, depth: int, reward: float) 
         parent_id=parent.get("id") if isinstance(parent, dict) else None,
         depth=depth,
         reward=float(reward) if scored else None,
+        policy=policy,
     )
 
 

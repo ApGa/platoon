@@ -39,6 +39,7 @@ from platoon.train.dispatch.settled import _output_label, _record_group_stats, _
 from platoon.train.labels import label_column, metric_labels, metric_prefix
 from platoon.train.objectives.api import objective_is_zero_for_zero_advantages
 from platoon.train.objectives.policy_gradient import PolicyGradient, compute_training_metrics
+from platoon.train.policy.binding import publish_frozen_bindings
 from platoon.train.policy.learner import Learner
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.spec import MAIN, PolicyId, PolicySpec
@@ -121,6 +122,10 @@ async def _train_loop(
         shared_state.model_info.llm.version,
         required=True,
     )
+    # The frozen policies the agents sample, if any.  A state a test made as platoon 0.4.0 did has no policies, and
+    # samples one (_test_state_policy).
+    if (policies := getattr(shared_state, "policies", None)) is not None:
+        publish_frozen_bindings(policies, train_workflow, trainer._publish_worker_binding, required=True)
     budget = trainer.config.train.max_concurrent_rollouts
     client_monitor("train").set_configured_concurrency(
         _rollouts_at_once(trainer.config, "train", budget), budget=budget

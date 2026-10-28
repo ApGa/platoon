@@ -345,7 +345,8 @@ def fake_tinker_service(*, stop_at: int | None = None) -> Generator[FakePolicySe
 @contextmanager
 def _faked(service: FakePolicyService) -> Generator[None]:
     """``service`` in place of the Tinker service, and a model gateway that samples nothing in place of the one a
-    trainer registers for its policy."""
+    trainer registers for its policy and of the one it opens for each other policy, whose sampling client is the
+    service's (it scores, :meth:`FakePolicyService.create_sampling_client`)."""
 
     import tinker
 
@@ -354,6 +355,7 @@ def _faked(service: FakePolicyService) -> Generator[None]:
     with (
         mock.patch.object(tinker, "ServiceClient", service.service_client),
         mock.patch.object(set_module, "register_tinker_llm", _registered),
+        mock.patch.object(set_module, "open_tinker_llm", _opened),
     ):
         yield
 
@@ -371,6 +373,20 @@ def _registered(model_name: str, renderer_name: str, **kwargs: Any) -> Any:
     )
 
 
+def _opened(model_name: str, renderer_name: str, **kwargs: Any) -> Any:
+    """Another policy's model info, as :func:`_registered`'s, on a session of its own on the (fake) service at its
+    ``base_url``, whose sampling client of its model (or of the sampler ``model_path`` names) it samples."""
+
+    import tinker
+
+    session = tinker.ServiceClient(base_url=kwargs.get("base_url"))
+    info = _registered(model_name, renderer_name, **kwargs)
+    info.llm.sampling_client = session.create_sampling_client(
+        base_model=model_name, model_path=kwargs.get("model_path")
+    )
+    return info
+
+
 class _FakeLLM:
     """A policy's model gateway that samples nothing: it counts the policy's versions, and renders with the toy
     renderer (``qwen3_instruct`` over the toy tokenizer), which a trainer or a step hook that renders reads."""
@@ -380,6 +396,7 @@ class _FakeLLM:
 
     def __init__(self, model_name: str) -> None:
         self.model_name, self.version = model_name, 0
+        self.sampling_client: Any = None
 
     @property
     def renderer(self) -> Any:
@@ -404,10 +421,12 @@ class _FakeLLM:
 class FakePolicyService:
     """A Tinker service on CPU, for one start: its training clients step nothing and save to ``tinker://fake/...``
     paths, while ``tinker_cookbook`` records each full save in the run's ``checkpoints.jsonl`` as it does for a real
-    service.  ``stop_at``: the optimizer step, counted over the start, in which it raises ``SIGUSR2``, the stop request
-    ``platoon train`` passes on.  ``calls`` lists what was asked of it, in order; ``losses`` the loss of each
-    forward_backward, ``datums`` every datum sent to it, ``adam`` the Adam parameters of each optimizer step, and
-    ``deleted`` the checkpoint paths its REST client deleted (the recovery pruning's)."""
+    service, and its sampling clients score every token at :data:`SCORED_LOGPROB`.  ``stop_at``: the optimizer step,
+    counted over the start, in which it raises ``SIGUSR2``, the stop request ``platoon train`` passes on.  ``calls``
+    lists what was asked of it, in order; ``losses`` the loss of each forward_backward, ``datums`` every datum sent to
+    it, ``adam`` the Adam parameters of each optimizer step, ``deleted`` the checkpoint paths its REST client deleted
+    (the recovery pruning's), ``sessions`` the ``base_url`` of each session opened on it (``tinker.ServiceClient``),
+    and ``scored`` every sequence its sampling clients scored, with the model or sampler that scored it."""
 
     def __init__(self, *, stop_at: int | None = None) -> None:
         self.stop_at = stop_at
@@ -417,10 +436,13 @@ class FakePolicyService:
         self.datums: list[Any] = []
         self.adam: list[Any] = []
         self.deleted: list[str] = []
+        self.sessions: list[str | None] = []
+        self.scored: list[tuple[str, list[int]]] = []
 
     def service_client(self, **kwargs: Any) -> FakePolicyService:
-        """``tinker.ServiceClient(base_url=...)``: this service."""
+        """``tinker.ServiceClient(base_url=...)``: a session on this service."""
 
+        self.sessions.append(kwargs.get("base_url"))
         return self
 
     def create_rest_client(self) -> FakePolicyService:
@@ -430,6 +452,11 @@ class FakePolicyService:
 
     async def delete_checkpoint_from_tinker_path_async(self, path: str) -> None:
         self.deleted.append(path)
+
+    def create_sampling_client(self, base_model: str | None = None, model_path: str | None = None) -> _Scorer:
+        """A sampling client of ``base_model`` (or of the sampler ``model_path`` names), which scores."""
+
+        return _Scorer(self, model_path or base_model or "")
 
     async def create_lora_training_client_async(self, base_model: str, rank: int = 32, **kwargs: Any) -> Any:
         return self._open(f"create_lora_training_client {base_model}")
@@ -443,6 +470,23 @@ class FakePolicyService:
     def _open(self, call: str) -> _FakeTrainingClient:
         self.calls.append(call)
         return _FakeTrainingClient(self)
+
+
+# The logprob a fake service's sampling client gives every token it scores.
+SCORED_LOGPROB = -1.0
+
+
+class _Scorer:
+    """A fake service's sampling client: it scores each sequence's tokens at :data:`SCORED_LOGPROB` (the first token,
+    which has no logprob, at None)."""
+
+    def __init__(self, service: FakePolicyService, model: str) -> None:
+        self.service, self.model = service, model
+
+    async def compute_logprobs_async(self, prompt: Any) -> list[float | None]:
+        tokens = prompt.to_ints()
+        self.service.scored.append((self.model, tokens))
+        return [None] + [SCORED_LOGPROB] * (len(tokens) - 1)
 
 
 class _Done:

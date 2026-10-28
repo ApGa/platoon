@@ -100,8 +100,10 @@ from platoon.train.workers.outcomes import WorkerOutcome, _remove_event_temporar
 from platoon.train.workers.protocol import (
     IPC_SWEEP_AGE_SECONDS,
     RolloutWorkerRequest,
+    binding_path,
     dump_request,
     ipc_dir,
+    is_binding_file,
     unlink_quietly,
 )
 from platoon.train.workers.registry import (
@@ -269,7 +271,7 @@ class RolloutWorkerSupervisor:
         self.ready_poll_seconds = float(ready_poll_seconds)
         self.orphaned_session_timeout_seconds = float(orphaned_session_timeout_seconds)
         self.orphaned_sandbox_timeout_seconds = float(orphaned_sandbox_timeout_seconds)
-        self.binding_path = os.path.join(self.scratch_dir, "model_binding.pkl")
+        self.binding_path = binding_path(self.scratch_dir)
         self.registry_dir = registry_dir(self.scratch_dir)
         self._orphans_swept: asyncio.Lock | None = None
         self._orphans_sweep_done = False
@@ -283,7 +285,7 @@ class RolloutWorkerSupervisor:
         except OSError:
             return
         for name in names:
-            if name in (os.path.basename(self.binding_path), REGISTRY_DIRNAME):
+            if is_binding_file(name) or name == REGISTRY_DIRNAME:  # every policy's binding, which workers read
                 continue
             path = os.path.join(self.scratch_dir, name)
             try:
@@ -293,10 +295,12 @@ class RolloutWorkerSupervisor:
                 continue
 
     # -- the model binding ----------------------------------------------
-    def publish_binding(self, sampling_client, version: int) -> None:
-        """Republish the trainer's sampling client so workers can follow it."""
+    def publish_binding(self, sampling_client, version: int, *, policy: str | None = None) -> None:
+        """Republish the trainer's sampling client so workers can follow it: the agents' default policy's, or the one
+        of ``policy``, another policy the rollouts sample, into its own binding file."""
 
-        publish_binding(sampling_client, version, self.binding_path)
+        path = self.binding_path if policy is None else binding_path(self.scratch_dir, policy)
+        publish_binding(sampling_client, version, path)
 
     # -- a dead trainer's workers ------------------------------------------
     async def sweep_orphaned_workers(self) -> list[int]:
@@ -407,16 +411,23 @@ class RolloutWorkerSupervisor:
 
         if self.module != WORKER_MODULE:
             return []
-        binding = request.model
         steps = [dict(step) for step in self.preload.prepare]
-        if not binding.model_name:
+        if not request.model.model_name:
             return steps
-        kwargs = {
-            "model_name": binding.model_name,
-            "renderer_name": binding.renderer_name,
-            "renderer_kwargs": dict(binding.renderer_kwargs),
-        }
-        return [{"ref": "platoon.train.tinker.proxy:prepare_renderer", "kwargs": kwargs}, *steps]
+        # Each sampled policy's: the agents' default's (model), and the others' of a rollout of several policies.
+        bindings = [request.model, *getattr(request, "policies", {}).values()]
+        renderers = [
+            {
+                "ref": "platoon.train.tinker.proxy:prepare_renderer",
+                "kwargs": {
+                    "model_name": binding.model_name,
+                    "renderer_name": binding.renderer_name,
+                    "renderer_kwargs": dict(binding.renderer_kwargs),
+                },
+            }
+            for binding in bindings
+        ]
+        return [*renderers, *steps]
 
     @property
     def _max_fork_server_starts(self) -> int:

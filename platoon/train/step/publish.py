@@ -58,8 +58,11 @@ def _no_update_reason(zero_objective_microbatches: int, empty_microbatches: int,
     return f"{zero_objective_microbatches} microbatch(es) had a zero objective and {empty_microbatches} had no datums"
 
 
-def _publish_worker_binding(workflow, sampling_client, version: int, *, required: bool = False) -> None:
-    """Republish the sampling client for rollout workers.
+def _publish_worker_binding(
+    workflow, sampling_client, version: int, *, required: bool = False, policy: str | None = None
+) -> None:
+    """Republish the sampling client for rollout workers: the agents' default policy's, or ``policy``'s, another
+    policy they sample, to a workflow that binds several (``binds_policies``).
 
     A no-op for ``inprocess`` mode and for custom workflows that do not
     run workers.  A *re*-publication failure is logged and swallowed: every
@@ -79,7 +82,10 @@ def _publish_worker_binding(workflow, sampling_client, version: int, *, required
     if publish is None:
         return
     try:
-        publish(sampling_client, version)
+        if policy is None:
+            publish(sampling_client, version)
+        else:
+            publish(sampling_client, version, policy=policy)
     except Exception:
         logger.exception("could not publish the rollout worker sampling-client binding")
         if required and getattr(workflow, "rollout_isolation", "inprocess") == "process":

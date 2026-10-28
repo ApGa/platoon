@@ -101,9 +101,8 @@ class InlineRuntime:
     def endpoint(self, agent: AgentSession) -> ModelEndpoint:
         if self.base_url is None:
             raise RuntimeError("This rollout serves no HTTP endpoint (the gateway server was not started)")
-        return ModelEndpoint(
-            base_url=f"{self.base_url}/s/{agent.secret}/v1", api_key=agent.secret, model=self.gateway.model_name
-        )
+        model = self.gateway.runtime(agent.policy).model_name  # the model of the agent's policy
+        return ModelEndpoint(base_url=f"{self.base_url}/s/{agent.secret}/v1", api_key=agent.secret, model=model)
 
     def bind_tools(self, agent: AgentSession, session: EnvSession) -> McpEndpoint | None:
         """Bind the agent's tools on the gateway's tool plane (``platoon.gateway.mcp``), and return the agent's MCP

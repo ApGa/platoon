@@ -1,8 +1,9 @@
 # Write a credit estimator (experimental)
 
 A credit estimator decides how a training group's rewards become the advantages its rows train with. Platoon's own are
-`group` (the workflow's own credit: each rollout centered on the group's completed-root baseline) and `keyed` (each
-agent centered on the group's agents of its key: task, policy, role, depth); this page shows how to write your own,
+`group` (the workflow's own credit: each rollout centered on the group's completed-root baseline), `keyed` (each
+agent centered on the group's agents of its key: task, policy, role, depth) and `reverse_kl` (on-policy distillation:
+each token's negative reverse KL against a frozen teacher's score of it); this page shows how to write your own,
 register it and test it. What choosing one does to a run is in
 [Credit each environment's groups](../how-to/train-and-eval.md#credit-each-environments-groups-experimental).
 
@@ -52,8 +53,19 @@ unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows t
 counts.
 
 It is built once per start of the process and entry, `Class(setup, options)`: `setup` is a `CreditSetup` (its name as
-the config gives it, its entry, the entry's training settings, the run's policies), `options` its options parsed.
-Subclass `CreditEstimatorBase` for the defaults.
+the config gives it, its entry, the entry's training settings, the run's policies by id, and `policy_views`, each
+policy as the estimator may read it), `options` its options parsed. Subclass `CreditEstimatorBase` for the defaults.
+
+An estimator that scores rows with another policy, a frozen teacher or judge the config declares under `policies:`,
+reads it from `setup.policy_views[policy_id]`, a `PolicyView`: `await view.score(datums)` gives that policy's logprob
+of each datum's target tokens, one per target token, aligned as the datum's own sampled logprobs
+(`datum.loss_fn_inputs["logprobs"]`); its `tokenizer` and `renderer` say how it reads them. `reverse_kl` is such an
+estimator: [`platoon/train/credit/reverse_kl.py`](../../platoon/train/credit/reverse_kl.py) is about 200 lines. The
+scoring calls run in the trainer while the group's `assign` awaits, each bounded by that policy's
+`sample_timeout_seconds`. A call that fails, runs out of time or gives a response of the wrong length raises
+`ScoringFailed`: let it propagate, and the group fails alone (verdict `failed`, counted under `credit/failures`),
+training nothing, while the run goes on. The group's own `policies` are the same views, and its `versions` each one's
+version when `assign` began.
 
 ## The rules an estimator keeps
 
@@ -79,7 +91,8 @@ Subclass `CreditEstimatorBase` for the defaults.
 An estimator that raises, in `assign`, `settle`, `state` or `load_state`, or whose `assign` runs out of time (the call
 is then cancelled), stops the run with a `CreditEstimatorError` that names it, its entry and the group's task: a
 group it could not credit never trains otherwise, nor counts as a failed rollout. A resume from the last checkpoint
-goes on once it is fixed.
+goes on once it is fixed. The one exception is a policy's failed scoring (`ScoringFailed`, above), which fails only
+its group.
 
 ## Options and checks
 
@@ -98,8 +111,8 @@ names another estimator than the one that saved its state starts the new one afr
 
 Register an estimator under a short name with `@credit_estimator(name, options=..., check=...)` in a module an entry's
 `package` names, so that it is imported before the estimators resolve; or name it in the config as `module:Class`,
-with no registration at all. Core's names (`group`, `keyed`, and `reverse_kl` and `gae`, which platoon adds later)
-are reserved, whatever their case: registering one is an error, whatever was imported first, and so is registering a
+with no registration at all. Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds later) are
+reserved, whatever their case: registering one is an error, whatever was imported first, and so is registering a
 name twice. An unknown name is refused before the run starts, with the nearest name.
 
 ## Test it

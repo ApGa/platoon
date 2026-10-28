@@ -62,6 +62,7 @@ from tinker import TensorData
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN, row_entry
 from platoon.train.config_defs import RolloutConfig, WorkflowConfig
+from platoon.train.credit.api import PolicyView, ScoringFailed
 from platoon.train.credit.group import (
     # Re-exported: tests read it from this module.  filter_error_tokens looks it up in credit.group, so patch it there.
     _filter_positive_centered_error_tokens,  # noqa: F401
@@ -71,6 +72,7 @@ from platoon.train.credit.group import (
 )
 from platoon.train.credit.runtime import Credit, assign_credit
 from platoon.train.labels import task_label
+from platoon.train.policy.spec import AgentBindings
 from platoon.train.startup import WorkerPreload
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.tinker.rollout_metrics import ClientThroughputMonitor
@@ -189,12 +191,25 @@ class GroupRolloutWorkflow:
     # subclass that overrides ``compute_baselines`` or ``assign_advantages`` (``_CREDIT_METHODS``) credits with those:
     # it reads as False, and loading refuses an entry's estimator beside it, unless its own class body sets the flag.
     applies_credit: ClassVar[bool] = True
+    # Its rollouts may sample several policies (``sampled_policies``), each bound to its own file for the rollout
+    # workers: its ``publish_model_binding`` takes ``policy=``.
+    binds_policies: ClassVar[bool] = True
     # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
     # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
     entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})
     # The credit estimator of each environment entry that sets one (``environments[].credit``), by label, which
     # ``platoon train`` sets after construction for the training workflow, never for the evaluation's.
     entry_credit: Mapping[str, Any] = MappingProxyType({})
+    # The run's policies as its estimators read them, by id, which ``platoon train`` sets with ``entry_credit``: the
+    # credit group's policies and versions.  Empty without: the group's policy is then main, from ``model_info``.
+    policy_views: Mapping[str, PolicyView] = MappingProxyType({})
+    # In a run whose agents sample several policies, which ``platoon train`` sets after construction: the model info
+    # of each sampled policy but the agents' default (``agents.default``), whose is ``model_info``, by id; which agent
+    # samples which policy; and the policies the run trains, whose agents alone make datums.  Empty and None in a run
+    # of one sampled policy.
+    sampled_policies: Mapping[str, ModelInfo] = MappingProxyType({})
+    agents: AgentBindings | None = None
+    trained_policies: frozenset[str] = frozenset()
     # The run's limit on rollouts starting at once (platoon.train.workflow.start_limit), which the trainer sets on its
     # training and evaluation workflows as training starts; None: no limit. _run_group_member takes the slots.
     start_limit: StartLimit | None = None
@@ -428,9 +443,10 @@ class GroupRolloutWorkflow:
         :mod:`platoon.train.credit.group` describes: collect the members' datums (under the per-datum stale filter each
         stamped with its own policy version, :attr:`stale_filter`); stop at the first reason the group trains nothing
         before any credit (``_untrainable_verdict``); credit the members' datums (``_assign_credit``: by the entry's
-        estimator, or centered on each member's baseline through ``assign_advantages``); filter the error tokens; and
-        say what the group trains.  Every return is the group's output (``_make_task_output``), with its verdict and
-        what each member returned; under an estimator, as it credited it (``_credited_output``)."""
+        estimator, or centered on each member's baseline through ``assign_advantages``), the group failing when a
+        policy's scoring for its estimator does (``_credit_failed``); filter the error tokens; and say what the group
+        trains.  Every return is the group's output (``_make_task_output``), with its verdict and what each member
+        returned; under an estimator, as it credited it (``_credited_output``)."""
 
         with self._monitor().group_in_flight():
             raw_outcomes = await self._run_group_rollouts(data)
@@ -453,7 +469,10 @@ class GroupRolloutWorkflow:
         # The completed roots' rewards as the members returned them, for group_verdict's DEBUG line: an override of
         # assign_advantages may change them.
         completed_rewards = [result.task_reward for result in results if result.task_reward_valid]
-        credit = await self._assign_credit(data, results)
+        try:
+            credit = await self._assign_credit(data, results)
+        except ScoringFailed as exc:  # a teacher's scoring failed: this group alone fails
+            return output([], self._credit_failed(data, exc))
         datums, error_filter_totals, kept = filter_error_tokens(results)
         if error_filter_totals:
             self._group_stats().scalar(**error_filter_totals)
@@ -618,6 +637,7 @@ class GroupRolloutWorkflow:
     # (``members``) and their worker requests (``requests``).
     _entry_estimator = crediting._entry_estimator
     _credit_group = crediting._credit_group
+    _credit_failed = crediting._credit_failed
     _credited_output = crediting._credited_output
     _admission_semaphore = members._admission_semaphore
     _admit_group = members._admit_group
@@ -627,6 +647,7 @@ class GroupRolloutWorkflow:
     _cancel_late_members = members._cancel_late_members
     _slug = requests._slug
     _model_binding = requests._model_binding
+    _policy_bindings = requests._policy_bindings
     _build_worker_request = requests._build_worker_request
     _rollout_budget_seconds = requests._rollout_budget_seconds
     _ipc_dir = requests._ipc_dir
@@ -678,12 +699,16 @@ class GroupRolloutWorkflow:
 
     _warm_up_request = requests._warm_up_request  # moved, as above (``requests``)
 
-    def publish_model_binding(self, sampling_client, version: int) -> None:
-        """Republish the trainer's sampling client for its rollout workers."""
+    def publish_model_binding(self, sampling_client, version: int, *, policy: str | None = None) -> None:
+        """Republish the trainer's sampling client for its rollout workers: the agents' default policy's, or that of
+        ``policy``, another policy its rollouts sample (``sampled_policies``)."""
 
         if self._isolation != "process":
             return
-        self.supervisor.publish_binding(sampling_client, version)
+        if policy is None:
+            self.supervisor.publish_binding(sampling_client, version)
+        else:
+            self.supervisor.publish_binding(sampling_client, version, policy=policy)
 
     # Moved methods, as above: a worker's files (``requests``), a member's outcome (``output``), the workers'
     # telemetry (``telemetry``).

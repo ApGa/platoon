@@ -6,9 +6,10 @@ settings are ``train:``'s and whose one option is the step hooks it attaches to 
 and ``sft``, supervised fine-tuning on datasets, whose settings are ``trainer_options``.  ``interleaved`` is reserved
 for a trainer platoon adds; a trainer that a package writes (RFC 0021) is selectable once platoon resolves those names.
 Under a trainer other than ``rl``, a ``train:`` key that only ``rl`` reads
-(:data:`~platoon.train.config_defs.RL_ONLY_TRAIN_KEYS`) is refused when set, with the option to use instead, and so is
-evaluation during training, which only ``rl`` runs so far; and the data such a trainer trains on is checked as the
-config loads, as far as it can be without loading it.  The options that name files (an options class's
+(:data:`~platoon.train.config_defs.RL_ONLY_TRAIN_KEYS`) is refused when set, with the option to use instead, and so are
+the run's other policies and the agents' bindings (``policies:``, ``agents:``), which only ``rl``'s rollouts and credit
+estimators use, and evaluation during training, which only ``rl`` runs so far; and the data such a trainer trains on
+is checked as the config loads, as far as it can be without loading it.  The options that name files (an options class's
 ``path_options``) are relative to the config file that names them (:func:`trainer_path_options`).  Imports no Tinker.
 """
 
@@ -82,8 +83,9 @@ class RLOptions:
 def trainer_problems(config: Any) -> list[str]:
     """What the config's ``trainer:`` and ``trainer_options`` refuse, one entry each: a name that is not one of
     :data:`CORE_TRAINERS`; options its schema does not take; under a trainer other than ``rl``, the ``train:`` keys it
-    would not read and evaluation during training; and once all that holds, what the trainer's ``data_problems`` find
-    (sft: a dataset that ``dataset_info.json`` does not name, or names in a way this release does not read)."""
+    would not read, ``policies:``, ``agents:`` and evaluation during training; and once all that holds, what the
+    trainer's ``data_problems`` find (sft: a dataset that ``dataset_info.json`` does not name, or names in a way this
+    release does not read)."""
 
     name = getattr(config, "trainer", "rl")
     if name not in CORE_TRAINERS:
@@ -170,8 +172,9 @@ def _options_schema(name: str) -> Any:
 
 def _unread_settings(config: Any, name: str) -> list[str]:
     """The settings a trainer other than ``rl`` would not read, one entry each: a ``train:`` key that only ``rl``
-    reads, set to other than its default (with the trainer's option of the same name, when it has one), and
-    evaluation during training (``eval.every``)."""
+    reads, set to other than its default (with the trainer's option of the same name, when it has one); the run's
+    other policies (``policies:``) and the agents' bindings (``agents:``), which only ``rl`` samples or scores with;
+    and evaluation during training (``eval.every``)."""
 
     from platoon.train.config_defs import RL_ONLY_TRAIN_KEYS, TrainConfig, evaluates
 
@@ -187,6 +190,16 @@ def _unread_settings(config: Any, name: str) -> list[str]:
             continue
         instead = f"set trainer_options.{key}" if key in option_names else "leave it out"
         problems.append(f"train.{key}: only the rl trainer reads it, and this run trains with {name}: {instead}")
+    if getattr(config, "policies", None):
+        problems.append(
+            f"policies: only the rl trainer samples or scores with other policies, and this run trains with {name}: "
+            "leave it out"
+        )
+    agents = getattr(config, "agents", None)
+    if getattr(agents, "policy", None) is not None or getattr(agents, "roles", None):
+        problems.append(
+            f"agents: only the rl trainer's agents sample policies, and this run trains with {name}: leave it out"
+        )
     if evaluates(config):
         problems.append(
             f"eval.every: trainer: {name} does not evaluate during training yet: set eval.every: 0, and evaluate the "

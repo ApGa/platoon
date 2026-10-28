@@ -15,8 +15,8 @@ calls its hook (:class:`~platoon.train.trainer.api.TrainerBase`):
    draws there (:meth:`TrainerRun.rollouts`).  Then every key of the checkpoint the start resumes from must be claimed:
    by the run's counters or by a participant (exit 78 otherwise);
 6. the launch save, a full checkpoint every start writes, then the draws and the trainer start from it (``started``),
-   each policy's first sampling client, of the launch save's weights, which the rollout workers of draws the run
-   opened are given, and the step hooks hear of it;
+   each trained policy's first sampling client, of the launch save's weights, which the rollout workers of draws the
+   run opened are given, with the binding of each frozen policy they sample, once, and the step hooks hear of it;
 7. the trainer readies its steps (``ready``), and the run's clock starts;
 8. the steps (``run_steps``), each ending with the step hooks (:meth:`TrainerRun.end_step`; the rl trainer's step runs
    the same sequence), after which the clock's watchdog stops, if the steps left it running;
@@ -40,6 +40,7 @@ from platoon.train.checkpoints.saving import checkpoint_kind_for_step
 from platoon.train.config_defs import event_interval
 from platoon.train.dispatch.source import RolloutSource
 from platoon.train.objectives.policy_gradient import PolicyGradient
+from platoon.train.policy.binding import publish_frozen_bindings
 from platoon.train.policy.checkpoints import sampler_from
 from platoon.train.policy.learner import Learner
 from platoon.train.policy.policy import Policy, adam_params
@@ -225,14 +226,17 @@ class TrainerRun:
         closed when the trainer's needs say so (rule 10), and its first submission of a step opens the run clock's
         step: build it once the clock started (``ready()``, ``run_steps()``).  It is the trainer's: in a run with
         step hooks it sends and counts nothing as a step's end runs them (``clock.ending``), and a hook updates
-        through its step's end instead (``end.train``, ``end.learner``)."""
+        through its step's end instead (``end.train``, ``end.learner``).  A frozen policy has none (ValueError)."""
 
         if getattr(self, "clock", None) is None:
             raise RuntimeError("run.learner() opens the run clock's steps: build it once the clock started (ready())")
         trained = self.policies[policy]
+        if not trained.trainable:
+            trains = [other.id for other in self.policies.trainable()]
+            raise ValueError(f"policy {policy!r} is frozen: it has no learner (the run trains {trains})")
         spec = trained.spec
         if getattr(trained, "optimizer_params", None) is None:
-            assert spec.optimizer is not None  # policy_specs gives each policy train.optimizer
+            assert spec.optimizer is not None  # policy_specs gives the policy the run trains train.optimizer
             trained.optimizer_params = adam_params(spec.optimizer)
         if objective is None:
             assert spec.loss_fn is not None and spec.loss_fn_config is not None  # policy_specs names each policy's
@@ -323,11 +327,14 @@ class TrainerRun:
         """After a step's updates, each policy of ``updated`` publishes a sampler of its new weights, as one new
         version: from a full checkpoint of the run when the checkpoint cadence says one is due after this step
         (``checkpoint.every``, ``checkpoint.recovery_every``), else from a weights-only save; the rollout workers of
-        the draws the run opened are given it.  Each one's new version."""
+        the draws the run opened are given it.  Each one's new version.  A frozen policy publishes none (ValueError):
+        it keeps the sampler it serves."""
 
         published = {}
         for policy_id in updated:
             policy = self.policies[policy_id]
+            if not policy.trainable:
+                raise ValueError(f"policy {policy_id!r} is frozen: it keeps the sampler it serves, and publishes none")
             sampling_client = await self._sampler_after_step(policy)
             policy.info.llm.update_sampling_client(sampling_client)
             policy.sampling_client = sampling_client
@@ -344,15 +351,16 @@ class TrainerRun:
         if not self._binds_workers or policy.id != self.policies.leader:
             return
         assert self.workflows is not None  # a run that opened draws has its workflows
-        workflow = self.workflows.train
-        if (publish := getattr(workflow, "publish_model_binding", None)) is None:
-            return  # its rollouts run in this process, on the policy's model gateway
-        try:
-            publish(policy.sampling_client, policy.version)
-        except Exception:
-            logger.exception("could not publish the rollout worker sampling-client binding")
-            if required and getattr(workflow, "rollout_isolation", "inprocess") == "process":
-                raise
+        _publish_binding(self.workflows.train, policy.sampling_client, policy.version, required=required)
+
+    def _bind_frozen_workers(self) -> None:
+        """Give the training workflow's rollout workers the binding of each frozen policy their agents sample, once, at
+        the launch of a run that opened the start's draws (:meth:`rollouts`): a frozen policy's sampler never changes,
+        so no step publishes it again (:func:`~platoon.train.policy.binding.publish_frozen_bindings`, which the rl
+        trainer's loop calls before its first group).  Required, as the launch's binding of the trained policy is."""
+
+        assert self.workflows is not None  # a run that opened draws has its workflows
+        publish_frozen_bindings(self.policies, self.workflows.train, _publish_binding, required=True)
 
     async def _sampler_after_step(self, policy: Policy) -> Any:
         """The sampling client of ``policy``'s weights after the clock's step: of the full checkpoint that the cadence
@@ -401,7 +409,7 @@ class TrainerRun:
         tracker = self.trainer._train_tracker
         assert tracker is not None  # the trainer was entered (async with)
         run = RunSide(
-            policies=dict(self.policies),
+            policies={policy.id: policy for policy in self.policies.trainable()},
             learner_of=learner_of or self.learner,
             wait=self.wait,
             interruptible=self.needs.atomic_steps,
@@ -460,11 +468,12 @@ class TrainerRun:
         return trainer.setup.build_workflows(self.policies)
 
     async def _launch(self) -> None:
-        """6. Save the launch checkpoint, then start from it: the trainer's ``started``, and each policy's first
+        """6. Save the launch checkpoint, then start from it: the trainer's ``started``, and each trained policy's first
         sampling client, of the launch save's weights, which it samples at the checkpoint's policy version, with the
-        checkpoint's optimizer steps, and which the rollout workers of the draws the run opened are given before any
-        group starts; then the step hooks hear of it.  The launch save is a *recovery* checkpoint: every (re)launch
-        writes one, so naming it permanently would keep a ~490 GB checkpoint per restart."""
+        checkpoint's optimizer steps (a frozen policy keeps the sampler it was built with), and which the rollout
+        workers of the draws the run opened are given before any group starts, with the binding of each frozen policy
+        their agents sample, once; then the step hooks hear of it.  The launch save is a *recovery* checkpoint: every
+        (re)launch writes one, so naming it permanently would keep a ~490 GB checkpoint per restart."""
 
         start = self.start
         name = f"{RECOVERY_CHECKPOINT_PREFIX}{start.step:06d}"
@@ -475,11 +484,13 @@ class TrainerRun:
         if self.source is not None:
             self.source.started()
         await self.trainer.started(self)
-        for policy in self.policies.values():
+        for policy in self.policies.trainable():
             _first_sampler(policy, self.launch_save[policy.id], start.policies[policy.id])
             self._bind_workers(policy, required=True)
+        if self._binds_workers:
+            self._bind_frozen_workers()
         if self.hooks:
-            published = {policy.id: policy.version for policy in self.policies.values()}
+            published = {policy.id: policy.version for policy in self.policies.trainable()}
             await hear_launch(self.hooks, self._step_end("launch", step=start.step, published=published))
 
     def _check_claimed(self) -> None:
@@ -644,3 +655,24 @@ def _first_sampler(policy: Policy, saved: dict[str, str], start: PolicyStart) ->
     policy.info.llm.update_sampling_client(sampling_client, increment_version=False)
     policy.sampling_client = sampling_client
     policy.optimizer_steps = start.optimizer_steps
+
+
+def _publish_binding(
+    workflow: Any, sampling_client: Any, version: int, *, required: bool = False, policy: PolicyId | None = None
+) -> None:
+    """Give a sampling client to ``workflow``'s rollout workers (its ``publish_model_binding``): the agents' default
+    policy's, or ``policy``'s, another policy they sample.  A workflow without workers takes none: its rollouts run in
+    this process, on the policies' model gateways.  A failure is logged, each worker keeping the client it holds; a
+    ``required`` one, under ``rollout_isolation: process``, raises: a worker cannot start without it."""
+
+    if (publish := getattr(workflow, "publish_model_binding", None)) is None:
+        return
+    try:
+        if policy is None:
+            publish(sampling_client, version)
+        else:
+            publish(sampling_client, version, policy=policy)
+    except Exception:
+        logger.exception("could not publish the rollout worker sampling-client binding")
+        if required and getattr(workflow, "rollout_isolation", "inprocess") == "process":
+            raise

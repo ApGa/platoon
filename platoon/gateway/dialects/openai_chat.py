@@ -133,7 +133,7 @@ class OpenAIChat:
     def _logprobs(self, response: ChatResponse, body: Mapping[str, Any]) -> dict[str, Any] | None:
         if not body.get("logprobs"):
             return None
-        tokens = self.gateway.decode_tokens(response.tokens)
+        tokens = self.gateway.runtime(response.policy).decode_tokens(response.tokens)  # by the policy that sampled
         return {
             "content": [
                 {"token": token, "logprob": logprob, "bytes": list(token.encode("utf-8")), "top_logprobs": []}

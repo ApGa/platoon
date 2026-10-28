@@ -21,8 +21,9 @@ under ``train.permit_release: rollout`` each permit comes back as its rollout en
 ``docs/extending/rollout-leases.md`` is the guide.
 
 And trainers (RFC 0021): what ``platoon train`` runs (:class:`Trainer`), built from what it prepared
-(:class:`TrainerSetup`: the config, each policy's :class:`PolicySpec` by its id, :data:`MAIN` for ``train:``'s, the
-run's :class:`TaskSources` and how its :class:`Workflows` are built), saying what it asks of the run
+(:class:`TrainerSetup`: the config, each policy's :class:`PolicySpec` by its id, :data:`MAIN` for ``train:``'s, which
+policy each agent samples (:class:`AgentBindings`), the run's :class:`TaskSources` and how its :class:`Workflows` are
+built), saying what it asks of the run
 (:class:`TrainerNeeds`) and where its steps end (:class:`StepPlan`).  :class:`TrainerBase` takes a trainer through the
 lifecycle every trainer shares, calling its hooks in order, and ``platoon.testing.check_trainer`` checks one.  What
 every full checkpoint of the run holds besides its counters comes from its participants
@@ -46,7 +47,8 @@ And credit estimators (RFC 0021): how an environment entry's training groups tur
 (:class:`CreditEstimator`, or a subclass of :class:`CreditEstimatorBase`), built per entry with a :class:`CreditSetup`
 and checked at load (:class:`CreditCheckContext`); its ``assign`` sees a :class:`CreditGroup` of
 :class:`MemberRollout` members, each agent an :class:`AgentRun` (role, policy, own reward, rows), each row a
-:class:`TrainingSample`, and the run's policies as :class:`PolicyView` views.  It is registered with
+:class:`TrainingSample`, and the run's policies as :class:`PolicyView` views, whose failed scoring
+(:class:`ScoringFailed`) fails the group.  It is registered with
 :func:`credit_estimator` or named as ``module:Class``, and ``platoon.testing.check_credit_estimator`` checks it.
 ``docs/extending/credit-estimators.md`` is the guide.
 
@@ -72,13 +74,14 @@ from platoon.train.credit.api import (
     CreditSetup,
     MemberRollout,
     PolicyView,
+    ScoringFailed,
     TrainingSample,
 )
 from platoon.train.credit.registry import credit_estimator
 from platoon.train.leases import RolloutLease, rollout_lease
 from platoon.train.objectives.api import Objective
 from platoon.train.policy.snapshot import PolicyMoved, PolicySnapshot
-from platoon.train.policy.spec import MAIN, PolicySpec
+from platoon.train.policy.spec import MAIN, AgentBindings, PolicySpec
 from platoon.train.sampler_api import (
     Draw,
     Sampler,
@@ -162,6 +165,7 @@ __all__ = [
     "StepPlan",
     "PolicySpec",
     "MAIN",
+    "AgentBindings",
     "CheckpointParticipant",
     "Objective",
     # step hooks (RFC 0021)
@@ -191,5 +195,6 @@ __all__ = [
     "AgentRun",
     "TrainingSample",
     "PolicyView",
+    "ScoringFailed",
     "credit_estimator",
 ]

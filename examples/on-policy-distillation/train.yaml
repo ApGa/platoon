@@ -1,0 +1,35 @@
+# On-policy distillation on the quickstart's GuessTheNumber: the student, the quickstart's Qwen3-4B (train:), samples
+# every rollout, and a frozen teacher, Qwen3-32B (policies.teacher), scores each token the student sampled; each token
+# trains with the negative reverse KL between the two as its advantage (credit: reverse_kl). From the repository root:
+#
+#   export PYTHONPATH=$PWD/examples/quickstart
+#   uv run platoon train examples/on-policy-distillation/train.yaml        # needs TINKER_API_KEY
+#
+# The teacher names no tinker_base_url, so it is on the student's service (the run's tinker_base_url), in a Tinker
+# session of its own; train-teacher-service.yaml gives it a service of its own.
+
+extends: ../quickstart/train.yaml
+
+policies:
+  teacher:
+    model_name: Qwen/Qwen3-32B    # the same tokenizer as the student's, which reverse_kl requires
+    renderer_name: qwen3
+    trainable: false              # frozen: it scores, and is never stepped, saved or pruned
+
+environments:
+  - name: guess
+    service: python://guess:GuessTheNumber
+    harness: example-guesser
+    package: guesser
+    dataset_kwargs: {split_name: train, shuffle_seed: 0}
+    eval_dataset_kwargs: {split_name: test, limit: 20}
+    credit: reverse_kl            # kl_coef 1 and reward_coef 0 by default: distillation alone
+    credit_options:
+      teacher: teacher
+
+train:
+  loss_fn: importance_sampling    # the student's sampled logprobs are the behaviour policy's
+  loss_fn_config: {}
+
+stats:
+  trial_name: guess-distilled

@@ -184,6 +184,10 @@ platoon.experimental.AdmissionSetup.entry: field str | None
 platoon.experimental.AdmissionSetup.label_column: field str
 platoon.experimental.AdmissionSetup.level: field Level
 platoon.experimental.AdmissionSetup.name: field str
+platoon.experimental.AgentBindings: @dataclass(frozen=True) class AgentBindings
+platoon.experimental.AgentBindings.default: field str = "main"
+platoon.experimental.AgentBindings.roles: field Mapping[str, str] = <factory dict>
+platoon.experimental.AgentBindings.sampled: def sampled() -> tuple[str, ...]
 platoon.experimental.AgentRun: @dataclass class AgentRun
 platoon.experimental.AgentRun.agent_id: field str
 platoon.experimental.AgentRun.depth: field int
@@ -226,6 +230,7 @@ platoon.experimental.CreditSetup: @dataclass(frozen=True) class CreditSetup
 platoon.experimental.CreditSetup.entry: field str
 platoon.experimental.CreditSetup.name: field str
 platoon.experimental.CreditSetup.policies: field tuple[PolicyId, ...]
+platoon.experimental.CreditSetup.policy_views: field Mapping[PolicyId, PolicyView] = <factory dict>
 platoon.experimental.CreditSetup.settings: field WorkflowConfig
 platoon.experimental.Draw: @dataclass(frozen=True) class Draw
 platoon.experimental.Draw.reason: field str = "order"
@@ -349,9 +354,15 @@ platoon.experimental.PolicySpec.renderer_kwargs: field dict[str, Any] = <factory
 platoon.experimental.PolicySpec.renderer_name: field str
 platoon.experimental.PolicySpec.sample_timeout_seconds: field float | None = None
 platoon.experimental.PolicySpec.tinker_base_url: field str | None = None
+platoon.experimental.PolicySpec.trainable: field bool = True
 platoon.experimental.PolicyView: @dataclass(frozen=True) class PolicyView
+platoon.experimental.PolicyView.current_version: field Callable[[], int] | None = None
 platoon.experimental.PolicyView.id: field PolicyId
 platoon.experimental.PolicyView.renderer: field Any = None
+platoon.experimental.PolicyView.score: async def score(datums: Sequence[tinker.Datum]) -> list[torch.Tensor]
+platoon.experimental.PolicyView.scorer: field Callable[[Sequence[tinker.Datum]], Awaitable[list[torch.Tensor]]] | None = None
+platoon.experimental.PolicyView.tokenizer: field Any = None
+platoon.experimental.PolicyView.version: property int
 platoon.experimental.RolloutLease: class RolloutLease(Protocol)
 platoon.experimental.RolloutLease.rollout: def rollout(index: int) -> AbstractAsyncContextManager[float]
 platoon.experimental.RolloutLease.size: property int
@@ -397,6 +408,7 @@ platoon.experimental.SamplerSetup.level: field Level
 platoon.experimental.SamplerSetup.name: field str
 platoon.experimental.SamplerSetup.seed: field int
 platoon.experimental.SamplerSetup.task_ids: field tuple[str, ...]
+platoon.experimental.ScoringFailed: class ScoringFailed(RuntimeError)
 platoon.experimental.Slot: @dataclass(frozen=True) class Slot
 platoon.experimental.Slot.entry: field str
 platoon.experimental.StepEnd: @dataclass(eq=False) class StepEnd
@@ -528,6 +540,7 @@ platoon.experimental.TrainerNeeds.draw_provenance: field bool = False
 platoon.experimental.TrainerNeeds.fail_closed_updates: field bool = True
 platoon.experimental.TrainerNeeds.rollouts: field bool = False
 platoon.experimental.TrainerSetup: @dataclass(frozen=True) class TrainerSetup
+platoon.experimental.TrainerSetup.agents: field platoon.train.policy.spec.AgentBindings | None = None
 platoon.experimental.TrainerSetup.build_workflows: def build_workflows(policies: PolicySet) -> platoon.train.trainer.api.Workflows
 platoon.experimental.TrainerSetup.config: field Any
 platoon.experimental.TrainerSetup.options: field Any = None
@@ -556,6 +569,7 @@ platoon.experimental.WorkflowCapabilities.runs_rollouts_on_lease: field bool = F
 platoon.experimental.WorkflowCapabilities.takes_stale_filter: field bool = False
 platoon.experimental.WorkflowCapabilities.takes_start_limit: field bool = False
 platoon.experimental.WorkflowSetup: @dataclass(frozen=True) class WorkflowSetup
+platoon.experimental.WorkflowSetup.agents: field AgentBindings | None = None
 platoon.experimental.WorkflowSetup.config: field Any
 platoon.experimental.WorkflowSetup.entry_configs: field Mapping[str, Any] | None
 platoon.experimental.WorkflowSetup.entry_credit: field Mapping[str, Any] = <factory dict>
@@ -567,9 +581,11 @@ platoon.experimental.WorkflowSetup.options: field Mapping[str, Any] = <factory d
 platoon.experimental.WorkflowSetup.packages: field Sequence[str] | None = None
 platoon.experimental.WorkflowSetup.phase: field Literal['train', 'eval']
 platoon.experimental.WorkflowSetup.policies: field Mapping[str, Any]
+platoon.experimental.WorkflowSetup.policy_views: field Mapping[str, Any] = <factory dict>
 platoon.experimental.WorkflowSetup.reward_processor: field Callable[..., Any]
 platoon.experimental.WorkflowSetup.rollout_fn: field Callable[..., Any]
 platoon.experimental.WorkflowSetup.stats_scope: field str
+platoon.experimental.WorkflowSetup.trained: field frozenset[str] = frozenset([])
 platoon.experimental.Workflows: @dataclass(frozen=True) class Workflows
 platoon.experimental.Workflows.eval: field Any | None = None
 platoon.experimental.Workflows.train: field Any
@@ -614,6 +630,7 @@ platoon.testing.FakePolicyService: class FakePolicyService
 platoon.testing.FakePolicyService.__init__: def __init__(*, stop_at: int | None = None) -> None
 platoon.testing.FakePolicyService.create_lora_training_client_async: async def create_lora_training_client_async(base_model: str, rank: int = 32, **kwargs: Any) -> Any
 platoon.testing.FakePolicyService.create_rest_client: def create_rest_client() -> FakePolicyService
+platoon.testing.FakePolicyService.create_sampling_client: def create_sampling_client(base_model: str | None = None, model_path: str | None = None) -> _Scorer
 platoon.testing.FakePolicyService.create_training_client_from_state_async: async def create_training_client_from_state_async(path: str, **kwargs: Any) -> Any
 platoon.testing.FakePolicyService.create_training_client_from_state_with_optimizer_async: async def create_training_client_from_state_with_optimizer_async(path: str, **kwargs: Any) -> Any
 platoon.testing.FakePolicyService.delete_checkpoint_from_tinker_path_async: async def delete_checkpoint_from_tinker_path_async(path: str) -> None

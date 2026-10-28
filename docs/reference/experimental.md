@@ -25,8 +25,9 @@ under `train.permit_release: rollout` each permit comes back as its rollout ends
 `docs/extending/rollout-leases.md` is the guide.
 
 And trainers (RFC 0021): what `platoon train` runs (`Trainer`), built from what it prepared
-(`TrainerSetup`: the config, each policy's `PolicySpec` by its id, `MAIN` for `train:`'s, the
-run's `TaskSources` and how its `Workflows` are built), saying what it asks of the run
+(`TrainerSetup`: the config, each policy's `PolicySpec` by its id, `MAIN` for `train:`'s, which
+policy each agent samples (`AgentBindings`), the run's `TaskSources` and how its `Workflows` are
+built), saying what it asks of the run
 (`TrainerNeeds`) and where its steps end (`StepPlan`).  `TrainerBase` takes a trainer through the
 lifecycle every trainer shares, calling its hooks in order, and `platoon.testing.check_trainer` checks one.  What
 every full checkpoint of the run holds besides its counters comes from its participants
@@ -50,7 +51,8 @@ And credit estimators (RFC 0021): how an environment entry's training groups tur
 (`CreditEstimator`, or a subclass of `CreditEstimatorBase`), built per entry with a `CreditSetup`
 and checked at load (`CreditCheckContext`); its `assign` sees a `CreditGroup` of
 `MemberRollout` members, each agent an `AgentRun` (role, policy, own reward, rows), each row a
-`TrainingSample`, and the run's policies as `PolicyView` views.  It is registered with
+`TrainingSample`, and the run's policies as `PolicyView` views, whose failed scoring
+(`ScoringFailed`) fails the group.  It is registered with
 `credit_estimator` or named as `module:Class`, and `platoon.testing.check_credit_estimator` checks it.
 `docs/extending/credit-estimators.md` is the guide.
 
@@ -98,6 +100,7 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it); and `steps_per_epoch`, the steps of one pass over what the trainer trains on, by which `checkpoint.strategy: epoch` counts (None: a pass is a step). |
 | [`PolicySpec`](#platoon-experimental-policyspec) | One policy, as the config declares it: the model, how its prompts are rendered and sampled, its Tinker service, how a new run trains it (its adapter's rank, the weights it starts from), and how each step updates it (its optimizer, and the loss its rows train under). |
 | [`MAIN`](#platoon-experimental-main) | The policy that `train:` declares. The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format. |
+| [`AgentBindings`](#platoon-experimental-agentbindings) | Which policy each agent samples, for its whole life (`agents:`): the root agent samples `default`; an agent opened with a role samples that role's policy (`roles`), else `default`. A request never picks a policy. |
 | [`CheckpointParticipant`](#platoon-experimental-checkpointparticipant) | Part of the run's state that every full checkpoint saves, and that a start which resumes from one takes up. |
 | [`Objective`](#platoon-experimental-objective) | What a policy's rows train under: one of the Tinker service's built-in losses (`loss_fn`, such as `cispo`) with its keyword arguments, the loss inputs the datums carry for the trainer only, and the training metrics of each microbatch. |
 | [`StepHook`](#platoon-experimental-stephook) | Work at the end of each step of any trainer, after the step's own updates and its commit, before it publishes. A class of this protocol defines all four methods; subclass `StepHookBase`, whose methods are empty, to leave some out. `critical` is optional (True when left out). A hook with state to resume is also a `CheckpointParticipant`. Register it in the trainer's `check()` or `prepare()`. |
@@ -108,7 +111,7 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`PolicyMoved`](#platoon-experimental-policymoved) | A snapshot refused a sample: its policy published a newer sampler before the call, or while it ran, so the sample would not be its version's. |
 | [`DrawInfo`](#platoon-experimental-drawinfo) | The run and the training draw an episode belongs to (`ctx.draw`), when its trainer asks for them (RFC 0021's draw provenance, `TrainerNeeds.draw_provenance`); never in an evaluation. A draw's key `(start, seq)` is never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by it (`StepEnd.consumed`). |
 | [`RolloutWorkflow`](#platoon-experimental-rolloutworkflow) | What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group failed, and trains nothing). The output is a `RolloutOutput`, or a sequence of datums, all of the run's one trained policy (a `GroupOutput`, or a plain list). |
-| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets seven of them as flags. |
+| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets all eight as flags. |
 | [`capabilities_of`](#platoon-experimental-capabilities-of) | What `workflow` (an instance or a class) can do: its `capabilities` when it declares them, else its class flags, a flag it does not set False. Each flag is read as the trainer read it before the contract was written down: `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True. |
 | [`WorkflowSetup`](#platoon-experimental-workflowsetup) | What `platoon train` builds one phase's workflow with (a workflow class's `from_setup`), in place of `GroupRolloutWorkflow`'s keyword arguments, whose `model_info` cannot carry several policies: the phase's settings and the run's components, and the policies its rollouts sample. |
 | [`RolloutOutput`](#platoon-experimental-rolloutoutput) | A group's output written to the contract: its rows, by the policy each trains, and its report. The other output a workflow may return is a sequence of datums (`GroupOutput`, a plain list). |
@@ -119,12 +122,13 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`CreditEstimatorBase`](#platoon-experimental-creditestimatorbase) | An optional base class of credit estimators: the protocol's shape, typed options and a load-time check. |
 | [`CreditSetup`](#platoon-experimental-creditsetup) | What an estimator is built with, once per start of the process and environment entry: `Class(setup, options)`. |
 | [`CreditCheckContext`](#platoon-experimental-creditcheckcontext) | What an estimator's load-time `check` sees, beside its options. |
-| [`CreditGroup`](#platoon-experimental-creditgroup) | One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's order, the run's policies, each policy's version when `assign` began (`versions`; it does not move during the call, although the policies may publish meanwhile), and where the group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker; an estimator's metrics belong under `credit/`). |
+| [`CreditGroup`](#platoon-experimental-creditgroup) | One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's order, the run's policies (`policies`, each as an estimator may read it), each policy's version when `assign` began (`versions`; it does not move during the call, although the policies may publish meanwhile), and where the group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker; an estimator's metrics belong under `credit/`). |
 | [`MemberRollout`](#platoon-experimental-memberrollout) | One member of the group that returned a result: its place among them (`index`), every row of its rollout (`samples`), its agents (filled when the estimator asked for them, else empty), its root's processed reward and whether that is a completed root's scored outcome (`task_reward_valid`: an interrupted root's is not, and enters no baseline), and what the converter returned (`result`), to read: its trajectories' statistics and its root's reward components. Its `datums` are the member's rows; an estimator sets their advantages through `samples`. |
 | [`AgentRun`](#platoon-experimental-agentrun) | One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role (`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it samples, its depth in the tree, its reward and its rows. `reward` is its trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never trains an unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent did not use, whose reward still counts. |
 | [`TrainingSample`](#platoon-experimental-trainingsample) | One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree. It lives in the trainer process only: what reaches the training service is the datum. |
-| [`PolicyView`](#platoon-experimental-policyview) | What an estimator may read of a policy: its id, and the renderer that turns its token ids into text. |
-| [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, and `reverse_kl` and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
+| [`PolicyView`](#platoon-experimental-policyview) | What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into text, its version now, and its scores of other rows (`score`), for a policy that scores: a frozen teacher. |
+| [`ScoringFailed`](#platoon-experimental-scoringfailed) | A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token. An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under `credit/failures`) and trains nothing, and the run goes on. |
+| [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
 
 ## Task samplers
 
@@ -1257,6 +1261,7 @@ does no I/O.
   trainer's constructor registers.
 - `options`: the trainer's options (None: it takes none).
 - `tasks`: the run's tasks, when the trainer rolls them out.
+- `agents`: which policy each agent samples (`platoon.train.policy.spec.agent_bindings`).
 - `workflow_builder`: how the start's workflows are built on the trainer's policies, for a trainer that rolls
   out.  `build_workflows` calls it as the run begins.
 
@@ -1266,6 +1271,7 @@ does no I/O.
 | `policy_specs` | `Mapping[str, platoon.train.policy.spec.PolicySpec]` | required |  |
 | `options` | `Any` | `None` |  |
 | `tasks` | `platoon.train.trainer.api.TaskSources \| None` | `None` |  |
+| `agents` | `platoon.train.policy.spec.AgentBindings \| None` | `None` | Which policy each agent samples (agents:); None: every agent samples the first policy. |
 | `workflow_builder` | `Callable[[PolicySet], Workflows] \| None` | `None` | Launch's builder of the start's workflows, on the trainer's policies; None: the setup builds none. |
 
 #### `TrainerSetup.build_workflows`
@@ -1348,10 +1354,11 @@ optimizer, and the loss its rows train under).
 | `context_window_length` | `int \| None` | `None` |  |
 | `sample_timeout_seconds` | `float \| None` | `None` |  |
 | `tinker_base_url` | `str \| None` | `None` | Its Tinker service; None: TINKER_BASE_URL, else hosted Tinker. |
+| `trainable` | `bool` | `True` | Whether the run trains it. A frozen policy is sampled or scores, and is never stepped, saved or pruned. |
 | `lora_rank` | `int` | `32` |  |
-| `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from; None: the base model's. |
+| `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from; None: the base model's. A frozen policy's: the sampler it serves. |
 | `load_optimizer_state` | `bool` | `False` | With load_checkpoint_path: whether the new run takes that checkpoint's optimizer state too (Adam's moments), a new trial that goes on from it; else its optimizer starts fresh. |
-| `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments; each None: the run's train.optimizer, train.loss_fn or train.loss_fn_config, which policy_specs puts in its place, so that the trainer reads them from the spec alone. |
+| `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments, for a policy the run trains (main's are train.optimizer, train.loss_fn and train.loss_fn_config, which policy_specs puts here, so that the trainer reads them from the spec alone). |
 | `loss_fn` | `str \| None` | `None` |  |
 | `loss_fn_config` | `dict[str, Any] \| None` | `None` |  |
 
@@ -1364,6 +1371,30 @@ MAIN: Final[PolicyId] = task_stats.MAIN
 ```
 
 The policy that `train:` declares.  The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format.
+
+<a id="platoon-experimental-agentbindings"></a>
+
+### `platoon.experimental.AgentBindings`
+
+```python
+class AgentBindings
+```
+
+Which policy each agent samples, for its whole life (`agents:`): the root agent samples `default`; an agent
+opened with a role samples that role's policy (`roles`), else `default`.  A request never picks a policy.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `default` | `str` | `"main"` |  |
+| `roles` | `Mapping[str, str]` | `{}` |  |
+
+#### `AgentBindings.sampled`
+
+```python
+def sampled() -> tuple[str, ...]
+```
+
+The policies some agent samples: `default` first, then the roles' others, in their order.
 
 <a id="platoon-experimental-checkpointparticipant"></a>
 
@@ -1738,7 +1769,9 @@ trained policy (a `GroupOutput`, or a plain list).
 The optional members, which the trainer uses when a workflow has them:
 
 - `publish_model_binding(sampling_client, version)`: hand the sampling client of a new policy version to the
-  workflow's rollout workers (training does after each version it publishes, an evaluation before it starts);
+  workflow's rollout workers (training does after each version it publishes, an evaluation before it starts); a
+  workflow that binds several policies (`binds_policies`) also takes `policy=`, another policy its agents
+  sample, whose binding is a file of its own;
 - `warm_up()`: start, as training starts, what its rollouts need before the first one (awaited);
 - `rollout_isolation`: `"process"` when its rollouts run in rollout workers, which read the published client;
 - `start_limit`: the run's limit on rollouts starting at once, which the trainer sets on a workflow that takes it
@@ -1771,7 +1804,7 @@ class WorkflowCapabilities
 
 What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead
 of testing whether the class is a `GroupRolloutWorkflow`.  A class declares them in a `capabilities` class
-attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets seven of them as flags.
+attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets all eight as flags.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -1829,6 +1862,9 @@ settings and the run's components, and the policies its rollouts sample.
 | `label_by` | `str \| None` | `None` |  |
 | `options` | `Mapping[str, Any]` | `{}` | The environment's other arguments of the phase's workflow (workflow_kwargs, eval_workflow_kwargs), as given. |
 | `entry_credit` | `Mapping[str, Any]` | `{}` | Each environment entry's credit estimator, by entry, for the entries that set one (environments[].credit, platoon.train.credit.api); always empty for the eval phase, whose groups train nothing. |
+| `policy_views` | `Mapping[str, Any]` | `{}` | The run's policies as the estimators read them, by id (platoon.train.credit.api.PolicyView), beside entry_credit; empty for the eval phase. |
+| `agents` | `AgentBindings \| None` | `None` | With more than one sampled policy: which policy each agent samples, whose default is the first of `policies`, and the policies the run trains, whose agents alone make datums. None and empty with one. |
+| `trained` | `frozenset[str]` | `frozenset()` |  |
 
 <a id="platoon-experimental-rolloutoutput"></a>
 
@@ -1922,7 +1958,8 @@ workers then tag each row with its agent (worker protocol 3).  Optional: `settle
 place where an estimator with state changes it; `state()` and `load_state(state)`, which give and take that
 state as JSON data; and `assign_timeout_seconds`, how long `assign` may take on one group
 (`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit).  An estimator that raises in any of them, or
-whose `assign` runs out of time, stops the run with an error that names it, its entry and the group.
+whose `assign` runs out of time, stops the run with an error that names it, its entry and the group; but a
+policy's failed scoring that its `assign` lets through (`ScoringFailed`) fails only the group.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -1988,7 +2025,8 @@ What an estimator is built with, once per start of the process and environment e
 | `name` | `str` | required | Its name as the config gives it ("keyed", "acme.credit:ByRole"). |
 | `entry` | `str` | required | The label of the environment entry whose groups it credits. |
 | `settings` | `WorkflowConfig` | required | The entry's training settings (train.workflow_config with the entry's own laid over it). |
-| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id: the one the run trains, main, in this release. |
+| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id: main, the one the run trains in this release, then its frozen ones. |
+| `policy_views` | `Mapping[PolicyId, PolicyView]` | `{}` | Each policy as the estimator may read it (its renderer, its tokenizer, its scores), by id: what an estimator that scores with another policy (a teacher) reads it from. Empty outside a run (a test's setup). |
 
 <a id="platoon-experimental-creditcheckcontext"></a>
 
@@ -2016,10 +2054,10 @@ class CreditGroup
 
 One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its
 environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's
-order, the run's policies, each policy's version when `assign` began (`versions`; it does not move during the
-call, although the policies may publish meanwhile), and where the group's own statistics go (`stats`: in a
-training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker;
-an estimator's metrics belong under `credit/`).
+order, the run's policies (`policies`, each as an estimator may read it), each policy's version when `assign`
+began (`versions`; it does not move during the call, although the policies may publish meanwhile), and where the
+group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the
+group records, outside one the stats tracker; an estimator's metrics belong under `credit/`).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -2149,12 +2187,42 @@ tokens; its other positions keep theirs.  A `ValueError` for values of another l
 class PolicyView
 ```
 
-What an estimator may read of a policy: its id, and the renderer that turns its token ids into text.
+What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into
+text, its version now, and its scores of other rows (`score`), for a policy that scores: a frozen
+teacher.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `id` | `PolicyId` | required |  |
 | `renderer` | `Any` | `None` |  |
+| `tokenizer` | `Any` | `None` |  |
+| `scorer` | `Callable[[Sequence[tinker.Datum]], Awaitable[list[torch.Tensor]]] \| None` | `None` | Its scores of rows (the trainer's Policy.score); None for a view that scores nothing. |
+| `current_version` | `Callable[[], int] \| None` | `None` | Its version now (the trainer's Policy.version); None for a view that knows none, whose version reads 0. |
+| `version` | `int` | | The policy's version now: how many samplers it published over the run (0 for a frozen policy). Read-only. |
+
+#### `PolicyView.score`
+
+```python
+async def score(datums: Sequence[tinker.Datum]) -> list[torch.Tensor]
+```
+
+The policy's logprobs of each datum's target tokens under its current sampler, one per target token,
+aligned as the datum's own sampled logprobs are (`loss_fn_inputs["logprobs"]`).  `ScoringFailed`
+when its scoring fails, which fails the group being credited; a `RuntimeError` for a view that scores
+nothing.
+
+<a id="platoon-experimental-scoringfailed"></a>
+
+### `platoon.experimental.ScoringFailed`
+
+```python
+class ScoringFailed(RuntimeError)
+```
+
+A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within
+the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token.
+An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under
+`credit/failures`) and trains nothing, and the run goes on.
 
 <a id="platoon-experimental-credit-estimator"></a>
 
@@ -2171,7 +2239,7 @@ def credit_estimator(
 
 Register a credit estimator class under `name`, from a module that an environment entry's `package` names,
 so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its
-load-time check.  Core's names (`group`, `keyed`, and `reverse_kl` and `gae`, which platoon adds) are
+load-time check.  Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are
 reserved, whatever their case and their `-` or `_`; a name registered twice is an error.
 
 ## The types these take and return

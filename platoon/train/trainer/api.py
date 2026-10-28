@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
 from platoon.sandbox import cleanup as sandbox_cleanup
-from platoon.train.policy.spec import PolicyId, PolicySpec
+from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec
 from platoon.train.trainer import signals, waiting
 
 if TYPE_CHECKING:
@@ -79,6 +79,7 @@ class TrainerSetup:
       trainer's constructor registers.
     - ``options``: the trainer's options (None: it takes none).
     - ``tasks``: the run's tasks, when the trainer rolls them out.
+    - ``agents``: which policy each agent samples (:func:`~platoon.train.policy.spec.agent_bindings`).
     - ``workflow_builder``: how the start's workflows are built on the trainer's policies, for a trainer that rolls
       out.  :meth:`build_workflows` calls it as the run begins."""
 
@@ -86,6 +87,8 @@ class TrainerSetup:
     policy_specs: Mapping[PolicyId, PolicySpec]
     options: Any = None
     tasks: TaskSources | None = None
+    # Which policy each agent samples (agents:); None: every agent samples the first policy.
+    agents: AgentBindings | None = None
     # Launch's builder of the start's workflows, on the trainer's policies; None: the setup builds none.
     workflow_builder: "Callable[[PolicySet], Workflows] | None" = None
 
@@ -152,7 +155,7 @@ class TrainerBase:
 
         self.setup, self.config, self.options = setup, setup.config, setup.options
         # The policies the config declares, and the model gateway that samples them, this process's default.
-        self.policies = PolicySet.build(setup.policy_specs)
+        self.policies = PolicySet.build(setup.policy_specs, setup.agents)
 
     @classmethod
     def needs(cls, config: Any, options: Any) -> TrainerNeeds:
