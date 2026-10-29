@@ -8,7 +8,7 @@ name = "example-tool-loop"
 version = "0.1.0"
 description = "A minimal platoon function harness."
 requires-python = ">=3.12"
-dependencies = ["platoon >= 0.4, < 0.5"]  # one minor release: below 1.0, a minor release may break it
+dependencies = ["platoon >= 0.5, < 0.6"]  # one minor release: below 1.0, a minor release may break it
 
 # The platoon.harnesses group: each entry names a module of @pt.harness functions (importing it registers
 # them), a TOML spec file or directory, or a decorated function.

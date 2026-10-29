@@ -99,6 +99,6 @@ apart. Ten problems are also Frontier-CS's (306-315, by content: `frontiersmith_
 
 ## Versions
 
-Checked with platoon 0.5.0 (unreleased), hpc-sandbox 0.5.1 and SingularityCE 4.4: the configs load and validate on
-CPU in platoon's CI (`test_frontiersmith_recipe.py`), the node service, its scopes and the failure of a node service
-are tested on the `process` provider, and the judge pool on SingularityCE.
+Checked with platoon 0.5.0, hpc-sandbox 0.5.1 and SingularityCE 4.4: the configs load and validate on CPU in platoon's
+CI (`test_frontiersmith_recipe.py`), the node service, its scopes and the failure of a node service are tested on the
+`process` provider, and the judge pool on SingularityCE.

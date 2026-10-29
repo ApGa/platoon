@@ -31,13 +31,13 @@ uv run platoon harness list
 
 ```text
 harness                 kind      distribution   source
-mini-swe-agent@2.4.6    spec      platoon 0.4.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-openhands@1.54.0.post1  spec      platoon 0.4.0  platoon/harness/builtin/specs/openhands.toml
-platoon-bash@1          spec      platoon 0.4.0  platoon/harness/builtin/specs/platoon-bash.toml
-platoon-codeact@1       function  platoon 0.4.0  platoon.harness.builtin.codeact.harness:codeact
-platoon-noop@1          function  platoon 0.4.0  platoon.harness.builtin.oracle:noop
-platoon-oracle@1        function  platoon 0.4.0  platoon.harness.builtin.oracle:oracle
-platoon-react@1         function  platoon 0.4.0  platoon.harness.builtin.react:react
+mini-swe-agent@2.4.6    spec      platoon 0.5.0  platoon/harness/builtin/specs/mini-swe-agent.toml
+openhands@1.54.0.post1  spec      platoon 0.5.0  platoon/harness/builtin/specs/openhands.toml
+platoon-bash@1          spec      platoon 0.5.0  platoon/harness/builtin/specs/platoon-bash.toml
+platoon-codeact@1       function  platoon 0.5.0  platoon.harness.builtin.codeact.harness:codeact
+platoon-noop@1          function  platoon 0.5.0  platoon.harness.builtin.oracle:noop
+platoon-oracle@1        function  platoon 0.5.0  platoon.harness.builtin.oracle:oracle
+platoon-react@1         function  platoon 0.5.0  platoon.harness.builtin.react:react
 ```
 
 Harnesses that installed packages provide appear in the same list, with their package and its version; the list

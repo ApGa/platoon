@@ -2205,7 +2205,7 @@ wheels = [
 
 [[package]]
 name = "platoon"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -2296,7 +2296,7 @@ dev = [
 
 [[package]]
 name = "platoon-textcraft"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "extensions/textcraft" }
 dependencies = [
     { name = "openreward" },
