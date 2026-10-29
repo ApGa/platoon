@@ -7,8 +7,10 @@ name that a module an entry's ``package`` names registers (:func:`credit_estimat
 against its schema and its ``check`` runs (:func:`choose_credit`, exit 78 for any problem), and ``lock.json`` records
 it (:func:`credit_lock_records`); ``platoon train`` then builds each entry's estimator for the training workflow
 (:func:`build_entry_credit`), with the run's policies as estimators read them (:func:`policy_views`).  An entry without
-``credit`` keeps the workflow's own credit, today's ``group``, run as it always ran.  Core's built-ins are imported by
-name, so this module imports none of them.
+``credit`` keeps the workflow's own credit, today's ``group``, run as it always ran; in a run that trains several
+policies, ``keyed`` on ``[task, policy, role]`` instead (RFC 0021's D5: each agent of each policy and role on its own
+baseline), which ``lock.json`` records as it records a chosen one.  Core's built-ins are imported by name, so this
+module imports none of them.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from platoon.train.credit.api import CreditCheckContext, CreditSetup, PolicyView
-from platoon.train.policy.spec import MAIN, PolicyId, policy_ids
+from platoon.train.policy.spec import MAIN, PolicyId, policy_ids, trained_policies
 
 R = TypeVar("R", bound=type)
 
@@ -38,6 +40,8 @@ BUILTIN_CREDIT_ESTIMATORS: dict[str, str] = {
 RESERVED_CREDIT_NAMES = frozenset({*BUILTIN_CREDIT_ESTIMATORS, "gae"})
 # Core's estimators, as messages name them.
 _CORE = "group, keyed and reverse_kl"
+# The estimator of an entry that names none, in a run that trains several policies (RFC 0021, D5).
+SEVERAL_POLICIES_DEFAULT = "keyed"
 # What a registered name may be: no spaces, and neither ``:`` (module:Class) nor ``@``.
 _NAME = re.compile(r"[^\s:@]+")
 
@@ -139,13 +143,15 @@ def estimator_problem(cls: Any) -> str | None:
 @dataclass(frozen=True)
 class CreditChoice:
     """What an entry chooses, resolved: the estimator's name as the config gives it, its class, its options parsed
-    (None: it takes none) and as the config wrote them."""
+    (None: it takes none) and as the config wrote them; ``default``: the config names none, and the run trains several
+    policies (:data:`SEVERAL_POLICIES_DEFAULT`)."""
 
     entry: str
     name: str
     cls: type
     options: Any = None
     written: Mapping[str, Any] = field(default_factory=dict)
+    default: bool = False
 
     def options_json(self) -> dict[str, Any]:
         """Its options as ``lock.json`` records them: parsed, defaults included."""
@@ -159,8 +165,10 @@ def choose_credit(config: Any, *, check: bool = True) -> dict[str, CreditChoice]
     """The estimators a config's entries choose (``environments[].credit``), by entry label in config order, each
     resolved (:func:`resolve_credit_estimator`), its options (``credit_options``) parsed against its schema and its
     ``check`` run (unless ``check`` is False: ``platoon train`` building them after the config was checked); none for
-    a config whose entries set none.  A :class:`~platoon.utils.config.ConfigError` with every problem, each with its
-    path.  The entries' packages must be imported first, as a run imports them."""
+    a config whose entries set none, unless it trains several policies: then an entry that sets none credits with
+    ``keyed`` and its default options (:data:`SEVERAL_POLICIES_DEFAULT`).  A
+    :class:`~platoon.utils.config.ConfigError` with every problem, each with its path.  The entries' packages must be
+    imported first, as a run imports them."""
 
     from platoon.extensions import ExtensionError
     from platoon.options import schema_options
@@ -168,11 +176,14 @@ def choose_credit(config: Any, *, check: bool = True) -> dict[str, CreditChoice]
 
     problems: list[str] = []
     choices: dict[str, CreditChoice] = {}
+    several = len(trained_policies(config)) > 1
     for index, environment in enumerate(getattr(config, "environments", None) or ()):
         name = getattr(environment, "credit", None)
-        if name is None:
+        if name is None and not several:
             continue
-        label, where = environment.label, f"environments.{index}"
+        label, where, default = environment.label, f"environments.{index}", name is None
+        if name is None:  # each row trains its own policy: credit tells which, per agent
+            name = SEVERAL_POLICIES_DEFAULT
         try:
             cls = resolve_credit_estimator(name)
         except ExtensionError as exc:
@@ -187,7 +198,7 @@ def choose_credit(config: Any, *, check: bool = True) -> dict[str, CreditChoice]
                 method(parsed, CreditCheckContext(entry=label, policies=policy_ids(config), config=config))
             except Exception as exc:
                 problems.append(f"{where}.credit: {name}: {str(exc) or type(exc).__name__}")
-        choices[label] = CreditChoice(label, name, cls, parsed, written)
+        choices[label] = CreditChoice(label, name, cls, parsed, written, default)
     if problems:
         raise ConfigError(problems)
     return choices
@@ -207,12 +218,18 @@ def workflow_problems(choices: Mapping[str, CreditChoice], workflow_cls: Any, re
 
     if not choices or capabilities_of(workflow_cls).applies_credit:
         return []
-    return [
-        f"environments[{label}].credit: the run's workflow, {reference}, does not apply an entry's credit estimator "
+    why = (
         "(it does not declare applies_credit = True; a GroupRolloutWorkflow subclass that overrides compute_baselines "
-        "or assign_advantages credits with those), so it would be ignored; leave credit out, or use a workflow that "
-        "applies it"
-        for label in choices
+        "or assign_advantages credits with those)"
+    )
+    return [
+        f"environments[{label}].credit: the run trains several policies, so its groups are credited with an estimator "
+        f"that tells each row's policy ({choice.name}, by default), and the run's workflow, {reference}, applies none "
+        f"{why}; use a workflow that applies it"
+        if getattr(choice, "default", False)
+        else f"environments[{label}].credit: the run's workflow, {reference}, does not apply an entry's credit "
+        f"estimator {why}, so it would be ignored; leave credit out, or use a workflow that applies it"
+        for label, choice in choices.items()
     ]
 
 

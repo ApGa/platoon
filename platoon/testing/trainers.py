@@ -234,7 +234,7 @@ def _start(
 
     from platoon.train.components import task_ids_to_dataset
     from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.train.policy.spec import policy_specs
+    from platoon.train.policy.spec import agent_bindings, policy_specs
     from platoon.train.trainer.api import TaskSources, TrainerSetup, Workflows
     from platoon.utils.config import build_config
 
@@ -246,6 +246,7 @@ def _start(
     setup = TrainerSetup(
         config=config,
         policy_specs=policy_specs(config),
+        agents=agent_bindings(config),
         options=options,
         tasks=TaskSources(train_dataset=task_ids_to_dataset([f"task-{index}" for index in range(16)]))
         if rolls_out
@@ -397,6 +398,7 @@ class _FakeLLM:
     def __init__(self, model_name: str) -> None:
         self.model_name, self.version = model_name, 0
         self.sampling_client: Any = None
+        self.gateway = _FakeGateway()
 
     @property
     def renderer(self) -> Any:
@@ -418,18 +420,32 @@ class _FakeLLM:
             self.version += 1
 
 
-class FakePolicyService:
-    """A Tinker service on CPU, for one start: its training clients step nothing and save to ``tinker://fake/...``
-    paths, while ``tinker_cookbook`` records each full save in the run's ``checkpoints.jsonl`` as it does for a real
-    service, and its sampling clients score every token at :data:`SCORED_LOGPROB`.  ``stop_at``: the optimizer step,
-    counted over the start, in which it raises ``SIGUSR2``, the stop request ``platoon train`` passes on.  ``calls``
-    lists what was asked of it, in order; ``losses`` the loss of each forward_backward, ``datums`` every datum sent to
-    it, ``adam`` the Adam parameters of each optimizer step, ``deleted`` the checkpoint paths its REST client deleted
-    (the recovery pruning's), ``sessions`` the ``base_url`` of each session opened on it (``tinker.ServiceClient``),
-    and ``scored`` every sequence its sampling clients scored, with the model or sampler that scored it."""
+class _FakeGateway:
+    """A fake policy's model gateway: it samples nothing, and records the policies it is asked to serve to the agents
+    of other roles (``served``)."""
 
-    def __init__(self, *, stop_at: int | None = None) -> None:
+    def __init__(self) -> None:
+        self.served: list[tuple[str, Any, Any]] = []
+
+    def serve_policies(self, default: str, *, runtimes: Any, roles: Any) -> None:
+        self.served.append((default, runtimes, roles))
+
+
+class FakePolicyService:
+    """A Tinker service on CPU, for one start: its training clients step nothing and save to ``tinker://<run>/...``
+    paths, each client its own training run (``name`` for the first, ``<name>-2`` for the second, and so on), while
+    ``tinker_cookbook`` records each full save in the run's ``checkpoints.jsonl`` as it does for a real service, and its
+    sampling clients score every token at :data:`SCORED_LOGPROB`.  ``stop_at``: the optimizer step, counted over the
+    start, in which it raises ``SIGUSR2``, the stop request ``platoon train`` passes on.  ``calls`` lists what was asked
+    of it, in order; ``losses`` the loss of each forward_backward, ``datums`` every datum sent to it, ``adam`` the Adam
+    parameters of each optimizer step, ``deleted`` the checkpoint paths its REST client deleted (the recovery
+    pruning's), ``sessions`` the ``base_url`` of each session opened on it (``tinker.ServiceClient``),
+    ``training_clients`` each training client it opened, with what it was sent and how often it stepped, and ``scored``
+    every sequence its sampling clients scored, with the model or sampler that scored it."""
+
+    def __init__(self, *, stop_at: int | None = None, name: str = "fake") -> None:
         self.stop_at = stop_at
+        self.name = name
         self.optimizer_steps = 0
         self.calls: list[str] = []
         self.losses: list[str] = []
@@ -437,6 +453,7 @@ class FakePolicyService:
         self.adam: list[Any] = []
         self.deleted: list[str] = []
         self.sessions: list[str | None] = []
+        self.training_clients: list[_FakeTrainingClient] = []
         self.scored: list[tuple[str, list[int]]] = []
 
     def service_client(self, **kwargs: Any) -> FakePolicyService:
@@ -469,7 +486,10 @@ class FakePolicyService:
 
     def _open(self, call: str) -> _FakeTrainingClient:
         self.calls.append(call)
-        return _FakeTrainingClient(self)
+        opened = len(self.training_clients)
+        client = _FakeTrainingClient(self, self.name if not opened else f"{self.name}-{opened + 1}")
+        self.training_clients.append(client)
+        return client
 
 
 # The logprob a fake service's sampling client gives every token it scores.
@@ -500,8 +520,13 @@ class _Done:
 
 
 class _FakeTrainingClient:
-    def __init__(self, service: FakePolicyService) -> None:
-        self.service = service
+    """A fake service's training client: its own training run (``run``, which names its saves' paths), the datums it
+    was sent and the optimizer steps it took."""
+
+    def __init__(self, service: FakePolicyService, run: str) -> None:
+        self.service, self.run = service, run
+        self.datums: list[Any] = []
+        self.optimizer_steps = 0
 
     async def forward_backward_async(self, datums: list[Any], loss_fn: str, loss_fn_config: Any = None) -> _Done:
         import tinker
@@ -510,6 +535,7 @@ class _FakeTrainingClient:
         self.service.calls.append(f"forward_backward {len(datums)}")
         self.service.losses.append(loss_fn)
         self.service.datums += datums
+        self.datums += datums
         outputs = [
             {"logprobs": tinker.TensorData.from_torch(torch.zeros(len(datum.model_input.to_ints())))}
             for datum in datums
@@ -519,6 +545,7 @@ class _FakeTrainingClient:
     async def optim_step_async(self, params: Any) -> _Done:
         service = self.service
         service.optimizer_steps += 1
+        self.optimizer_steps += 1
         service.calls.append("optim_step")
         service.adam.append(params)
         if service.optimizer_steps == service.stop_at:
@@ -527,10 +554,10 @@ class _FakeTrainingClient:
 
     async def save_state_async(self, name: str, ttl_seconds: int | None = None) -> _Done:
         self.service.calls.append(f"save_state {name}")
-        return _Done(SimpleNamespace(path=f"tinker://fake/weights/{name}"))
+        return _Done(SimpleNamespace(path=f"tinker://{self.run}/weights/{name}"))
 
     async def save_weights_for_sampler_async(self, name: str, ttl_seconds: int | None = None) -> _Done:
-        return _Done(SimpleNamespace(path=f"tinker://fake/sampler_weights/{name}"))
+        return _Done(SimpleNamespace(path=f"tinker://{self.run}/sampler_weights/{name}"))
 
     async def save_weights_and_get_sampling_client_async(self) -> str:
         self.service.calls.append("save_weights_and_get_sampling_client")
@@ -587,7 +614,9 @@ class _Probe:
         self.heard.append(("update", end.step, end.hook_updates[self.policy] - before))  # as platoon counts it
 
     async def published(self, end: Any) -> None:
-        self.heard.append(("published", end.kind, end.step, *end.published.values()))
+        # Its policy's version, when it published (in a run of several trained policies, the others' are not its).
+        version = [published for policy, published in end.published.items() if policy == self.policy]
+        self.heard.append(("published", end.kind, end.step, *version))
 
 
 class _ProbeObjective:

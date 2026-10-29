@@ -33,6 +33,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from platoon.train.checkpoints.barrier import Counters
 from platoon.train.checkpoints.participants import RunCheckpoints
 from platoon.train.checkpoints.pruning import RECOVERY_CHECKPOINT_PREFIX
 from platoon.train.checkpoints.resume import PolicyStart, StartPoint
@@ -40,9 +41,8 @@ from platoon.train.checkpoints.saving import checkpoint_kind_for_step
 from platoon.train.config_defs import event_interval
 from platoon.train.dispatch.source import RolloutSource
 from platoon.train.objectives.policy_gradient import PolicyGradient
-from platoon.train.policy.binding import publish_frozen_bindings
 from platoon.train.policy.checkpoints import sampler_from
-from platoon.train.policy.learner import Learner
+from platoon.train.policy.learner import Learner, PrefixedTracker
 from platoon.train.policy.policy import Policy, adam_params
 from platoon.train.policy.spec import PolicyId
 from platoon.train.trainer.api import StepPlan, Workflows
@@ -120,13 +120,13 @@ class StepClock:
 class TrainerRun:
     """One start of ``trainer``, through the lifecycle every trainer shares (:meth:`execute`), with the given
     workflows (None: those the trainer's setup builds, when it rolls out).  What its hooks use: the config, the run
-    directory, the policies (by id; ``policies.leader`` is the one the run trains), the workflows, what the trainer
-    needs of the run (``needs``), the run's checkpoints
+    directory, the policies (by id; ``policies.leader`` is the first one the run trains), the workflows, what the
+    trainer needs of the run (``needs``), the run's checkpoints
     (:class:`~platoon.train.checkpoints.participants.RunCheckpoints`) and step hooks
     (:class:`~platoon.train.trainer.hooks.StepHooks`), the shutdown request, where the start begins and where its
-    steps end, the start's draws (:meth:`rollouts`), the launch save, the step clock with its watchdog, and what a
-    step uses: a policy's learner (:meth:`learner`), the waits (:meth:`wait`), and the step's end (:meth:`end_step`,
-    which publishes through :meth:`publish`)."""
+    steps end, the start's draws (:meth:`rollouts`), the launch save, the step clock with its watchdog, which every
+    trained policy steps on in lockstep (:attr:`clocks`), and what a step uses: a policy's learner (:meth:`learner`),
+    the waits (:meth:`wait`), and the step's end (:meth:`end_step`, which publishes through :meth:`publish`)."""
 
     # Set as the phases run: the shutdown request (2), the start point (3), the plan (5), the paths of the launch save
     # by policy (6), the clock (7: start_clock, or the trainer's own).
@@ -216,17 +216,26 @@ class TrainerRun:
         self._step_began = self._optimizer_steps()
         return self.clock
 
+    @property
+    def clocks(self) -> dict[PolicyId, StepClock]:
+        """Each trained policy's step clock, by policy: in lockstep, the run's one clock (``clock``) for every one."""
+
+        return {policy.id: self.clock for policy in self.policies.trainable()}
+
     # --- what a step uses ------------------------------------------------------------------------------------------
 
     def learner(self, policy: PolicyId, *, objective: "Objective | None" = None, metric_prefix: str = "") -> Learner:
         """The learner of ``policy`` (:class:`~platoon.train.policy.learner.Learner`): its training client and its
         optimizer, which steps with its spec's Adam settings (``train.optimizer``), under ``objective`` (None: the
         policy-gradient loss its spec names, ``train.loss_fn``).  Its results are awaited under the run's waits within
-        ``train.*``'s deadlines, its metrics go to the train tracker's step row under ``metric_prefix``, it fails
+        ``train.*``'s deadlines, its metrics go to the train tracker's step row under ``metric_prefix`` (after
+        ``policies/<id>/`` for a trained policy other than the leader, as in the rl trainer's steps), it fails
         closed when the trainer's needs say so (rule 10), and its first submission of a step opens the run clock's
-        step: build it once the clock started (``ready()``, ``run_steps()``).  It is the trainer's: in a run with
-        step hooks it sends and counts nothing as a step's end runs them (``clock.ending``), and a hook updates
-        through its step's end instead (``end.train``, ``end.learner``).  A frozen policy has none (ValueError)."""
+        step: build it once the clock started (``ready()``, ``run_steps()``).  In a run of several trained policies,
+        an error of the policy's service in an update names the policy and its service (its ``named``).  It is the
+        trainer's: in a run with step hooks it sends and counts nothing as a step's end runs them (``clock.ending``),
+        and a hook updates through its step's end instead (``end.train``, ``end.learner``, whose learner of a policy
+        names it as this one does).  A frozen policy has none (ValueError)."""
 
         if getattr(self, "clock", None) is None:
             raise RuntimeError("run.learner() opens the run clock's steps: build it once the clock started (ready())")
@@ -236,23 +245,25 @@ class TrainerRun:
             raise ValueError(f"policy {policy!r} is frozen: it has no learner (the run trains {trains})")
         spec = trained.spec
         if getattr(trained, "optimizer_params", None) is None:
-            assert spec.optimizer is not None  # policy_specs gives the policy the run trains train.optimizer
+            assert spec.optimizer is not None  # policy_specs gives each trained policy its own, else train.optimizer
             trained.optimizer_params = adam_params(spec.optimizer)
         if objective is None:
             assert spec.loss_fn is not None and spec.loss_fn_config is not None  # policy_specs names each policy's
             objective = PolicyGradient(spec.loss_fn, spec.loss_fn_config)
         tracker = self.trainer._train_tracker
         assert tracker is not None  # the trainer was entered (async with)
+        records = tracker if policy == self.policies.leader else PrefixedTracker(tracker, f"policies/{policy}/")
         return Learner(
             trained,
             objective=objective,
             timeouts=self.config.train,
             wait=self._learner_wait,
-            tracker=tracker,
+            tracker=records,
             metric_prefix=metric_prefix,
             fail_closed=self.needs.fail_closed_updates,
             clock=self.clock,
             guard=self._outside_hooks if self.hooks else None,
+            named=len(self.policies.trainable()) > 1,
         )
 
     def _outside_hooks(self) -> None:
@@ -304,8 +315,7 @@ class TrainerRun:
             if not sampled and (end is None or not updated):
                 # Nothing but a hook samples the policies, and there is none, or no update to publish: no sampler,
                 # but the checkpoint the cadence asks for all the same.
-                leader = self.policies[self.policies.leader]
-                await self._save_due(leader, policy_version=leader.version)
+                await self._save_due({})  # every policy's counters as they are
                 return {}
             return await self.publish(updated)
 
@@ -324,58 +334,74 @@ class TrainerRun:
         return {policy: count - began.get(policy, 0) for policy, count in self._optimizer_steps().items()}
 
     async def publish(self, updated: Sequence[PolicyId]) -> dict[PolicyId, int]:
-        """After a step's updates, each policy of ``updated`` publishes a sampler of its new weights, as one new
-        version: from a full checkpoint of the run when the checkpoint cadence says one is due after this step
-        (``checkpoint.every``, ``checkpoint.recovery_every``), else from a weights-only save; the rollout workers of
-        the draws the run opened are given it.  Each one's new version.  A frozen policy publishes none (ValueError):
-        it keeps the sampler it serves."""
+        """After a step's updates, each policy of ``updated`` publishes a sampler of its new weights, once, as one new
+        version (:meth:`~platoon.train.policy.policy.Policy.publish`): from a full checkpoint of the run, which saves
+        every trained policy, when the checkpoint cadence says one is due after this step (``checkpoint.every``,
+        ``checkpoint.recovery_every``), else from a weights-only save of each; the rollout workers of the draws the run
+        opened are given it.  Each one's new version.  A frozen policy publishes none (ValueError): it keeps the
+        sampler it serves."""
 
+        policies = [self.policies[policy_id] for policy_id in updated]
+        if frozen := [policy.id for policy in policies if not policy.trainable]:
+            raise ValueError(f"policy {frozen[0]!r} is frozen: it keeps the sampler it serves, and publishes none")
+        if not policies:
+            return {}
+        sampling_clients = await self._samplers_after_step(policies)
         published = {}
-        for policy_id in updated:
-            policy = self.policies[policy_id]
-            if not policy.trainable:
-                raise ValueError(f"policy {policy_id!r} is frozen: it keeps the sampler it serves, and publishes none")
-            sampling_client = await self._sampler_after_step(policy)
-            policy.info.llm.update_sampling_client(sampling_client)
-            policy.sampling_client = sampling_client
+        for policy in policies:
+            policy.publish(sampling_clients[policy.id])
             self._bind_workers(policy)
-            published[policy_id] = policy.version
+            published[policy.id] = policy.version
         return published
 
     def _bind_workers(self, policy: Policy, *, required: bool = False) -> None:
-        """Give the sampling client of ``policy``, the one the run trains, to the training workflow's rollout workers
-        (its ``publish_model_binding``), as the rl trainer's step does, when the run opened the start's draws
-        (:meth:`rollouts`).  The launch's is ``required``: under ``rollout_isolation: process`` a worker cannot start
-        without it; a later one's failure is logged, each worker keeping the client it holds."""
+        """Give the sampling client of ``policy``, a policy the run trains, to the training workflow's rollout workers
+        (its ``publish_model_binding``), as the rl trainer's steps do, when the run opened the start's draws
+        (:meth:`rollouts`) and their agents sample it: as their default binding for the agents' default policy
+        (``agents.policy``), else as its own.  The launch's is ``required``: under ``rollout_isolation: process`` a
+        worker cannot start without it; a later one's failure is logged, each worker keeping the client it holds."""
 
-        if not self._binds_workers or policy.id != self.policies.leader:
+        agents = self.policies.agents
+        if not self._binds_workers or policy.id not in agents.sampled():
             return
         assert self.workflows is not None  # a run that opened draws has its workflows
-        _publish_binding(self.workflows.train, policy.sampling_client, policy.version, required=required)
+        other = None if policy.id == agents.default else policy.id
+        _publish_binding(self.workflows.train, policy.sampling_client, policy.version, required=required, policy=other)
 
     def _bind_frozen_workers(self) -> None:
         """Give the training workflow's rollout workers the binding of each frozen policy their agents sample, once, at
-        the launch of a run that opened the start's draws (:meth:`rollouts`): a frozen policy's sampler never changes,
-        so no step publishes it again (:func:`~platoon.train.policy.binding.publish_frozen_bindings`, which the rl
-        trainer's loop calls before its first group).  Required, as the launch's binding of the trained policy is."""
+        the launch of a run that opened the start's draws (:meth:`rollouts`), after each trained one's
+        (:meth:`_bind_workers`): a frozen policy's sampler never changes, so no step publishes it again (the rl
+        trainer's loop gives its workers every policy's first binding itself, before its first group:
+        :func:`~platoon.train.policy.binding.publish_other_bindings`).  Required, as the launch's bindings of the
+        trained policies are."""
 
         assert self.workflows is not None  # a run that opened draws has its workflows
-        publish_frozen_bindings(self.policies, self.workflows.train, _publish_binding, required=True)
+        for policy in self.policies.sampled():
+            if not policy.trainable:
+                _publish_binding(
+                    self.workflows.train, policy.sampling_client, policy.version, required=True, policy=policy.id
+                )
 
-    async def _sampler_after_step(self, policy: Policy) -> Any:
-        """The sampling client of ``policy``'s weights after the clock's step: of the full checkpoint that the cadence
-        saves after it (:meth:`_save_due`), else of a weights-only save."""
+    async def _samplers_after_step(self, policies: Sequence[Policy]) -> dict[PolicyId, Any]:
+        """The sampling client of each of ``policies``' weights after the clock's step: of the full checkpoint that the
+        cadence saves after it (:meth:`_save_due`), whose rows record one version more for each of ``policies`` and
+        their optimizer steps; else of a weights-only save of each, all at once
+        (:meth:`~platoon.train.policy.set.PolicySet.each`)."""
 
-        saved = await self._save_due(policy, policy_version=policy.version + 1)
+        counters = {policy.id: Counters(policy.version + 1, policy.optimizer_steps) for policy in policies}
+        saved = await self._save_due(counters)
         if saved is None:
-            return await policy.save_for_sampler()
-        return sampler_from(policy.training_client, saved[policy.id])
+            saving = {policy.id: policy.save_for_sampler() for policy in policies}
+            return await self.policies.each(saving, doing="saving its weights")
+        return {policy.id: sampler_from(policy.training_client, saved[policy.id]) for policy in policies}
 
-    async def _save_due(self, policy: Policy, *, policy_version: int) -> dict[PolicyId, dict[str, str]] | None:
+    async def _save_due(self, counters: Mapping[PolicyId, Counters]) -> dict[PolicyId, dict[str, str]] | None:
         """The full checkpoint of the run that the cadence asks for after the clock's step (``checkpoint.every``,
-        ``checkpoint.recovery_every``), named for the next step, at ``policy_version`` and ``policy``'s optimizer steps;
-        None when none is due.  A recovery checkpoint goes to the trainer's pruning once ``checkpoints.jsonl`` records
-        it (``_recovery_saved``)."""
+        ``checkpoint.recovery_every``), named for the next step: a barrier of every trained policy's saves, whose rows
+        record ``counters`` of the policies there and the others' counters as they are; None when none is due.  A
+        recovery checkpoint goes to the trainer's pruning once ``checkpoints.jsonl`` records it (``_recovery_saved``):
+        the leader's save, at the version its row records."""
 
         step, checkpoint = self.clock.step, self.config.checkpoint
         save_every = event_interval(checkpoint, self.plan.steps_per_epoch or 1)
@@ -384,11 +410,14 @@ class TrainerRun:
             return None
         name = f"{step + 1:06d}" if kind == "permanent" else f"{RECOVERY_CHECKPOINT_PREFIX}{step + 1:06d}"
         logger.info(f"Saving {kind} checkpoint {name} after step {step}")
+        leader = self.policies[self.policies.leader]
+        own = counters.get(leader.id, Counters(leader.version, leader.optimizer_steps))
+        others = {policy: counted for policy, counted in counters.items() if policy != leader.id}
         saved = await self._save(
-            name, step=step + 1, policy_version=policy_version, optimizer_steps=policy.optimizer_steps
+            name, step=step + 1, policy_version=own.version, optimizer_steps=own.optimizer_steps, others=others
         )
         if kind == "recovery":
-            self.trainer._recovery_saved(saved[policy.id], policy_version)
+            self.trainer._recovery_saved(saved[leader.id], own.version)
         return saved
 
     def _step_end(
@@ -445,7 +474,9 @@ class TrainerRun:
         trainer._setup_signal_handlers(self.shutdown)
         # 3. A key the service refuses (401, 403) ends training with one line that names the key and the service.
         self.policies.connect()
-        self.start = StartPoint.read(self.run_dir, self.config.train.num_minibatches, leader=self.policies.leader)
+        leader = self.policies.leader
+        others = [policy.id for policy in self.policies.trainable() if policy.id != leader]
+        self.start = StartPoint.read(self.run_dir, self.config.train.num_minibatches, leader=leader, others=others)
         self.checkpoints.resume(self.start)
         if not await trainer._open_policies(self, self.start):  # 4
             return  # stopped before training began: nothing to save
@@ -479,7 +510,16 @@ class TrainerRun:
         name = f"{RECOVERY_CHECKPOINT_PREFIX}{start.step:06d}"
         logger.info(f"Saving recovery checkpoint {name} at launch (batch {start.step})")
         self.launch_save = await self._save(
-            name, step=start.step, policy_version=start.policy_version, optimizer_steps=start.optimizer_steps
+            name,
+            step=start.step,
+            policy_version=start.policy_version,
+            optimizer_steps=start.optimizer_steps,
+            # Every other trained policy's row records where it starts: its sampler is not published yet.
+            others={
+                policy: Counters(begins.version, begins.optimizer_steps)
+                for policy, begins in start.policies.items()
+                if policy != self.policies.leader
+            },
         )
         if self.source is not None:
             self.source.started()
@@ -573,9 +613,16 @@ class TrainerRun:
         return "as its step hooks ran" if clock.ending else None
 
     async def _save(
-        self, name: str, *, step: int, policy_version: int, optimizer_steps: int
+        self,
+        name: str,
+        *,
+        step: int,
+        policy_version: int,
+        optimizer_steps: int,
+        others: Mapping[PolicyId, Counters] | None = None,
     ) -> dict[PolicyId, dict[str, str]]:
-        """Full checkpoint ``name`` of the run (:meth:`RunCheckpoints.save`), awaited under the trainer's heartbeat."""
+        """Full checkpoint ``name`` of the run (:meth:`RunCheckpoints.save`), awaited under the trainer's heartbeat;
+        ``others``: the counters each other trained policy's row records (default: its own now)."""
 
         return await self.checkpoints.save(
             name,
@@ -583,6 +630,7 @@ class TrainerRun:
             policy_version=policy_version,
             optimizer_steps=optimizer_steps,
             wait=self.trainer._await_with_heartbeat,
+            **({"others": others} if others else {}),
         )
 
     async def _close(self, error: BaseException | None) -> None:
@@ -647,13 +695,12 @@ async def _unless_stopped(awaitable: Awaitable[Any], stop: asyncio.Event) -> Any
 
 def _first_sampler(policy: Policy, saved: dict[str, str], start: PolicyStart) -> None:
     """The policy's first sampling client, of the sampler weights the launch save wrote (``saved``), which the policy
-    samples at the version its start point says, without counting a new one, and its optimizer steps so far."""
+    publishes at the version its start point says, without counting a new one (nothing subscribes yet: the rollout
+    workers get their first bindings as the steps begin), and its optimizer steps so far."""
 
     # Not policy.checkpoints.sampler_from, whose log lines the launch never wrote.
     sampling_client = policy.training_client.create_sampling_client(saved["sampler_path"])
-    policy.info.llm.set_version(start.version)
-    policy.info.llm.update_sampling_client(sampling_client, increment_version=False)
-    policy.sampling_client = sampling_client
+    policy.publish(sampling_client, version=start.version)
     policy.optimizer_steps = start.optimizer_steps
 
 

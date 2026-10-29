@@ -1,8 +1,9 @@
 """A group's datums as a step trains them, by their loss inputs.
 
-- The first stage of a step: the rows of a group's output that the step trains (:func:`trained_rows`), and the copies
-  it collects, whose loss inputs its batch transforms set in place (:func:`_step_datums`), without those the per-datum
-  stale filter masked (:func:`_kept_datums`).
+- The first stage of a step: the rows of a group's output that the step trains, by trained policy
+  (:func:`policy_rows`; the run's one policy's, :func:`trained_rows`), and the copies it collects, whose loss inputs
+  its batch transforms set in place (:func:`_step_datums`), without those the per-datum stale filter masked
+  (:func:`_kept_datums`).
 - The second stage: the scale of a microbatch's advantages by the action tokens its datums represent, as the step
   prepares it to send (:func:`advantage_scale`, :func:`scale_advantages`).
 """
@@ -15,6 +16,7 @@ import tinker
 import torch
 from tinker import TensorData
 
+from platoon.train.policy.spec import PolicyId
 from platoon.train.step.batch_transforms import get_loss_normalization_token_count
 from platoon.train.task_stats import MAIN
 from platoon.train.workflow.protocol import rows_by_policy
@@ -22,22 +24,27 @@ from platoon.train.workflow.protocol import rows_by_policy
 logger = logging.getLogger(__name__)
 
 
-def trained_rows(output: Any) -> Sequence[tinker.Datum]:
-    """The rows of a group's output that the step trains: the run's one trained policy's (``main``,
-    :func:`~platoon.train.workflow.protocol.rows_by_policy`), the output itself for a list of datums; none when it
-    gives none (an empty group).  The rows of any other policy are left out with a warning: this trainer trains one
-    policy."""
+def policy_rows(output: Any, trained: Sequence[PolicyId]) -> dict[PolicyId, Sequence[tinker.Datum]]:
+    """The rows of a group's output that the step trains, by the policy each trains, for each of the ``trained``
+    policies in their order, whose first is the leader (:func:`~platoon.train.workflow.protocol.rows_by_policy`: a
+    list of datums is the leader's rows, the output itself); none of a policy it gives none (an empty group).  The rows
+    of any other policy are left out with a warning: the run trains none."""
 
-    by_policy = rows_by_policy(output, MAIN)
-    others = [policy for policy in by_policy if policy != MAIN]
-    if others:
+    by_policy = rows_by_policy(output, trained[0])
+    if others := [policy for policy in by_policy if policy not in trained]:
         logger.warning(
-            "A group's output gives rows of %s, which this run does not train (it trains one policy, %s): they are "
-            "left out",
+            "A group's output gives rows of %s, which this run does not train (it trains %s%s): they are left out",
             ", ".join(map(str, others)),
-            MAIN,
+            "one policy, " if len(trained) == 1 else "",
+            ", ".join(trained),
         )
-    return by_policy.get(MAIN, ())
+    return {policy: by_policy.get(policy, ()) for policy in trained}
+
+
+def trained_rows(output: Any) -> Sequence[tinker.Datum]:
+    """The rows of a group's output that a run of one trained policy, ``main``, trains (:func:`policy_rows`)."""
+
+    return policy_rows(output, (MAIN,))[MAIN]
 
 
 def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:

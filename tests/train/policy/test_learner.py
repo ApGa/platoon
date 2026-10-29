@@ -205,6 +205,43 @@ def test_a_failed_call_to_the_service_is_logged_where_it_failed_and_raised(caplo
     assert [record.getMessage() for record in caplog.records if line in record.getMessage()]
 
 
+@pytest.mark.parametrize(
+    ("where", "doing"),
+    [
+        ("fb submit", "forward_backward"),
+        ("optim submit", "optim_step"),
+        ("fb result", "the update's results"),
+        ("optim result", "the update's results"),
+    ],
+)
+@pytest.mark.parametrize("named", [True, False])
+def test_a_named_learner_s_service_errors_name_its_policy_and_so_do_a_hook_s_learner_s_of_it(
+    monkeypatch, where, doing, named
+):
+    """In a run of several trained policies every learner is named, and a learner made from one under another
+    objective (a step hook's) too; a run's one policy's errors are raised as they are."""
+
+    monkeypatch.delenv("TINKER_BASE_URL", raising=False)
+    events: list[Any] = []
+    learner = _learner(events, {}, optim_error=RuntimeError("the service is gone") if where == "optim result" else None)
+    learner.named = named
+    if where != "optim result":
+        failing: Any = _FailingClient(events, where)
+        learner.policy.training_client = failing
+    hook_s = learner.for_objective(PolicyGradient("cispo", {}), metric_prefix="hook/")
+
+    async def run() -> None:
+        update = await _send_two_microbatches(hook_s)
+        await update.apply(SimpleNamespace(optimizer_steps=0))
+
+    with pytest.raises(RuntimeError, match="the service is gone") as raised:
+        asyncio.run(run())
+
+    assert hook_s.named is named
+    notes = [f"policy main, on hosted Tinker: {doing} failed"] if named else None
+    assert getattr(raised.value, "__notes__", None) == notes
+
+
 def test_training_metrics_that_fail_are_logged_and_the_update_goes_on(caplog):
     events: list[Any] = []
     recorded: dict[str, float] = {}
@@ -278,7 +315,7 @@ def _step_context(state: Any, train: dict[str, Any], *, heartbeat: Any = None) -
 def _step_learner(state: Any, train: dict[str, Any]) -> Learner:
     """The learner of a start's steps, as the training loop builds it."""
 
-    return _step_context(state, train).learner
+    return _step_context(state, train).lanes[0].learner
 
 
 def _step(state: Any, train: dict[str, Any]) -> loops.TrainStep:
@@ -377,7 +414,7 @@ def test_a_step_on_a_state_a_test_made_as_platoon_0_4_0_did_trains_under_the_run
     )
     train = _train(loss_fn="importance_sampling", loss_fn_config=loss_fn_config, optimizer={"learning_rate": 1e-6})
     context = _step_context(state, train)
-    learner, run_train = context.learner, context.trainer.config.train
+    learner, run_train = context.lanes[0].learner, context.trainer.config.train
     assert state.policies is not None and learner.policy is state.policies[MAIN]
     assert learner.objective.loss_fn == "importance_sampling"
     assert learner.objective.loss_fn_config is run_train.loss_fn_config
@@ -433,7 +470,7 @@ def test_the_step_s_learner_awaits_each_result_under_the_trainer_s_heartbeat_fee
     watchdog: Any = SimpleNamespace()
     state = _state(policies=PolicySet([_main()]), watchdog=watchdog)
     context = _step_context(state, _train(), heartbeat=heartbeat)
-    learner = context.learner
+    learner = context.lanes[0].learner
 
     assert asyncio.run(wait()) == "result"
     assert calls == [{"name": "optim_step", "heartbeat_interval": 60.0, "watchdog": watchdog, "total_timeout": 2.0}]
@@ -449,9 +486,10 @@ def test_a_step_filters_and_tests_its_microbatches_under_the_loss_its_policy_tra
     state = _state(policies=PolicySet([_main(loss_fn_config={"kl_coef": 0.1})]), train_tracker=StatsTracker("train"))
     step = _step(state, _train(filter_zero_advantage_datums=True, loss_fn="cispo", loss_fn_config={}))
 
-    prepared = step.prepare(MicrobatchFill([_datum(0.0), _datum(1.0)], places=1), 0, 0)
+    [lane] = step.context.lanes
+    prepared = step.prepare(MicrobatchFill([_datum(0.0), _datum(1.0)], places=1), 0, 0, lane)
     assert prepared is not None and len(prepared.datums) == 2
-    assert step.prepare(MicrobatchFill([_datum(0.0)], places=1), 0, 0) is not None
+    assert step.prepare(MicrobatchFill([_datum(0.0)], places=1), 0, 0, lane) is not None
 
 
 def test_a_step_sends_its_datums_without_the_objective_s_side_channels_and_with_everything_else():
@@ -461,7 +499,7 @@ def test_a_step_sends_its_datums_without_the_objective_s_side_channels_and_with_
     step = _step(_state(policies=PolicySet([_main()])), _train())
     datum = _datum(1.0, routing_handle=torch.tensor([4242], dtype=torch.int64), traj_start=torch.tensor([1.0]))
 
-    prepared = step.prepare(MicrobatchFill([datum], places=1), 0, 0)
+    prepared = step.prepare(MicrobatchFill([datum], places=1), 0, 0, step.context.lanes[0])
 
     assert prepared is not None and prepared.originals[0] is datum
     (sent,) = prepared.datums

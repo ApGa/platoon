@@ -35,7 +35,7 @@ from platoon.train.credit.api import (
     ScoringFailed,
 )
 from platoon.train.credit.group import group_baselines
-from platoon.train.policy.spec import MAIN
+from platoon.train.policy.spec import MAIN, trained_policies
 from platoon.utils.config import ConfigError
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,8 @@ class ReverseKL(CreditEstimatorBase):
     @staticmethod
     def check(options: ReverseKLOptions, ctx: CreditCheckContext) -> None:
         """The teacher is a frozen policy the config declares, not the student (``main``, the policy the run
-        trains), and has the student's tokenizer (:func:`tokenizer_problem`)."""
+        trains), and has the student's tokenizer (:func:`tokenizer_problem`), and each other trained policy's, whose
+        rows it scores too."""
 
         if options.teacher == MAIN:
             raise ValueError("teacher: main is the student, the policy the run trains; name a frozen policy")
@@ -103,6 +104,9 @@ class ReverseKL(CreditEstimatorBase):
             raise ValueError(f"teacher: policies.{options.teacher} trains; a teacher is frozen (trainable: false)")
         if problem := tokenizer_problem(ctx.config.train.model_name, teacher.model_name):
             raise ValueError(f"teacher: policies.{options.teacher}'s {problem}")
+        for student in trained_policies(ctx.config)[1:]:  # the run's other students: it scores their rows too
+            if problem := tokenizer_problem(declared[student].model_name, teacher.model_name):
+                raise ValueError(f"teacher: policies.{options.teacher}'s {problem} (policies.{student}, trained too)")
 
     async def assign(self, group: CreditGroup) -> None:
         samples = group.samples()

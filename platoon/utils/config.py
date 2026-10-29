@@ -937,12 +937,27 @@ def _build(
         return tuple(items) if origin is tuple else items
     is_mapping, value_type = _mapping_value(annotation)
     if is_mapping and isinstance(value, Mapping):
-        found = {key: _build(value_type, item, _join(path, key)) for key, item in value.items()}
+        found = {key: _build_entry(value_type, item, _join(path, key)) for key, item in value.items()}
         for key, item in value.items():
             if isinstance(item, Mapping):
                 _keep_given(found[key], item)
         return found
     return value
+
+
+def _build_entry(annotation: Any, value: Any, path: str) -> Any:
+    """A mapping's entry ``value`` built as ``annotation``, at dotted ``path``: a section whose class refuses its values
+    says so naming the entry (``policies.worker: ...``), whose key the class itself never sees.  A refusal that names
+    its path already, or a configuration error, is raised as it is."""
+
+    try:
+        return _build(annotation, value, path)
+    except ConfigError:
+        raise
+    except ValueError as exc:
+        if _schema_fields(_strip(annotation)) is None or not isinstance(value, Mapping) or str(exc).startswith(path):
+            raise
+        raise ValueError(f"{path}: {exc}") from exc
 
 
 def _is_scalar(value: Any) -> bool:

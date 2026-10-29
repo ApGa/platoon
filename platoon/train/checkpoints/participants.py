@@ -5,7 +5,8 @@ Every full checkpoint of a start (at launch, by the cadence, when training is in
 of the run's ``checkpoints.jsonl``, the leader policy's save, whose ``loop_state`` holds the run's counters first
 (:data:`COUNTER_KEYS`), then each participant's entries, in the order the participants registered.  A trainer registers
 its participants with the run (``run.checkpoints``); the rl trainer's is its draws: the per-task statistics and the
-dispatcher's state.
+dispatcher's state.  In a run of several trained policies a checkpoint is a barrier of their saves, which the leader's
+row, written last, commits (:mod:`platoon.train.checkpoints.barrier`).
 
 The participants' rules (RFC 0021, section 8): each key is its participant's own (:meth:`RunCheckpoints.register`
 refuses one that the counters, the keys kept for several policies, the row itself (:func:`row_fields`) or another
@@ -22,7 +23,10 @@ import functools
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol
 
+from platoon.train.policy.spec import failure_note
+
 if TYPE_CHECKING:
+    from platoon.train.checkpoints.barrier import Counters
     from platoon.train.checkpoints.resume import StartPoint
     from platoon.train.policy.checkpoints import Waiter
     from platoon.train.policy.set import PolicySet
@@ -31,12 +35,16 @@ if TYPE_CHECKING:
 # The keys of a row's loop_state that hold the run's own counters, in the row's order: the step a resume from the row
 # starts at, the W&B run it goes on with, and the policy's version and optimizer steps.
 COUNTER_KEYS = ("batch", "wandb_run_id", "policy_version", "optimizer_steps")
-# The keys kept for runs of several policies, which no participant may hold.
-RESERVED_KEYS = ("policies", "commit_seq")
-# The keys of a row that the run claims whoever takes part: its counters, and its draws' (the rollout source's, its
-# credit estimators' state included), the only other keys a platoon release writes, so that every run directory a
-# release wrote resumes.
-CORE_KEYS = (*COUNTER_KEYS, "tasks", "next_position", "dispatch", "credit")
+# The key of a leader row's loop_state that names each other trained policy's row of the same checkpoint
+# (platoon.train.checkpoints.barrier), after the participants' entries.
+POLICIES_KEY = "policies"
+# The keys kept for runs of several policies, which no participant may hold: the other trained policies' rows of a
+# checkpoint (POLICIES_KEY), and commit_seq.
+RESERVED_KEYS = (POLICIES_KEY, "commit_seq")
+# The keys of a row that the run claims whoever takes part: its counters, the other trained policies' rows, and its
+# draws' (the rollout source's, its credit estimators' state included), the only other keys a platoon release writes,
+# so that every run directory a release wrote resumes.
+CORE_KEYS = (*COUNTER_KEYS, POLICIES_KEY, "tasks", "next_position", "dispatch", "credit")
 
 
 @functools.cache
@@ -147,13 +155,25 @@ class RunCheckpoints:
             participant.resume(start)
 
     async def save(
-        self, name: str, *, step: int, policy_version: int, optimizer_steps: int, wait: "Waiter"
+        self,
+        name: str,
+        *,
+        step: int,
+        policy_version: int,
+        optimizer_steps: int,
+        wait: "Waiter",
+        others: "Mapping[PolicyId, Counters] | None" = None,
     ) -> "dict[PolicyId, dict[str, str]]":
         """Save full checkpoint ``name``: its row's ``loop_state`` holds ``batch`` (``step``, the step a resume from it
         starts at), the W&B run (tinker_cookbook's own save leaves it out), the policy's ``policy_version`` and
         ``optimizer_steps`` as a resume takes them up, then each participant's entries, all taken before the save
-        starts; then the leader policy saves (:meth:`~platoon.train.policy.policy.Policy.save`, under ``wait``), and
-        ``checkpoints.jsonl`` records the row once its save succeeded.  The paths the save wrote, by policy."""
+        starts; then every other trained policy saves, at the same time, each recording its counters (``others``,
+        else its own now), and the leader's row names their rows (``policies``,
+        :func:`~platoon.train.checkpoints.barrier.save_others`); then the leader policy saves
+        (:meth:`~platoon.train.policy.policy.Policy.save`, under ``wait``), and ``checkpoints.jsonl`` records the row
+        once its save succeeded: the row that commits the checkpoint.  The paths the save wrote, by policy."""
+
+        from platoon.train.checkpoints.barrier import save_others  # Tinker loads with the saves
 
         loop_state: dict[str, Any] = {
             "batch": step,
@@ -163,8 +183,16 @@ class RunCheckpoints:
         }
         for participant in self.participants:
             loop_state.update(await participant.checkpoint_state(name))
+        saved, named = await save_others(self.policies, self.run_dir, name, step=step, counters=others or {}, wait=wait)
+        if named:  # several trained policies: the leader's row names each other one's
+            loop_state[POLICIES_KEY] = named
         leader = self.policies[self.policies.leader]
-        saved = {leader.id: await leader.save(name, log_path=self.run_dir, loop_state=loop_state, wait=wait)}
+        try:
+            saved[leader.id] = await leader.save(name, log_path=self.run_dir, loop_state=loop_state, wait=wait)
+        except Exception as error:
+            if named:  # among several policies, the error says whose save failed
+                error.add_note(failure_note(leader.spec, f"saving checkpoint {name}"))
+            raise
         self.last_saved = name
         return saved
 

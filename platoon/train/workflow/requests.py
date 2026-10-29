@@ -26,6 +26,7 @@ from platoon.train.workers.protocol import (
     binding_path,
     ipc_dir,
 )
+from platoon.train.workflow.crediting import tags_rows
 from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import held_slot
 
@@ -135,7 +136,7 @@ def _build_worker_request(workflow: "GroupRolloutWorkflow", data: dict, rollout_
         sandbox_labels=sandbox_cleanup.labels(),
         signal_first_call=held_slot() is not None,
     )
-    tag_datums = bool(workflow.entry_credit) and getattr(workflow._entry_estimator(), "needs_agents", False)
+    tag_datums = bool(workflow.entry_credit) and tags_rows(workflow, workflow._entry_estimator())
     if workflow.sampled_policies or workflow.role_tools:
         return PolicyRolloutWorkerRequest.extending(
             request,

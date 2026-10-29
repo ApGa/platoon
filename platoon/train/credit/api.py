@@ -221,7 +221,8 @@ class CreditSetup:
     entry: str
     # The entry's training settings (train.workflow_config with the entry's own laid over it).
     settings: WorkflowConfig
-    # The run's policies, by id: main, the one the run trains in this release, then its frozen ones.
+    # The run's policies, by id: main, then each other policy that the config's policies: section declares, trained
+    # or frozen.
     policies: tuple[PolicyId, ...]
     # Each policy as the estimator may read it (its renderer, its tokenizer, its scores), by id: what an estimator that
     # scores with another policy (a teacher) reads it from.  Empty outside a run (a test's setup).

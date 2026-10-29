@@ -325,9 +325,12 @@ def test_the_run_s_checkpoints_hold_the_counters_then_each_participant_s_entries
 
 
 class _Policies(dict):
-    """The run's policies as the checkpoints read them: by id, with the leader's."""
+    """The run's policies as the checkpoints read them: by id, with the leader's, which trains alone."""
 
     leader = "main"
+
+    def trainable(self) -> list[Any]:
+        return [self[self.leader]]
 
 
 def test_the_step_clock_advances_the_step_then_the_horizon_then_the_event_then_the_watchdog():
@@ -339,6 +342,14 @@ def test_the_step_clock_advances_the_step_then_the_horizon_then_the_event_then_t
 
     clock.advance(consumed=consumed)
     assert (clock.step, clock.end, event.is_set(), order) == (4, 5, True, ["horizon at step 4", "fed"])
+
+
+def test_every_trained_policy_steps_on_the_run_s_one_clock():
+    clock = StepClock(step=0, updated=asyncio.Event())
+    policies: Any = SimpleNamespace(trainable=lambda: [SimpleNamespace(id=MAIN), SimpleNamespace(id="worker")])
+    run: Any = SimpleNamespace(policies=policies, clock=clock)
+    clocks = TrainerRun.clocks.fget(run)
+    assert list(clocks) == [MAIN, "worker"] and all(each is clock for each in clocks.values())
 
 
 def test_the_loops_state_reads_and_writes_the_step_and_the_event_on_the_run_s_clock():

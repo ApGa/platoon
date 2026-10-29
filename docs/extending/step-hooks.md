@@ -31,6 +31,14 @@ At each step's end, in one sequence, the `rl` trainer's step and any other train
 
 A run with no hook skips steps 1, 2 and 4: its steps are exactly what they were.
 
+In a run that trains several policies in lockstep ([Train several policies in
+lockstep](../how-to/train-and-eval.md#train-several-policies-in-lockstep-experimental)), `end.train` and `end.learner`
+take the id of any policy the run trains: the update goes through that policy's own learner, its training client and
+Adam state, its metrics go under its prefix (`policies/<id>/<name>/`; `main`'s keep `<name>/`), and an error of its
+service names the policy and the service, as the step's own updates' errors do. Each policy that the step or a hook
+updated publishes once, in one checkpoint of them all when the cadence saves one, and `end.published` names each at
+its new version; at the launch it names every trained policy. A frozen policy takes no update (`ValueError`).
+
 ## Write one
 
 ```python
@@ -88,7 +96,7 @@ checkpoints' `optimizer_steps` include the hooks', and the step's row gains `bat
 
 | Type | Where | What a hook uses of it |
 |---|---|---|
-| the run, `from_run`'s `run` | `platoon.train.trainer.run.TrainerRun` | `policies` (by id; `policies.leader` is the id of the policy the run trains), `config`, `run_dir` |
+| the run, `from_run`'s `run` | `platoon.train.trainer.run.TrainerRun` | `policies` (by id; `policies.leader` is the id of the first policy the run trains, `main`), `config`, `run_dir` |
 | a policy, `run.policies[id]` | `platoon.train.policy.policy.Policy` | `id`, `version`, `renderer`, `tokenizer`, `optimizer_params` (a `tinker.AdamParams`), `snapshot()` |
 | a learner and its update | `platoon.train.policy.learner.Learner`, `PolicyUpdate` | `update()`; `submit(datums, originals, minibatch=, microbatch=)`, `apply(adam_params=)` |
 | a refused update | `platoon.train.policy.learner.UpdateRejected` | raised by an update that fails closed; let it end the start |

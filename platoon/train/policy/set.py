@@ -1,5 +1,5 @@
 """The run's policies (:class:`PolicySet`), built where the trainer is, each with its model gateway, and opened as each
-start begins.
+start begins; and the work each of several policies does at once, on its own service (:meth:`PolicySet.each`).
 
 The agents' default policy (``agents.policy``, ``main`` without it) is registered as this process's default model
 gateway, as a run's one policy always was; every other policy gets a gateway of its own, on a Tinker session of its own
@@ -9,16 +9,18 @@ policy with (``ModelGateway.serve_policies``).
 """
 
 import asyncio
-from collections.abc import Iterable, Iterator, Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Awaitable, Iterable, Iterator, Mapping
+from typing import TYPE_CHECKING, TypeVar
 
 from platoon.train.policy.policy import Policy
-from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec
+from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec, failure_note, service_name
 from platoon.train.tinker.proxy import ModelInfo, open_tinker_llm, register_tinker_llm
 from platoon.utils.config import ConfigError
 
 if TYPE_CHECKING:
     from platoon.train.checkpoints.resume import StartPoint
+
+T = TypeVar("T")
 
 
 class PolicySet(Mapping[PolicyId, Policy]):
@@ -43,13 +45,10 @@ class PolicySet(Mapping[PolicyId, Policy]):
         that gateway to the agents bound to it (a policy that only scores, a teacher, is not).  A frozen policy samples
         the sampler its ``load_checkpoint_path`` names.
 
-        A run of one policy registers it with today's call, and nothing more.  More than one policy to train is
-        refused: loading refuses it first, since this release trains one."""
+        A run of one policy registers it with today's call, and nothing more."""
 
         if not specs:
             raise ValueError("a run has at least one policy")
-        if len(trained := [spec.id for spec in specs.values() if spec.trainable]) > 1:
-            raise ValueError(f"a run trains one policy, not {len(trained)}: {', '.join(trained)}")
         agents = agents if agents is not None else AgentBindings(default=next(iter(specs)))
         infos = {agents.default: _registered(specs[agents.default])}
         for spec in specs.values():
@@ -89,13 +88,43 @@ class PolicySet(Mapping[PolicyId, Policy]):
 
     async def open(self, start: "StartPoint", *, stop: asyncio.Event | None = None) -> bool:
         """Open the training client of each policy the run trains at its start point (``start.policies``,
-        :meth:`Policy.open`), one after another; False when ``stop`` was set before the service accepted one.  A run
-        trains one policy until several train, which will open concurrently then."""
+        :meth:`Policy.open`), all at once, each on its own service (:meth:`each`); False when ``stop`` was set before
+        a service accepted one."""
 
-        for policy in self.trainable():
-            if not await policy.open(start.policies[policy.id], stop=stop):
-                return False
-        return True
+        opened = await self.each(
+            {policy.id: policy.open(start.policies[policy.id], stop=stop) for policy in self.trainable()},
+            doing="opening its training client",
+        )
+        return all(opened.values())
+
+    async def each(self, work: Mapping[PolicyId, Awaitable[T]], *, doing: str) -> dict[PolicyId, T]:
+        """Await each policy's ``work`` at the same time, each on its own service: what each one's came to, by policy,
+        in the order of ``work``.  Once one fails the others' work is cancelled, and the error of the first in
+        ``work``'s order that failed (not the first to fail in time) is raised as it is, in a run of several trained
+        policies with a note that names its policy, its service and what it was ``doing``
+        (:func:`~platoon.train.policy.spec.failure_note`): training stops when a policy's service fails, as it does for
+        a run's one policy.  One policy's work is awaited alone, as it always was."""
+
+        if len(work) == 1:
+            ((policy, awaitable),) = work.items()
+            try:
+                return {policy: await awaitable}
+            except Exception as error:
+                if len(self.trainable()) > 1:  # one of several policies' work (another's save): say whose failed
+                    error.add_note(failure_note(self[policy].spec, doing))
+                raise
+        tasks = {policy: asyncio.ensure_future(awaitable) for policy, awaitable in work.items()}
+        try:
+            await asyncio.wait(tasks.values(), return_when=asyncio.FIRST_EXCEPTION)
+        finally:
+            for task in tasks.values():  # after a failure, or when the caller is cancelled: the others' work stops
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+        for policy, task in tasks.items():
+            if not task.cancelled() and (error := task.exception()) is not None:
+                error.add_note(failure_note(self[policy].spec, doing))
+                raise error
+        return {policy: task.result() for policy, task in tasks.items()}
 
     def __getitem__(self, policy: PolicyId) -> Policy:
         return self._policies[policy]
@@ -154,7 +183,7 @@ def _not_opened(spec: PolicySpec, error: Exception) -> RuntimeError:
     its service.  A key the service refuses stays the configuration error it is (exit 78), which names the service
     already."""
 
-    service = spec.tinker_base_url or "the service TINKER_BASE_URL names, else hosted Tinker"
+    service = service_name(spec)
     model = spec.load_checkpoint_path if not spec.trainable and spec.load_checkpoint_path else spec.model_name
     return RuntimeError(
         f"policy {spec.id}: could not open a sampling client of {model} on {service}: {type(error).__name__}: {error}"

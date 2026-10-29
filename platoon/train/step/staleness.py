@@ -13,6 +13,10 @@ The per-datum filter keeps the advantages the group's credit gave each datum it 
 group as it settled, so each kept term keeps its expectation.  A datum's version is the oldest its own model calls
 sampled when its workflow stamps it so (``GroupRolloutWorkflow`` does under ``datum``), else its rollout's.
 
+In a run that trains several policies, each policy's rows of a group are judged on their own, against that policy's
+version and bound (:meth:`StaleFilter.for_policy`): a policy's stale rows are dropped together, and the group's other
+rows still train.
+
 The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, asks the filter of each group it dequeues, and
 logs, counts and drops the stale groups and datums.
 """
@@ -92,6 +96,13 @@ class StaleFilter:
         bounds = {label: own.max_staleness for label, own in settings.items()}
         stale_filter = getattr(train, "stale_filter", TrainConfig.stale_filter)
         return cls(train.max_staleness, bounds, per_datum=stale_filter == "datum")
+
+    def for_policy(self, bound: int | None) -> StaleFilter:
+        """The filter of a trained policy's rows: this one, the run's (each entry's bound, else the run's), for a
+        policy without a bound of its own; else one of the policy's ``bound`` for every entry's rows, judged as this one
+        judges (per datum or per group)."""
+
+        return self if bound is None else StaleFilter(bound, {}, per_datum=self.per_datum)
 
     def check(self, entry: str | None, output: Sequence[Any] | None, now: int) -> StaleVerdict:
         """Whether a group of ``entry`` whose output is ``output`` (None: it failed) is stale at policy version

@@ -1,15 +1,17 @@
 """A policy as the config declares it (:class:`PolicySpec`), the run's policies as its config declares them
 (:func:`policy_specs`), which policy each agent samples (:class:`AgentBindings`, :func:`agent_bindings`) and which
-tools each agent role may call (:func:`role_tools`), and what loading refuses of them (:func:`policy_problems`, and
-:func:`workflow_problems` against the run's workflow class) or warns of (:func:`policy_warnings`).  Imports no Tinker.
+tools each agent role may call (:func:`role_tools`), the bound the dispatcher's horizon counts (:func:`horizon_bound`),
+and what loading refuses of them (:func:`policy_problems`, and :func:`workflow_problems` against the run's workflow
+class) or warns of (:func:`policy_warnings`).  Imports no Tinker.
 
 ``main`` is the policy ``train:`` declares: each field of its spec keeps its ``train.*`` name, so that one vocabulary
-names a policy wherever it is declared.  ``policies:`` declares the run's others under the same names (RFC 0021).  This
-release trains ``main`` only: every other policy is frozen, sampled by the agents ``agents:`` binds to it or scoring
-for a credit estimator, and never stepped, saved or pruned.
+names a policy wherever it is declared.  ``policies:`` declares the run's others under the same names (RFC 0021): ones
+the run trains in lockstep with main, each with its own optimizer, loss and staleness bound, and frozen ones, sampled
+by the agents ``agents:`` binds to them or scoring for a credit estimator, and never stepped, saved or pruned.
 """
 
 import difflib
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -52,11 +54,31 @@ class PolicySpec:
     # new trial that goes on from it; else its optimizer starts fresh.
     load_optimizer_state: bool = False
     # Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the
-    # loss's keyword arguments, for a policy the run trains (main's are train.optimizer, train.loss_fn and
+    # loss's keyword arguments, for a policy the run trains (each unset one train.optimizer, train.loss_fn and
     # train.loss_fn_config, which policy_specs puts here, so that the trainer reads them from the spec alone).
     optimizer: "AdamParams | None" = field(default=None, hash=False)
     loss_fn: str | None = None
     loss_fn_config: dict[str, Any] | None = field(default=None, hash=False)
+    # How many of its own versions old its rows may be and still train; None: their entry's bound, else
+    # train.max_staleness (the stale filter's, platoon.train.step.staleness).
+    max_staleness: int | None = None
+
+
+def service_name(spec: PolicySpec) -> str:
+    """The policy's Tinker service, as a message names it: its URL, else the one its client finds, ``TINKER_BASE_URL``'s
+    when that is set, else hosted Tinker."""
+
+    if spec.tinker_base_url:
+        return spec.tinker_base_url
+    found = os.environ.get("TINKER_BASE_URL")
+    return f"{found} (TINKER_BASE_URL)" if found else "hosted Tinker"
+
+
+def failure_note(spec: PolicySpec, doing: str) -> str:
+    """The note an error of a policy's service gets in a run of several trained policies: whose service failed, and
+    at what (``doing``)."""
+
+    return f"policy {spec.id}, on {service_name(spec)}: {doing} failed"
 
 
 def policy_specs(config: Any) -> dict[PolicyId, PolicySpec]:
@@ -64,8 +86,9 @@ def policy_specs(config: Any) -> dict[PolicyId, PolicySpec]:
     ``renderer_kwargs``, ``context_window_length``, ``sample_timeout_seconds``, ``lora_rank``, ``optimizer``,
     ``loss_fn`` and ``loss_fn_config``), with the run's ``tinker_base_url``, and the weights
     ``checkpoint.load_checkpoint_path`` starts it from, with their optimizer state when
-    ``checkpoint.load_optimizer_state`` says so; then each ``policies:`` entry, in the config's order, a frozen one in
-    this release, whose unset service is the run's (``tinker_base_url``)."""
+    ``checkpoint.load_optimizer_state`` says so; then each ``policies:`` entry, in the config's order, whose unset
+    service is the run's (``tinker_base_url``), and, when the run trains it, whose unset adapter rank, optimizer and
+    loss are ``train:``'s (:func:`_trained_settings`)."""
 
     train = config.train
     main = PolicySpec(
@@ -95,8 +118,30 @@ def policy_specs(config: Any) -> dict[PolicyId, PolicySpec]:
             tinker_base_url=_or(declared.tinker_base_url, config.tinker_base_url),
             trainable=declared.trainable,
             load_checkpoint_path=declared.load_checkpoint_path,
+            **(_trained_settings(declared, train) if declared.trainable else {}),
         )
     return specs
+
+
+def _trained_settings(declared: Any, train: Any) -> dict[str, Any]:
+    """A trained ``policies:`` entry's training settings, as its spec holds them: its adapter's rank, else
+    ``train.lora_rank``; its optimizer, else ``train.optimizer``; its loss, else ``train.loss_fn``; its loss's config,
+    else ``train.loss_fn_config`` when the loss is ``train:``'s, and none (the loss's own defaults) for another loss,
+    whose keys ``train:``'s config is not for; its staleness bound; and whether it starts from its checkpoint's
+    optimizer state."""
+
+    loss_fn = _or(declared.loss_fn, train.loss_fn)
+    loss_fn_config = declared.loss_fn_config
+    if loss_fn_config is None:
+        loss_fn_config = train.loss_fn_config if loss_fn == train.loss_fn else {}
+    return {
+        "lora_rank": _or(declared.lora_rank, train.lora_rank),
+        "optimizer": _or(declared.optimizer, train.optimizer),
+        "loss_fn": loss_fn,
+        "loss_fn_config": loss_fn_config,
+        "max_staleness": declared.max_staleness,
+        "load_optimizer_state": declared.load_optimizer_state,
+    }
 
 
 def policy_ids(config: Any) -> tuple[PolicyId, ...]:
@@ -153,6 +198,29 @@ def _roles(config: Any) -> Mapping[str, Any]:
     return getattr(getattr(config, "agents", None), "roles", None) or {}
 
 
+def trained_policies(config: Any) -> tuple[PolicyId, ...]:
+    """The ids of the policies the run trains, in order: ``main``, then each ``policies:`` entry that is not frozen."""
+
+    declared = _declared(config)
+    return (MAIN, *(policy for policy, entry in declared.items() if getattr(entry, "trainable", True)))
+
+
+def horizon_bound(config: Any) -> int | None:
+    """The staleness bound the dispatcher's horizon counts (``k``: at most ``k + 1`` batches of groups started and not
+    yet trained): the smallest bound of the trained policies that agents sample, each its own ``max_staleness``, else
+    ``train.max_staleness`` (main's always); None when none is bounded.  With one policy, ``train.max_staleness``."""
+
+    run, declared = config.train.max_staleness, _declared(config)
+    sampled = agent_bindings(config).sampled()
+    bounds = [
+        run if policy == MAIN else _or(declared[policy].max_staleness, run)
+        for policy in trained_policies(config)
+        if policy in sampled
+    ]
+    bounded = [bound for bound in bounds if bound is not None]
+    return min(bounded) if bounded else None
+
+
 # A policy's id: a lowercase letter, then lowercase letters, digits, ``_`` and ``-``, 32 characters at most.
 POLICY_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 # The root agent's role (the gateway's AgentSession.role), whose agent samples agents.policy whatever agents.roles says.
@@ -164,10 +232,11 @@ PLATOON_ROLES: Final = (ROOT_ROLE, "subagent", VERIFIER_ROLE, JUDGE_ROLE)
 
 def policy_problems(config: Any) -> list[str]:
     """What loading refuses of the config's ``policies:`` and ``agents:``, one entry each: an id that is no policy id
-    (:data:`POLICY_ID`) or that names ``main``, which ``train:`` declares; a second policy the run would train, and
-    a default policy of the agents other than main, which this release does not support (main publishes its binding
-    as the agents' default); an agent role, or the agents' default, bound to a policy the run does not declare; and a
-    role's ``tools`` that is no list of names or patterns."""
+    (:data:`POLICY_ID`) or that names ``main``, which ``train:`` declares; a trained policy's keys on a frozen policy,
+    and an optimizer state to load without the checkpoint it is in (:func:`_entry_problems`); an agent role, or the
+    agents' default, bound to a policy the run does not declare; a role's ``tools`` that is no list of names or
+    patterns; a frozen policy as the agents' default, which the root agent samples; and a policy the run trains that no
+    agent samples, which no row would ever train (:func:`_unsampled_problems`)."""
 
     problems = []
     declared = _declared(config)
@@ -183,22 +252,17 @@ def policy_problems(config: Any) -> list[str]:
                 f"{where}: a policy id is a lowercase letter, then lowercase letters, digits, '_' or '-', 32 "
                 "characters at most"
             )
-        elif getattr(policy, "trainable", True):
-            problems.append(
-                f"{where}: this release trains one policy, main (train:), so every other policy is frozen: set "
-                f"{where}.trainable: false to sample it or score with it. Training several policies arrives with "
-                "lockstep multi-policy training (RFC 0021, milestone B4)"
-            )
+        else:
+            problems.extend(_entry_problems(where, policy))
     known = {MAIN, *declared}
     agents = getattr(config, "agents", None)
     default = getattr(agents, "policy", None)
     if default is not None and default not in known:
         problems.append(f"agents.policy: {default!r} is not a policy of the run ({', '.join(sorted(known))})")
-    elif default not in (None, MAIN):
+    elif default is not None and default in declared and not getattr(declared[default], "trainable", True):
         problems.append(
-            f"agents.policy: {default!r} is frozen, and the root agent samples the policy the run trains, main, in "
-            "this release; bind a role to it (agents.roles.<role>.policy) instead. A default policy of another id "
-            "arrives with lockstep multi-policy training (RFC 0021, milestone B4)"
+            f"agents.policy: {default!r} is frozen, and the root agent samples a policy the run trains: name main or a "
+            "policy the run trains, and bind a role to the frozen one (agents.roles.<role>.policy) instead"
         )
     for role, bound in _roles(config).items():
         if not isinstance(role, str) or not role:
@@ -209,6 +273,63 @@ def policy_problems(config: Any) -> list[str]:
                 f"agents.roles.{role}.policy: {bound.policy!r} is not a policy of the run ({', '.join(sorted(known))})"
             )
         problems.extend(_tools_problems(role, bound.tools))
+    # Which policies the agents sample is read from bindings that the problems above may find wrong (a role bound to an
+    # unknown policy, a frozen default): only once they hold does a policy no agent samples say something true.
+    return problems or _unsampled_problems(config)
+
+
+# The keys of a policies: entry that only a trained policy reads, and the value each has when it is left out.
+_TRAINING_KEYS = {
+    "lora_rank": None,
+    "optimizer": None,
+    "loss_fn": None,
+    "loss_fn_config": None,
+    "max_staleness": None,
+    "load_optimizer_state": False,
+}
+
+
+def _entry_problems(where: str, policy: Any) -> list[str]:
+    """What loading refuses of one ``policies:`` entry (at ``where``): a frozen one's keys that only a trained policy
+    reads, which it would ignore; and ``load_optimizer_state`` without ``load_checkpoint_path``, whose checkpoint
+    holds the optimizer state."""
+
+    problems = []
+    if not getattr(policy, "trainable", True):
+        if given := [key for key, unset in _TRAINING_KEYS.items() if getattr(policy, key, unset) != unset]:
+            one = len(given) == 1
+            problems.append(
+                f"{where}: {', '.join(given)} {'is' if one else 'are'} for a policy the run trains, and this one is "
+                f"frozen (trainable: false), so it never steps: leave {'it' if one else 'them'} out"
+            )
+    elif getattr(policy, "load_optimizer_state", False) and getattr(policy, "load_checkpoint_path", None) is None:
+        problems.append(
+            f"{where}.load_optimizer_state: it loads the optimizer state of the checkpoint "
+            f"{where}.load_checkpoint_path names, and that is not set"
+        )
+    return problems
+
+
+def _unsampled_problems(config: Any) -> list[str]:
+    """A policy the run trains that no agent samples (``agents.policy``, ``agents.roles.<role>.policy``): no row would
+    ever train it, yet every checkpoint would save it.  ``main`` is unsampled only beside an ``agents.policy`` that
+    names another policy."""
+
+    agents = agent_bindings(config)
+    sampled = set(agents.sampled())
+    problems = []
+    if MAIN not in sampled:
+        problems.append(
+            f"agents.policy: the root agent samples {agents.default}, and no role samples main, the policy train: "
+            "declares, which the run trains, so no row would ever train it: bind the agents of a role to main "
+            "(agents.roles.<role>.policy: main)"
+        )
+    problems.extend(
+        f"policies.{policy}: the run trains it, and no agent samples it, so no row would ever train it: bind the "
+        f"agents of a role to it (agents.roles.<role>.policy: {policy}), or set policies.{policy}.trainable: false"
+        for policy, declared in _declared(config).items()
+        if getattr(declared, "trainable", True) and policy not in sampled
+    )
     return problems
 
 
@@ -259,8 +380,8 @@ def policy_warnings(config: Any) -> list[str]:
     lines = [
         f"policies.{policy}: no agent samples it (agents.roles) and no entry's credit_options names it, so the run "
         "opens it and never uses it"
-        for policy in _declared(config)
-        if policy not in used
+        for policy, declared in _declared(config).items()
+        if policy not in used and not getattr(declared, "trainable", True)  # a trained one is refused (policy_problems)
     ]
     if agents.roles.get(ROOT_ROLE, agents.default) != agents.default:
         lines.append(

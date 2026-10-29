@@ -13,7 +13,9 @@ skipped or whose metrics are not finite (:class:`UpdateRejected`), before it is 
 policy's open update, sent and not counted yet (``open_updates``): a policy has one at a time, since its optimizer
 step would take in another's gradients, and a step's end refuses to start its hooks or to publish with one.  A step
 hook's learner, and any learner made from it (:meth:`Learner.for_objective`), refuses to send or count anything outside
-its hook's ``update()`` (``guard``).
+its hook's ``update()`` (``guard``).  In a run of several trained policies every learner is ``named``: an error of its
+policy's service, in a step's own update or a step hook's, says whose service failed
+(:func:`~platoon.train.policy.spec.failure_note`).
 """
 
 import logging
@@ -26,7 +28,7 @@ import tinker
 
 from platoon.train.objectives.api import Objective
 from platoon.train.policy.policy import Policy
-from platoon.train.policy.spec import PolicyId
+from platoon.train.policy.spec import PolicyId, failure_note
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
@@ -57,6 +59,18 @@ class OpenedSteps(Protocol):
     open_updates: dict[PolicyId, Any]
 
 
+class PrefixedTracker:
+    """A stats tracker as the learner of a trained policy other than the leader records into it, in a run that trains
+    several: every metric under ``prefix`` (``policies/<id>/``) in front of its name, in ``tracker``, the step's own."""
+
+    def __init__(self, tracker: Any, prefix: str) -> None:
+        self.tracker = tracker
+        self.prefix = prefix
+
+    def scalar(self, **values: float) -> None:
+        self.tracker.scalar(**{f"{self.prefix}{name}": value for name, value in values.items()})
+
+
 class UpdateRejected(RuntimeError):
     """An optimizer step that a learner which fails closed refused: the service skipped it, or a forward_backward or
     optimizer metric is not finite.  The update is not counted, and the step never publishes."""
@@ -71,7 +85,9 @@ class Learner:
     is open on the clock until it is counted, and with ``fail_closed`` a skipped or nonfinite optimizer result raises
     :class:`UpdateRejected` before it is counted.  ``guard``, when set, is called before each submission, optimizer
     step and count, and raises when the learner may not make them (a step hook's, outside its ``update()``; the
-    run's, as the step's end runs its step hooks)."""
+    run's, as the step's end runs its step hooks).  ``named``: whether an error of the policy's service in an update
+    gets a note that names the policy and its service (:func:`~platoon.train.policy.spec.failure_note`), as in a run
+    of several trained policies; with one, its errors are raised as they are."""
 
     def __init__(
         self,
@@ -80,12 +96,13 @@ class Learner:
         objective: Objective,
         timeouts: UpdateTimeouts,
         wait: "Waiter",
-        tracker: StatsTracker,
+        tracker: StatsTracker | PrefixedTracker,
         metric_prefix: str = "",
         fail_closed: bool = False,
         before_update: Callable[[], Awaitable[None]] | None = None,
         clock: OpenedSteps | None = None,
         guard: Callable[[], None] | None = None,
+        named: bool = False,
     ) -> None:
         self.policy = policy
         self.objective = objective
@@ -97,6 +114,7 @@ class Learner:
         self.before_update = before_update
         self.clock = clock
         self.guard = guard
+        self.named = named
 
     def update(self) -> "PolicyUpdate":
         """A minibatch's update of the policy, which the step sends each microbatch to and then applies."""
@@ -106,10 +124,10 @@ class Learner:
     def for_objective(
         self, objective: Objective, *, metric_prefix: str = "", guard: Callable[[], None] | None = None
     ) -> "Learner":
-        """A learner of the same policy, its waits, deadlines, barrier, clock and checks, under ``objective``, whose
-        metrics go under ``metric_prefix`` and whose sends ``guard`` checks (a step hook's: ``<name>/``, and its
-        ``update()`` only); None: this learner's own guard, so that a step hook's learner under another objective
-        refuses what it refuses."""
+        """A learner of the same policy, its waits, deadlines, barrier, clock, checks and failure notes (``named``),
+        under ``objective``, whose metrics go under ``metric_prefix`` and whose sends ``guard`` checks (a step hook's:
+        ``<name>/``, and its ``update()`` only); None: this learner's own guard, so that a step hook's learner under
+        another objective refuses what it refuses."""
 
         return Learner(
             self.policy,
@@ -122,6 +140,7 @@ class Learner:
             before_update=self.before_update,
             clock=self.clock,
             guard=guard if guard is not None else self.guard,
+            named=self.named,
         )
 
 
@@ -173,6 +192,7 @@ class PolicyUpdate:
         except Exception as e:
             elapsed = time.perf_counter() - fwd_bwd_submit_start
             logger.exception(f"forward_backward_async submission failed after {elapsed:.1f}s: {e}")
+            self._note(e, "forward_backward")
             raise
         logger.debug(f"forward_backward_async submitted in {time.perf_counter() - fwd_bwd_submit_start:.1f}s")
 
@@ -201,6 +221,7 @@ class PolicyUpdate:
             )
         except Exception as e:
             logger.exception(f"optim_step_async submission failed: {e}")
+            self._note(e, "optim_step")
             raise
         logger.debug(f"optim_step_async submitted in {time.perf_counter() - optim_start:.1f}s")
 
@@ -212,11 +233,15 @@ class PolicyUpdate:
         longer open."""
 
         self._check_guard()
-        all_training_metrics = await self._forward_backward_metrics()
-        self._record_training_metrics(all_training_metrics)
-        optim_result, optim_elapsed = await self._optim_step_result()
-        if self.learner.fail_closed:
-            _refuse_skipped_or_nonfinite(optim_result)
+        try:
+            all_training_metrics = await self._forward_backward_metrics()
+            self._record_training_metrics(all_training_metrics)
+            optim_result, optim_elapsed = await self._optim_step_result()
+            if self.learner.fail_closed:
+                _refuse_skipped_or_nonfinite(optim_result)
+        except Exception as error:
+            self._note(error, "the update's results")
+            raise
         if tally is not None:
             tally.optimizer_steps += 1
         self.learner.policy.optimizer_steps += 1
@@ -231,6 +256,13 @@ class PolicyUpdate:
         if optim_result and optim_result.metrics:
             for key, value in optim_result.metrics.items():
                 self.learner.tracker.scalar(**{f"{self.learner.metric_prefix}optim/{key}": value})
+
+    def _note(self, error: Exception, doing: str) -> None:
+        """A note on ``error`` of the policy's service that names the policy, its service and what failed (``doing``),
+        when the learner is ``named`` (a run of several trained policies)."""
+
+        if self.learner.named:
+            error.add_note(failure_note(self.learner.policy.spec, doing))
 
     def _check_guard(self) -> None:
         """Raise when the learner may not send or count anything now (its ``guard``: a step hook's learner, outside its

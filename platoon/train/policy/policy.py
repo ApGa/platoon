@@ -1,14 +1,14 @@
 """One policy in the trainer process (:class:`Policy`): its spec, its state as training moves it on, and what each start
-does with it: open its training client at the start point, save it whole (a checkpoint) or for its sampler, and take a
-snapshot of its published sampler for inference outside the rollouts; and what others read of it: its scores of other
-rows (a teacher's, :meth:`Policy.score`).
+does with it: open its training client at the start point, save it whole (a checkpoint) or for its sampler, publish
+each new sampler to whoever follows it, and take a snapshot of its published sampler for inference outside the
+rollouts; and what others read of it: its scores of other rows (a teacher's, :meth:`Policy.score`).
 
-Rollout workers never hold one: they sample the sampling client that the trainer publishes for them
-(:mod:`platoon.train.policy.binding`).
+Rollout workers never hold one: they sample the sampling client that the trainer publishes for them, which a subscriber
+of the policy writes to their binding file (:meth:`Policy.subscribe`, :mod:`platoon.train.policy.binding`).
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import tinker
@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 # How many of a policy's scoring calls (Policy.score) are in flight at once, over every group that it scores.
 SCORE_CONCURRENCY = 32
+
+# What a subscriber of a policy's publications is handed each time: the new sampling client and its version.
+Subscriber = Callable[[tinker.SamplingClient, int], None]
 
 
 class Policy:
@@ -56,6 +59,8 @@ class Policy:
         self.info = info
         # The optimizer steps the policy took over the run, its earlier starts' among them.
         self.optimizer_steps = 0
+        # Who is handed each sampler it publishes (subscribe), in the order they subscribed.
+        self._subscribers: list[Subscriber] = []
         if not spec.trainable:
             self.sampling_client = cast(tinker.SamplingClient, info.llm.sampling_client)
 
@@ -163,6 +168,30 @@ class Policy:
             sample_timeout_seconds=llm.sample_timeout_seconds,
             version_now=lambda: self.version,
         )
+
+    def publish(self, sampling_client: tinker.SamplingClient, *, version: int | None = None) -> None:
+        """Make ``sampling_client`` the policy's sampler, in this order: its model gateway samples it, at one version
+        more (at ``version`` instead: the launch's, which a start resumes at), each subscriber is handed it with that
+        version (read once, and only for a subscriber), and the policy holds it."""
+
+        llm = self.info.llm
+        if version is None:
+            llm.update_sampling_client(sampling_client)
+        else:
+            llm.set_version(version)
+            llm.update_sampling_client(sampling_client, increment_version=False)
+        if self._subscribers:
+            published = self.version
+            for subscriber in self._subscribers:
+                subscriber(sampling_client, published)
+        self.sampling_client = sampling_client
+
+    def subscribe(self, subscriber: Subscriber) -> Callable[[], None]:
+        """Hand ``subscriber`` each sampler the policy publishes from now on, with its version (the rl trainer's writes
+        it to the binding file its rollout workers follow).  What ends the subscription."""
+
+        self._subscribers.append(subscriber)
+        return lambda: self._subscribers.remove(subscriber)
 
     async def score(self, datums: Sequence[tinker.Datum]) -> "list[torch.Tensor]":
         """The policy's logprobs of each datum's target tokens under its sampling client, one per target token, aligned

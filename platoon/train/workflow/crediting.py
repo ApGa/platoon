@@ -6,6 +6,11 @@ estimator's ``assign`` itself is awaited through :func:`platoon.train.credit.run
 credit failed because a policy's scoring did (``_credit_failed``) trains nothing.  Without an estimator the workflow
 centers each member's rows itself (``assign_advantages``), as it always did, and none of this runs.
 
+In a run that trains several policies, each row must say which policy it trains, so that the step hands it to that
+policy's learner: the workers tag every row with the agent that produced it, the estimator sees the group's agents, and
+the output holds the rows with their tags (:func:`tags_rows`), whatever the estimator reads.  Every entry then has an
+estimator: ``keyed``, on ``[task, policy, role]``, for one that names none (RFC 0021, D5).
+
 The functions here that take the workflow first are its methods still: ``GroupRolloutWorkflow`` keeps each under its
 name, so to replace one, replace the method, on the class or an instance, not the function.
 """
@@ -37,6 +42,14 @@ def _entry_estimator(workflow: "GroupRolloutWorkflow") -> Any | None:
 
     credit = workflow.entry_credit
     return credit.get(current_entry()) if credit and capabilities_of(workflow).applies_credit else None
+
+
+def tags_rows(workflow: "GroupRolloutWorkflow", estimator: Any) -> bool:
+    """Whether the group's rows carry who produced them, the agent and its policy: the group's ``estimator`` reads
+    agents (``needs_agents``), or the run trains several policies (``trained_policies``), whose rows go each to its own
+    policy's learner."""
+
+    return bool(getattr(estimator, "needs_agents", False)) or len(workflow.trained_policies) > 1
 
 
 def _credit_group(
@@ -122,14 +135,14 @@ def agent_runs(result: TrajectoryCollectionResult, policy: PolicyId) -> dict[str
 def _credited_output(
     workflow: "GroupRolloutWorkflow", output: _TaskRolloutOutput, credit: Credit, kept: Sequence[int]
 ) -> _TaskRolloutOutput | PolicyGroupOutput:
-    """The group's output once its estimator credited it: under an estimator that reads agents, the rows the error-token
-    filter kept (``kept``, their places among the group's rows as they were handed to the estimator,
+    """The group's output once its estimator credited it: when its rows carry tags (:func:`tags_rows`), the rows the
+    error-token filter kept (``kept``, their places among the group's rows as they were handed to the estimator,
     ``credit.samples``) with their tags (:class:`~platoon.train.workflow.output.PolicyGroupOutput`), else ``output`` as
     it is; carrying the credit (its ``credit``) when the estimator has a ``settle``, which the run calls as it files the
     group (:func:`~platoon.train.credit.runtime.settle_credit`)."""
 
     credited: _TaskRolloutOutput | PolicyGroupOutput = output
-    if credit.estimator.needs_agents:
+    if tags_rows(workflow, credit.estimator):
         credited = PolicyGroupOutput(tuple(credit.samples[index] for index in kept), output.report)
     if callable(getattr(credit.estimator, "settle", None)):
         credited.credit = credit

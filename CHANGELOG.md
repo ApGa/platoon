@@ -408,15 +408,15 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 - **Several policies in one run: frozen policies that agents sample or a credit estimator scores with
   (experimental).** `policies:` declares the run's other policies under `train:`'s names (`model_name`,
   `renderer_name`, `renderer_kwargs`, `context_window_length`, `sample_timeout_seconds`, `tinker_base_url`,
-  `load_checkpoint_path`) and `trainable`; `train:` still declares `main`, the policy the run trains, as before. This
-  release trains `main` only: every other policy says `trainable: false` and is frozen, sampled or scoring and never
-  stepped, saved or pruned; it opens only the sampling client it needs, of its base model or of the `tinker://`
-  sampler its `load_checkpoint_path` names. A policy without `tinker_base_url` uses the run's service; each policy
+  `load_checkpoint_path`) and `trainable`; `train:` still declares `main`, the policy the run trains, as before. A
+  frozen policy (`trainable: false`) is sampled or scoring and never stepped, saved or pruned; it opens only the
+  sampling client it needs, of its base model or of the `tinker://` sampler its `load_checkpoint_path` names (a
+  policy the run trains beside `main`: below). A policy without `tinker_base_url` uses the run's service; each policy
   opens a Tinker session of its own, also on a shared service, so that a fatal error on one policy's session never
   ends another's, and an error opening a policy other than `main` names it and its service. `agents:` binds agent
-  roles to policies (`agents.roles.<role>.policy`): the root agent samples `main`, and an agent opened with a role
-  (`ctx.agents.spawn(role=...)`, `POST /v1/platoon/agents`, a program's judge) samples its role's policy for its whole
-  life, through the gateway's runtime of that policy, with its own renderer and tokenizer
+  roles to policies (`agents.roles.<role>.policy`): the root agent samples `agents.policy`, `main` without it, and
+  an agent opened with a role (`ctx.agents.spawn(role=...)`, `POST /v1/platoon/agents`, a program's judge) samples its
+  role's policy for its whole life, through the gateway's runtime of that policy, with its own renderer and tokenizer
   (`ModelGateway.serve_policies`); each of its interactions names that policy (`TinkerLLMInteraction.policy`). A
   frozen policy's agents make no rows, but their rewards and tags reach the credit, each row is stamped with its own
   policy's version, and rollout workers follow one binding file per sampled policy (`model_binding.<id>.pkl`, worker
@@ -424,13 +424,12 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `binds_policies`, which `GroupRolloutWorkflow` declares). `identity.json` records each policy's model, renderer and
   training, a frozen one's sampler, and each role's policy, never a URL, and a resume that changes them stops with
   exit code 78, naming each change. Loading, and `platoon config validate`, refuse an id that is no lowercase name,
-  `policies.main`, a second trainable policy (training several arrives with lockstep multi-policy training, RFC 0021's
-  milestone B4), a policy's `sample_timeout_seconds` that is not a positive number (as `train:`'s), a role bound to
-  an undeclared policy, `agents.policy` other than `main`, roles bound to several policies beside a workflow that
-  binds one, and either key under `trainer: sft`, which rolls nothing out, and warn of a frozen policy nothing uses
-  ([Sample several policies](docs/how-to/train-and-eval.md#sample-several-policies-experimental)).
-  `platoon.experimental` exports `AgentBindings`, and `TrainerSetup` takes `agents`. A run without `policies:` or
-  `agents:` runs as before, request for request.
+  `policies.main`, a policy's `sample_timeout_seconds` that is not a positive number (as `train:`'s), a role bound to
+  an undeclared policy, roles bound to several policies beside a workflow that binds one, and either key under
+  `trainer: sft`, which rolls nothing out, and warn of a frozen policy nothing uses ([Sample several
+  policies](docs/how-to/train-and-eval.md#sample-several-policies-experimental)). `platoon.experimental` exports
+  `AgentBindings`, and `TrainerSetup` takes `agents`. A run without `policies:` or `agents:` runs as before, request
+  for request.
 - **On-policy distillation from a frozen teacher (experimental): `credit: reverse_kl`.** For each training group, a
   frozen teacher (`credit_options.teacher`, a policy of `policies:`) scores every token the student sampled
   (`compute_logprobs`), and each action token's advantage is `-kl_coef * (student logprob - teacher logprob)`, plus
@@ -467,6 +466,44 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   call](docs/how-to/train-and-eval.md#limit-the-tools-each-role-may-call-experimental);
   [`examples/subagents/read-only-subagents.yaml`](examples/subagents/read-only-subagents.yaml) trains the subagents
   example with subagents that may only read). A run without `tools:` runs as before, request for request.
+
+- **Several policies trained in lockstep (experimental).** A policy of `policies:` now trains unless it says
+  `trainable: false`, with `train:`'s names, and `train:`'s values when unset, for its own `lora_rank`, `optimizer`,
+  `loss_fn`, `loss_fn_config` (when unset, `train:`'s only if its loss is `train:`'s, else none) and `max_staleness`
+  (when unset, its entry's bound first), and `load_optimizer_state` to start from its checkpoint's Adam state too, as
+  `checkpoint.load_optimizer_state` does `main`'s; `agents.policy`, the root agent's, may be any trained policy. Every
+  step trains every policy (RFC 0021's lockstep, RFC 0003's milestone M2): each group is credited once, over every
+  agent, then its rows split by the policy that sampled them; each policy's rows are judged stale against its own
+  version and bound (`StaleFilter.for_policy`, also per datum under `train.stale_filter: datum`) and dropped alone;
+  each microbatch sends each policy's rows to its own training client, under its own loss, and each minibatch submits
+  every optimizer step before awaiting any; each policy that stepped publishes its own sampler (`Policy.publish`, whose
+  subscribers, `Policy.subscribe`, write each sampled policy's binding for the rollout workers), and one with no rows
+  in a step does not step and keeps its version. The dispatcher's horizon counts the smallest bound of the trained
+  policies the agents sample. An entry without `credit:` credits with `keyed` on `[task, policy, role]` (RFC 0021's
+  D5), and every row is tagged with its agent whatever the estimator. Each checkpoint saves every trained policy: the
+  others first, at the same time, each into `<run>/policies/<id>/checkpoints.jsonl` on its own service, then `main`,
+  whose row names each other policy's by its `state_path` (`loop_state.policies`, a key the run claims on resume) and
+  commits the checkpoint; a resume takes the newest `main` row whose named rows every policy still has, skipping newer
+  ones with a warning that `lock.json` records (`policies_restore`), and stopping with exit code 78 when none holds.
+  Each policy's recovery checkpoints are pruned on its own service, keeping the rows that the newest `main` row and
+  the newest `keep_recovery` `main` recovery rows name; a checkpoint's save of a policy that did not step holds weights
+  no rollout samples, and is pruned as any older checkpoint is. `main`'s metrics keep their names, each other policy's
+  go under `policies/<id>/`, and evaluations record each sampled policy's version (`versions`); `run.clocks` maps
+  every trained policy to the run's one clock. An error of one policy's service fails the step, with a note that names
+  the policy and its service. Step hooks compose with lockstep: a hook updates any trained policy, `end.train` and
+  `end.learner` taking its id, through that policy's own learner, its metrics under that policy's prefix; each policy
+  that the step or a hook updated publishes once, the hooks hear every trained policy's publication, and each other
+  policy's row counts its hooks' updates (`policies/<id>/batch/hook_optimizer_updates`); a trainer of its own that
+  trains several policies (`run.learner`, `run.end_step()`) saves one checkpoint of them all on the cadence.
+  Loading, and `platoon config validate`, refuse a trained policy that no agent samples, a frozen `agents.policy`, a
+  frozen policy with a trained policy's keys, `load_optimizer_state` without `load_checkpoint_path`, an out-of-range
+  key, naming its policy (`policies.<id>: ...`), and a policy's `batch_size` or `checkpoint`, which arrive with
+  independent stepping (RFC 0021's milestone B4b); `identity.json` records each policy's training, and a resume that
+  changes it stops with exit code 78 ([Train several policies in
+  lockstep](docs/how-to/train-and-eval.md#train-several-policies-in-lockstep-experimental);
+  [`examples/two-agent-lockstep`](examples/two-agent-lockstep/README.md) trains the subagents example's delegator
+  and its workers as two policies, on one service and on two). A run of one trained policy runs as before, request
+  for request.
 
 ### Changes
 

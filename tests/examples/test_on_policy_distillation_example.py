@@ -236,9 +236,7 @@ def test_a_teacher_response_of_the_wrong_length_fails_its_group_and_the_run_trai
 def test_a_teacher_s_sample_timeout_that_is_not_positive_stops_validate_and_train(seconds, tmp_path, capsys):
     key = f"policies.teacher.sample_timeout_seconds={seconds}"
     assert exit_code("config", "validate", str(SHARED), key) == 78
-    assert "the sample_timeout_seconds of the policy of Qwen/Qwen3-32B must be a positive number of seconds" in (
-        capsys.readouterr().out
-    )
+    assert "policies.teacher: sample_timeout_seconds must be a positive number of seconds" in capsys.readouterr().out
 
     service = checks.FakePolicyService()
     with serve_policy(bisect), checks._faked(service), checks._restored_signals():

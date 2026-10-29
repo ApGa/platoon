@@ -24,7 +24,7 @@ from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.policy.checkpoints import SAVE_CHECKPOINT_TIMEOUT_S, Waiter
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, policy_specs
+from platoon.train.policy.spec import MAIN, PolicySpec, policy_specs
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
 from platoon.utils.stats_tracker import get as get_tracker
 
@@ -136,6 +136,15 @@ class FakeModelInfo:
     renderer_name: str = "r"
     renderer: Any = None
     tokenizer: Any = None
+
+
+def named_policy(policy_id: str, *, url: str | None = None) -> Policy:
+    """A trained policy ``policy_id`` of a run of several, on the service at ``url`` (None: the run's), over a model
+    gateway that samples nothing (:class:`FakeModelInfo`), whose ``llm.version`` is its version: for the tests of the
+    parts that read a policy's id, spec and version."""
+
+    info: Any = FakeModelInfo()
+    return Policy(PolicySpec(policy_id, model_name="m", renderer_name="r", tinker_base_url=url), info)
 
 
 class OneClientService:

@@ -21,7 +21,7 @@ import platoon.train.tinker  # noqa: F401
 from platoon.config_defs import RolloutConfig
 from platoon.task import Task
 from platoon.train.config_defs import WorkflowConfig
-from platoon.train.policy.binding import publish_frozen_bindings
+from platoon.train.policy.binding import publish_other_bindings
 from platoon.train.policy.spec import MAIN, AgentBindings
 from platoon.train.workers import entrypoint
 from platoon.train.workers import run as run_module
@@ -117,7 +117,7 @@ def test_the_fork_server_builds_every_sampled_policy_s_renderer_ahead(tmp_path):
     assert models == ["student", "judge-model"]
 
 
-def test_the_trainer_publishes_the_frozen_policies_bindings_before_the_first_rollout():
+def test_the_trainer_publishes_the_other_sampled_policies_bindings_before_the_first_rollout():
     published: list[tuple] = []
     judge = SimpleNamespace(id="judge", sampling_client="judge sampler", version=0)
     # The agents' default, main, is not the first policy their sampling lists here: it is named, not placed.
@@ -126,7 +126,7 @@ def test_the_trainer_publishes_the_frozen_policies_bindings_before_the_first_rol
     def publish(*args: Any, **kwargs: Any) -> None:
         published.append((args, kwargs))
 
-    publish_frozen_bindings(policies, "workflow", publish, required=True)
+    publish_other_bindings(policies, "workflow", publish, required=True)
     assert published == [(("workflow", "judge sampler", 0), {"required": True, "policy": "judge"})]
 
 
@@ -158,7 +158,10 @@ def test_an_evaluation_publishes_the_frozen_bindings_of_its_state_s_policies_if_
     state: Any = SimpleNamespace(train_step=1, stats_logger=logger, evaluations_path=None)
     assert evaluated(state) == [((workflow, "main sampler", 1), {})]
     judge = SimpleNamespace(id="judge", sampling_client="judge sampler", version=0)
-    state.policies = SimpleNamespace(sampled=lambda: [SimpleNamespace(id=MAIN), judge], agents=AgentBindings(MAIN))
+    main = SimpleNamespace(id=MAIN)
+    state.policies = SimpleNamespace(
+        sampled=lambda: [main, judge], trainable=lambda: [main], agents=AgentBindings(MAIN)
+    )
     assert evaluated(state) == [
         ((workflow, "main sampler", 1), {}),
         ((workflow, "judge sampler", 0), {"required": False, "policy": "judge"}),

@@ -47,11 +47,18 @@ class StepGeometry:
 @dataclass
 class MicrobatchFill:
     """A microbatch as a step fills it: the datums of its groups, as the step trains them
-    (:func:`~platoon.train.step.datums._step_datums`), and the places of the microbatch taken so far: each group the
-    step dequeued, or, under a group admission rule, each admitted group, which counts toward the batch."""
+    (:func:`~platoon.train.step.datums._step_datums`), the leader's (``datums``: every datum, in a run of one trained
+    policy) and each other trained policy's (``others``, by policy); and the places of the microbatch taken so far: each
+    group the step dequeued, or, under a group admission rule, each admitted group, which counts toward the batch."""
 
     datums: list[tinker.Datum] = field(default_factory=list)
     places: int = 0
+    others: dict[str, list[tinker.Datum]] = field(default_factory=dict)
+
+    def empty(self) -> bool:
+        """Whether it holds no datum of any policy."""
+
+        return not self.datums and not any(self.others.values())
 
 
 class Prepared(NamedTuple):
