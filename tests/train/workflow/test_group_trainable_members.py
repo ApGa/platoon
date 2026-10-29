@@ -48,9 +48,9 @@ def _datum(reward: float) -> tinker.Datum:
     )
 
 
-def _member(kind: str, reward: float) -> output_module._SingleRolloutOutcome:
+def _member(kind: str, reward: float) -> output_module.MemberOutcome:
     if kind == CRASHED:
-        return output_module._SingleRolloutOutcome(
+        return output_module.MemberOutcome(
             result=None, workload=RolloutWorkload(), observed=False, disposition="worker_crashed"
         )
     completed = kind == COMPLETED
@@ -83,7 +83,7 @@ def _member(kind: str, reward: float) -> output_module._SingleRolloutOutcome:
         policy_eligible_datums=1 if completed else 0,
         post_sampling_datums=1 if completed else 0,
     )
-    return output_module._SingleRolloutOutcome(result=result, workload=workload, observed=True)
+    return output_module.MemberOutcome(result=result, workload=workload, observed=True)
 
 
 class _Workflow(group_module.GroupRolloutWorkflow):

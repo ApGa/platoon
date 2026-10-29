@@ -47,12 +47,12 @@ def trained_rows(output: Any) -> Sequence[tinker.Datum]:
     return policy_rows(output, (MAIN,))[MAIN]
 
 
-def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:
+def _step_datums(datums: Sequence[tinker.Datum]) -> list[tinker.Datum]:
     """A group's datums as a step trains them: each its own datum, with its own loss inputs, so that the step's batch
     transforms, which set loss inputs in place, leave the group as it settled; a checkpoint that keeps a group a dropped
     step had dequeued then keeps it as it settled, and the step after the resume transforms it once."""
 
-    return [tinker.Datum(model_input=datum.model_input, loss_fn_inputs=dict(datum.loss_fn_inputs)) for datum in rollout]
+    return [tinker.Datum(model_input=datum.model_input, loss_fn_inputs=dict(datum.loss_fn_inputs)) for datum in datums]
 
 
 def _kept_datums(datums: list[tinker.Datum], masked: Collection[int]) -> list[tinker.Datum]:

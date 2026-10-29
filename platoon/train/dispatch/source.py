@@ -28,9 +28,8 @@ Each part is a module function that takes the source:
 - what a checkpoint saves of the draws: :mod:`platoon.train.checkpoints.saving`; taking it up:
   :mod:`platoon.train.checkpoints.resume`.
 
-A trainer gets the start's source from its run (:meth:`~platoon.train.trainer.run.TrainerRun.rollouts`).  The rl
-trainer's is a subclass of its own: its steps of opening, saving and taking up the draws go through the trainer's
-methods of their names, which tests replace, and which call these functions.
+A trainer gets the start's source from its run (:meth:`~platoon.train.trainer.run.TrainerRun.rollouts`), the rl
+trainer over the tasks it holds.
 """
 
 import asyncio
@@ -45,11 +44,11 @@ from platoon.train.credit.runtime import CREDIT_KEY, load_credit_states
 from platoon.train.dataloader import PlatoonTinkerDataloader, _run_steps
 from platoon.train.dispatch import setup
 from platoon.train.dispatch.horizons import Horizons
-from platoon.train.dispatch.settled import _Settled, _settled
+from platoon.train.dispatch.settled import SettledGroup, as_settled_group
 from platoon.train.dispatch.shares import Shares
 from platoon.train.task_records import TaskRecorder, record_lost_state, resume_record
 from platoon.train.task_stats import DISPATCH_KEY, MAIN
-from platoon.train.trainer.waiting import _next_rollout
+from platoon.train.trainer.waiting import _next_group
 from platoon.utils.stats_tracker import get as get_tracker
 
 if TYPE_CHECKING:
@@ -113,7 +112,7 @@ class RolloutSource:
         self.dispatcher: Dispatcher | None = None
         # Set as it starts (start): the queue its groups settle into, the watchdog that running groups feed, and the
         # tracker their statistics go to when no group output carries them.
-        self.results: asyncio.Queue[_Settled] | None = None
+        self.results: asyncio.Queue[SettledGroup] | None = None
         self.watchdog: Watchdog | None = None
         self.tracker: StatsTracker | None = None
 
@@ -232,7 +231,7 @@ class RolloutSource:
         self,
         task_group: asyncio.TaskGroup,
         *,
-        results: "asyncio.Queue[_Settled] | None" = None,
+        results: "asyncio.Queue[SettledGroup] | None" = None,
         watchdog: "Watchdog | None" = None,
         tracker: "StatsTracker | None" = None,
         stop: asyncio.Event | None = None,
@@ -249,9 +248,9 @@ class RolloutSource:
         self.tracker = tracker if tracker is not None else get_tracker("train")
         return setup._dispatch(self, task_group, stop=stop)
 
-    async def take(self, n: int, *, stop: asyncio.Event | None = None) -> list[_Settled]:
+    async def take(self, n: int, *, stop: asyncio.Event | None = None) -> list[SettledGroup]:
         """The next ``n`` settled groups, in the order they settled (the groups a resume kept first), each counted as
-        dequeued: its slot of the horizon goes to the next draw.  A group that failed has no output (``rollout``
+        dequeued: its slot of the horizon goes to the next draw.  A group that failed has no output (``output``
         None).  Once ``stop`` is set (the run's shutdown request, on which the dispatcher starts no more groups),
         ``TrainInterrupted`` instead, as the groups it waits for may never start: the step commits none of its groups,
         which a checkpoint keeps.  Under a group admission rule only the rl trainer's steps consume groups, since they
@@ -264,7 +263,7 @@ class RolloutSource:
         assert self.results is not None and self.dispatcher is not None  # start() started the dispatcher
         groups = []
         for _ in range(n):
-            groups.append(_settled(await _next_rollout(self.results, stop, interruptible=stop is not None)))
+            groups.append(as_settled_group(await _next_group(self.results, stop, interruptible=stop is not None)))
             self.dispatcher.dequeued()
         return groups
 
@@ -329,13 +328,13 @@ def training_tasks(tasks: "TaskSources") -> Any:
     return tasks.train_dataset if items is None else items
 
 
-def _fate_of(group: _Settled | None) -> str | None:
+def _fate_of(group: SettledGroup | None) -> str | None:
     """The fate of a group a step consumed, which the step did not decide: ``consumed``, or ``failed`` for one without
     output; None for a draw whose group the dispatcher does not hold."""
 
     if group is None:
         return None
-    return "consumed" if group.rollout is not None else "failed"
+    return "consumed" if group.output is not None else "failed"
 
 
 def _begin_task_records(source: RolloutSource, record: Any, step: int) -> None:

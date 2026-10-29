@@ -7,11 +7,13 @@
   (:func:`~fakes.launch.built_workflows`);
 - ``trainer``: the rl trainer over fake tasks on a fake Tinker service (:func:`~fakes.trainer.make_trainer`), whose
   saves it records (``SaveLog``) and whose logged steps it records (``StepLog``, the ``logged`` of every builder here);
-  its workflow, datum and training client; and a policy of a run that trains several
-  (:func:`~fakes.trainer.named_policy`);
+  its workflow, datum and training client; a policy of a run that trains several (:func:`~fakes.trainer.named_policy`);
+  a trainer whose steps' saves a test drives itself (:func:`~fakes.trainer.checkpointing_trainer`); and the draws of a
+  trainer's last start (:func:`~fakes.trainer.draws_of`);
 - ``tinker_service``: a fake Tinker service with tinker-cookbook's own checkpoint saving, and the trainer on it
   (:func:`~fakes.tinker_service.make_service_trainer`), for the runs that save, prune and resume checkpoints;
-- ``loop``: the rl trainer's train loop over groups a test scripts, without the start's dispatcher or saves;
+- ``loop``: the rl trainer's train loop over groups a test scripts, without the start's dispatcher, its full saves
+  recorded, not written;
 - ``runs``: the runs the dispatch, task and workflow tests drive: groups that say which rows a step trained, the
   training client that records them, one start on the fake service, and what a crash after a checkpoint leaves;
 - ``independent``: starts of two policies that step independently on two fake services whose training clients

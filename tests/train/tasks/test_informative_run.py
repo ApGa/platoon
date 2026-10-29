@@ -23,7 +23,7 @@ from fakes.pass_rate import (
     trainer_arguments,
 )
 from fakes.runs import check_fates_once
-from fakes.trainer import StepLog, make_trainer
+from fakes.trainer import StepLog, draws_of, make_trainer
 
 from platoon.train.task_stats import read_events
 
@@ -127,7 +127,7 @@ def test_pass_rate_with_informative_on_a_capped_entry_sees_every_settled_group(t
     asyncio.run(asyncio.wait_for(trainer.train(train_workflow=SeededWorkflow(config)), 300))
     assert len(logged) == 12
     events = list(read_events(Path(trainer.run_log_path)))
-    store = trainer._recorder.store
+    store = draws_of(trainer).recorder.store
     settled = sum(1 for event in events if event["event"] == "settle")
     assert sum(store.counts(task).groups for task in store.task_ids()) == settled  # rejected groups included
     prefix = "train/sampler/environment/hard/"

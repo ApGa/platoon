@@ -185,8 +185,9 @@ failures = []
 checked = 0
 
 
-def read(name, module, attribute, expected, new):
+def read(name, module, attribute, expected, new, current=None):
     global checked
+    current = current or attribute  # the name it has in its new module
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         value = getattr(module, attribute)
@@ -197,7 +198,7 @@ def read(name, module, attribute, expected, new):
         failures.append(f"{name}.{attribute} is not {new}.{attribute}")
     if len(warned) != 1:
         failures.append(f"{name}.{attribute} warned {len(warned)} times")
-    elif f"{new}.{attribute}" not in warned[0] or f"0.6.0 removes {name}.{attribute}" not in warned[0]:
+    elif f"{new}.{current}" not in warned[0] or f"0.6.0 removes {name}.{attribute}" not in warned[0]:
         failures.append(f"{name}.{attribute}: {warned[0]}")
 
 
@@ -207,7 +208,7 @@ for name in shims:
         module = importlib.import_module(name)
     if any(issubclass(item.category, PlatoonDeprecationWarning) for item in caught):
         failures.append(f"importing {name} warns")
-    targets = module.__moved__
+    targets, renamed = module.__moved__, module.__renamed__
     own = set(vars(module))  # what the shim defines itself, before any name is read through it
     if isinstance(targets, str):
         target = importlib.import_module(targets)
@@ -217,15 +218,17 @@ for name in shims:
     names = {attribute: new for attribute, new in names.items() if attribute not in own}
     for attribute, new in names.items():
         shown = public.get(name, {}).get(attribute, new)  # the module its warning names
-        read(name, module, attribute, getattr(importlib.import_module(new), attribute), shown)
+        current = renamed.get(attribute, attribute)  # its name there, which 0.5.0 may have changed
+        read(name, module, attribute, getattr(importlib.import_module(new), current), shown, current)
     # A split module's names map to the modules that define them, among its new modules (where a name set through it
     # is set); a package that re-exports one, which its warning names, exports the same object.
     for attribute, new in (names.items() if name in homes else ()):
-        value = vars(importlib.import_module(new)).get(attribute, MISSING)
+        current = renamed.get(attribute, attribute)
+        value = vars(importlib.import_module(new)).get(current, MISSING)
         if new not in homes[name] or value is MISSING:
             failures.append(f"{name}.{attribute}: {new} is not one of its new modules that holds it")
         elif inspect.isclass(value) or inspect.isfunction(value):
-            if value.__name__ == attribute and value.__module__ != new:  # a definition (not an alias of one)
+            if value.__name__ == current and value.__module__ != new:  # a definition (not an alias of one)
                 failures.append(f"{name}.{attribute} maps to {new}, not to {value.__module__}, which defines it")
         shown = public.get(name, {}).get(attribute)
         if shown is not None and getattr(importlib.import_module(shown), attribute) is not value:
@@ -278,7 +281,7 @@ def test_each_moved_module_re_exports_the_same_objects_and_warns_once_per_name()
 
 
 _PATCH_CHECK = """
-import importlib, json, pickle, sys, warnings
+import importlib, json, pickle, sys, types, warnings
 from unittest import mock
 
 import pytest
@@ -293,6 +296,7 @@ import platoon.train.tinker.workflows.group_rollout_workflow as old_group
 from platoon.train.checkpoints import saving
 from platoon.train.credit import group as credit
 from platoon.train.policy import service
+from platoon.train.trainer import api
 from platoon.train.trainer import rl as trainer
 from platoon.train.trainer import signals, waiting
 from platoon.train.workers import entrypoint, supervisor
@@ -352,6 +356,12 @@ with mock.patch("platoon.train.tinker.rl.Watchdog", fake):
           signals.Watchdog is fake and saving.Watchdog is fake and trainer.Watchdog is fake)
 check("and its undoing puts it back in each", signals.Watchdog is watchdog and saving.Watchdog is watchdog)
 check("and leaves platoon.train's own", platoon.train.Watchdog is watchdog and "Watchdog" not in vars(rl))
+# The stats logger a start opens is made of the name the old module imported (as platoon 0.4.0's tests patched it).
+stats_logger = api.StatsLogger
+with mock.patch("platoon.train.tinker.rl.StatsLogger") as fake_logger:
+    opened = trainer.PlatoonTinkerRLTrainer._new_stats_logger(types.SimpleNamespace(config="config"), "logger config")
+    check("a patch of rl.StatsLogger reaches the stats logger a start opens", opened is fake_logger.return_value)
+check("and its undoing puts the class back", api.StatsLogger is stats_logger and "StatsLogger" not in vars(rl))
 trainer_class = trainer.PlatoonTinkerRLTrainer
 patcher = pytest.MonkeyPatch()
 patcher.setattr(rl, "PlatoonTinkerRLTrainer", fake)
@@ -614,19 +624,21 @@ def patching(way, name, module, attribute, value):
     return monkeypatched(module, attribute, value)
 
 
-def sweep(name, module, attribute, original, plan, expected):
+def sweep(name, module, attribute, original, plan, expected, current=None):
     # Patch the name in each way of the plan, nested; through each patch, and through each outer one again once the
     # inner one is undone, the name reads as patched through the old path and the patch is in the modules expected
-    # (a delete: gone from those that had it); once all are undone, every platoon module holds what it held.
+    # (a delete: gone from those that had it), under its name there (``current``, for a name 0.5.0 renamed); once all
+    # are undone, every platoon module holds what it held.
     global checked
     checked += 1
+    current = current or attribute
     where = f"{name}.{attribute} [{' > '.join(plan)}]"
-    before = bindings(attribute)
+    before = bindings(current)
     had = [n for n, v in before.items() if v is not MISSING]
     values = [DELETE if way == "monkeypatch.delattr" else Fake() for way in plan]
 
     def observe(value, point):
-        now = bindings(attribute)
+        now = bindings(current)
         if value is DELETE:
             read = not hasattr(module, attribute)
             reached, want = sorted(n for n in had if now.get(n, MISSING) is MISSING), sorted(set(expected) & set(had))
@@ -649,22 +661,22 @@ def sweep(name, module, attribute, original, plan, expected):
         nest(0)
     except Exception as error:
         failures.append(f"{where}: raised {error!r}")
-    after = bindings(attribute)
+    after = bindings(current)
     changed = sorted(n for n, v in before.items() if after.get(n, MISSING) is not v)
     if changed:
         failures.append(f"{where}: after its undoing, {changed} differ")
         for n in changed:  # as it was, for the checks that follow
             if before[n] is MISSING:
-                vars(sys.modules[n]).pop(attribute, None)
+                vars(sys.modules[n]).pop(current, None)
             else:
-                vars(sys.modules[n])[attribute] = before[n]
+                vars(sys.modules[n])[current] = before[n]
     if getattr(module, attribute, MISSING) is not original:
         failures.append(f"{where}: after its undoing, the old path does not read the original")
 
 
 for name in shims:
     module = importlib.import_module(name)
-    targets = module.__moved__
+    targets, renamed = module.__moved__, module.__renamed__
     places = [targets] if isinstance(targets, str) else homes.get(name, [])
     package = hasattr(module, "__path__")
     originals = {}
@@ -673,7 +685,8 @@ for name in shims:
             originals[attribute] = getattr(module, attribute)  # importing what reading it imports, first
     snapshot = namespaces()
     for attribute, original in originals.items():
-        before = bindings(attribute)
+        current = renamed.get(attribute, attribute)
+        before = bindings(current)
         if package or attribute in vars(module):  # an old package's names are its own, and so are a shim's own
             expected = [name]
         elif attribute == "logger":  # each new module's own
@@ -681,7 +694,7 @@ for name in shims:
         else:  # where the old module's code that read it is now: each new module that holds its object
             expected = [m for m in places if before.get(m, MISSING) is original]
         for plan in PLANS:
-            sweep(name, module, attribute, original, plan, expected)
+            sweep(name, module, attribute, original, plan, expected, current)
     # The builtins' names that the moved code reads (two for a package, whose own code reads none): a patch of one is
     # in each new module, as it was in the old module, or kept by the package.
     names = sorted((read_by(places) & BUILTINS) - set(originals)) if places else ["len", "print"]

@@ -284,9 +284,8 @@ def test_the_rl_trainer_s_steps_save_through_the_start_it_runs_whatever_a_subcla
 def test_a_start_s_steps_never_save_outside_the_start_that_train_runs():
     config = make_config()
     trainer: Any = PlatoonTinkerRLTrainer(config, [], policies=fake_policies(config))
-    trainer._rollouts = object()  # a start's prepare() opened its draws, but train() did not record that start
     with pytest.raises(RuntimeError, match="steps save through the start train"):
-        trainer._checkpoints(object())
+        trainer._checkpoints()
 
 
 def test_the_rl_trainer_refuses_a_setup_whose_policies_are_not_its_config_s(tmp_path):
@@ -352,30 +351,19 @@ def test_every_trained_policy_steps_on_the_run_s_one_clock():
     assert list(clocks) == [MAIN, "worker"] and all(each is clock for each in clocks.values())
 
 
-def test_the_loops_state_reads_and_writes_the_step_and_the_event_on_the_run_s_clock():
+def test_the_loops_state_reads_the_step_and_the_event_of_its_end_on_the_run_s_clock():
     clock = StepClock(step=2, updated=asyncio.Event())
     parts: dict[str, Any] = {
         "config": make_config(),
         "shutdown_event": asyncio.Event(),
         "train_dataloader": SimpleNamespace(),
         "eval_dataloader": None,
-        "sampling_client_step": 0,
         "stats_logger": SimpleNamespace(),
         "train_tracker": SimpleNamespace(),
     }
-    state = TrainLoopSharedState(**parts, clock=clock, model_info=SimpleNamespace())
-    state.train_step += 1
-    assert (clock.step, state.sampling_client_updated_event) == (3, clock.updated)
-    with pytest.raises(TypeError, match="clock or the loops' step and event, not both: given clock and train_step"):
-        TrainLoopSharedState(**parts, clock=clock, train_step=0)
-
-    # Made as platoon 0.4.0 made it: a clock of its own, over the step and the event, which feeds the state's watchdog.
-    event = asyncio.Event()
-    watchdog: Any = SimpleNamespace()
-    own: Any = TrainLoopSharedState(
-        **parts, train_step=5, sampling_client_updated_event=event, watchdog=watchdog, model_info=SimpleNamespace()
-    )
-    assert (own.clock.step, own.clock.updated is event, own.clock.watchdog is watchdog) == (5, True, True)
+    state = TrainLoopSharedState(**parts, clock=clock, policies=fake_policies(parts["config"]))
+    clock.advance()
+    assert (state.train_step, state.step_ended, state.step_ended.is_set()) == (3, clock.updated, True)
 
 
 @pytest.mark.parametrize(

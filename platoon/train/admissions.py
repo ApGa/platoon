@@ -418,19 +418,19 @@ class AdmissionSet:
             return self.samplers.view(now, flush=False)
         return TaskStatsView(TaskStatsStore([], {}, column=self.label_column), now=now, live=False)
 
-    def at_settle(self, draw: Any, rollout: Any, record: GroupRecord | None, *, now: int) -> tuple[Admission, str]:
+    def at_settle(self, draw: Any, output: Any, record: GroupRecord | None, *, now: int) -> tuple[Admission, str]:
         """The decision on the group of ``draw`` (a :class:`~platoon.train.dispatch.dispatcher.BoundDraw`) that settled
-        with ``rollout`` (None: its workflow failed), whose record in the statistics is ``record`` (None when they
+        with ``output`` (None: its workflow failed), whose record in the statistics is ``record`` (None when they
         stopped or never started), and the qualified name of the rule that decides it.  A failed group is rejected
         with reason ``failed``, its rule not asked.  Otherwise the rule decides on the record, or on one built from the
         draw and the output; anything on that path that raises, or an answer outside the contract, admits the group,
         logged once per rule and counted (``errors``).  Never raises."""
 
         rule = self.rule(draw.entry)
-        if rollout is None:
+        if output is None:
             return Admission(False, "failed"), rule.name
         try:
-            group = record if record is not None else self._record(draw, rollout)
+            group = record if record is not None else self._record(draw, output)
             self.calls += 1
             answer = rule.instance.admit(group, self.view(now))
             if inspect.isawaitable(answer):
@@ -465,7 +465,7 @@ class AdmissionSet:
                 )
         return decision, rule.name
 
-    def _record(self, draw: Any, rollout: Any) -> GroupRecord:
+    def _record(self, draw: Any, output: Any) -> GroupRecord:
         """A record of the group of ``draw`` when the statistics have none: built from the draw and its output."""
 
         from platoon.train.task_records import group_record
@@ -483,7 +483,7 @@ class AdmissionSet:
             score=None,
             position=draw.position,
             drawn_at={},
-            output=rollout,
+            output=output,
         )
 
     # --- what a step counts -------------------------------------------------------------------------------------------
@@ -491,11 +491,11 @@ class AdmissionSet:
     def dequeued(self, label: str | None, kind: str, item: Any) -> None:
         """Count an item the current step dequeued, of ``label``: an ``admitted`` group (with the reason it was admitted
         with), a ``stale`` one, a kept ``failed`` one, or a ``marker`` of a group rejected or failed when it settled
-        (``item``, the step's :class:`~platoon.train.dispatch.settled._Settled`); and, of those with an output,
+        (``item``, the step's :class:`~platoon.train.dispatch.settled.SettledGroup`); and, of those with an output,
         whether it was informative (``admission/.../informative_rate``)."""
 
         step = self.step
-        output = getattr(item, "rollout", None)
+        output = getattr(item, "output", None)
         record = getattr(item, "record", None)
         verdict = record.verdict if record is not None else report_of(output).verdict
         entry = getattr(item, "entry", None)

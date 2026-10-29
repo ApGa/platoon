@@ -123,8 +123,8 @@ platoon train my_run.yaml
 **Reference**: [CLI](reference/cli.md), [config](reference/config.md), [Python API](reference/api.md),
 [experimental API](reference/experimental.md).
 
-**Background**: [Architecture](architecture.md) explains the design; the [RFCs](rfcs/README.md) propose what
-comes next.
+**Background**: [Architecture](architecture.md) explains the design; [the training code](training-code.md) maps the
+trainer's code for contributors; the [RFCs](rfcs/README.md) propose what comes next.
 
 ## Coming from the original platoon?
 

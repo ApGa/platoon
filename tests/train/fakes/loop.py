@@ -1,19 +1,17 @@
 """Run the rl trainer's train loop over groups a test scripts, on CPU, as a start runs it but without the start's
-dispatcher or saves.
+dispatcher.
 
 :func:`loop_trainer` builds the trainer with its constructor, over a fake policy (``fakes.trainer``) whose training
-client is the test's; the rollout client's metrics start afresh.  :func:`loop_state` is what a start's loops share (a
+client is the test's and whose full saves are recorded, not written (:func:`saves_of`), in the start its steps save
+through; the rollout client's metrics start afresh.  :func:`loop_state` is what a start's loops share (a
 ``TrainLoopSharedState`` over the trainer's policies and a step clock whose event counts its sets), at the step and the
-policy version the test starts from.  :func:`run_train_loop` runs ``_train_loop`` over ``outputs``, which settle into
-the loop's queue in order before its first step, or one at a time, late, and stops with the last step.
+policy version the test starts from.  :func:`run_train_loop` runs the train loop
+(:func:`~platoon.train.trainer.loops._train_loop`) over ``outputs``, which settle into the loop's queue in order before
+its first step, or one at a time, late, and stops the loops after the last step, as a start does.
 
-The trainer's seams they replace:
-
-- ``_save_checkpoint_and_get_sampling_client`` (:func:`loop_trainer`): each step's save, an ``AsyncMock`` that returns a
-  sampling client, so a test reads what each step saved from its calls;
-- ``_dispatch`` (:func:`run_train_loop`): the start's dispatcher, which would start the groups; the test's outputs
-  settle into the queue instead;
-- ``shutdown_loops`` (:func:`run_train_loop`): an ``AsyncMock``, as no rollout or evaluation loop runs beside.
+The trainer's ``_dispatch``, which would start the dispatcher of the start's groups, is replaced
+(:func:`run_train_loop`): the test's outputs settle into the queue instead, and the loop tells no dispatcher of its
+steps.
 """
 
 from __future__ import annotations
@@ -21,15 +19,16 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from typing import Any
-from unittest.mock import AsyncMock
 
-from fakes.trainer import FakePolicy, OneClientService, StepLog, TrainingClient
+from fakes.trainer import FakePolicy, OneClientService, SaveLog, StepLog, TrainingClient
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.policy.policy import adam_params
 from platoon.train.policy.set import PolicySet
 from platoon.train.tinker.rollout_metrics import reset_monitors_for_tests
+from platoon.train.trainer.loops import _train_loop
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
-from platoon.train.trainer.run import StepClock
+from platoon.train.trainer.run import StepClock, TrainerRun
+from platoon.train.trainer.signals import TerminateTrainLoop
 from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.utils.stats_tracker import StatsTracker
 
@@ -55,19 +54,24 @@ def loop_trainer(
 ) -> PlatoonTinkerRLTrainer:
     """The trainer of ``config`` over ``train_dataset`` (the rows its steps' metrics are labelled by) and
     ``eval_dataset``, on a fake policy whose training client is ``training_client`` (a ``fakes.trainer.TrainingClient``
-    when None), whose steps' saves are an ``AsyncMock``."""
+    when None), whose steps save through a start of the trainer, as ``train()`` records it: its full saves are
+    recorded (:func:`saves_of`), and a weights-only save asks the training client."""
 
     service = OneClientService(training_client if training_client is not None else TrainingClient())
-    trainer = PlatoonTinkerRLTrainer(
-        config,
-        list(train_dataset),
-        eval_dataset,
-        policies=PolicySet([FakePolicy(config, service.service_client)]),
-    )
-    trainer.policies[trainer.policies.leader].training_client = service.training_client
-    trainer._save_checkpoint_and_get_sampling_client = AsyncMock(return_value=object())
+    policy = FakePolicy(config, service.service_client, saves=SaveLog())
+    trainer = PlatoonTinkerRLTrainer(config, list(train_dataset), eval_dataset, policies=PolicySet([policy]))
+    policy.training_client = service.training_client
+    trainer._run = TrainerRun(trainer)
     reset_monitors_for_tests()
     return trainer
+
+
+def saves_of(trainer: PlatoonTinkerRLTrainer) -> SaveLog:
+    """The full checkpoints the steps of a :func:`loop_trainer` saved, in order, each with its ``loop_state``."""
+
+    policy = trainer.policies[trainer.policies.leader]
+    assert isinstance(policy, FakePolicy) and policy.saves is not None
+    return policy.saves
 
 
 def loop_state(
@@ -98,7 +102,6 @@ def loop_state(
         eval_dataloader=None,
         policies=trainer.policies,
         clock=StepClock(step=start_batch, updated=CountingEvent()),
-        sampling_client_step=policy_version,
         stats_logger=StepLog(),
         train_tracker=train_tracker if train_tracker is not None else StatsTracker("train"),
         watchdog=watchdog,
@@ -114,14 +117,15 @@ def run_train_loop(
     settle_after: float | None = None,
 ) -> list[dict[str, Any]]:
     """Run ``trainer``'s train loop from the state's step for ``steps`` steps over ``outputs``, which settle in order
-    before the first step, or each ``settle_after`` seconds after the one before; each step's logged stats."""
+    before the first step, or each ``settle_after`` seconds after the one before, until the loops stop; each step's
+    logged stats."""
 
     async def settle_late(results):
         for output in outputs:
             await asyncio.sleep(settle_after)
             results.put_nowait(output)
 
-    def settle_all(task_group, shared_state, start, end, workflow, results):
+    def settle_all(task_group, shared_state, results):
         if settle_after is not None:
             task_group.create_task(settle_late(results))
             return
@@ -129,12 +133,14 @@ def run_train_loop(
             results.put_nowait(output)
 
     trainer._dispatch = settle_all
-    trainer.shutdown_loops = AsyncMock()
     start = state.train_step
 
     async def run() -> None:
-        async with asyncio.TaskGroup() as task_group:
-            await trainer._train_loop(task_group, state, start, start + steps, object())
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                await _train_loop(trainer, task_group, state, start, start + steps, object())
+        except* TerminateTrainLoop:  # the loops stop after the last step
+            pass
 
     asyncio.run(run())
     return state.stats_logger.stats

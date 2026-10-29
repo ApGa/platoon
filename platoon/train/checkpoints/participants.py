@@ -4,11 +4,12 @@
 Every full checkpoint of a start (at launch, by the cadence, when training is interrupted, and at its end) is one row
 of the run's ``checkpoints.jsonl``, the leader policy's save, whose ``loop_state`` holds the run's counters first
 (:data:`COUNTER_KEYS`), then each participant's entries, in the order the participants registered.  A trainer registers
-its participants with the run (``run.checkpoints``); the rl trainer's is its draws: the per-task statistics and the
-dispatcher's state.  In a run of several trained policies a checkpoint is a barrier of their saves, which the leader's
-row, written last, commits (:mod:`platoon.train.checkpoints.barrier`).  When they step independently, every full save
-of any policy is a commit of its own (:meth:`RunCheckpoints.commit`, :mod:`platoon.train.checkpoints.commits`), and the
-start's launch and exit barriers are commits too.
+its participants with the run (``run.checkpoints``); the start's draws, which the run opens for a trainer that rolls out
+(``run.rollouts``, the rl trainer's), are one: the per-task statistics and the dispatcher's state.  The sft trainer's is
+the cursor of its conversations.  In a run of several trained policies a checkpoint is a barrier of their saves, which
+the leader's row, written last, commits (:mod:`platoon.train.checkpoints.barrier`).  When they step independently,
+every full save of any policy is a commit of its own (:meth:`RunCheckpoints.commit`,
+:mod:`platoon.train.checkpoints.commits`), and the start's launch and exit barriers are commits too.
 
 The participants' rules (RFC 0021, section 8): each key is its participant's own (:meth:`RunCheckpoints.register`
 refuses one that the counters, the keys kept for several policies, the row itself (:func:`row_fields`) or another

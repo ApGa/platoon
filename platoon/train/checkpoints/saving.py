@@ -4,11 +4,9 @@ step updated: :func:`save_after_step`), and what a full checkpoint holds of the 
 (:class:`~platoon.train.checkpoints.participants.RunCheckpoints`, a barrier of every trained policy's), which the draws
 take part in, and each policy's (:meth:`~platoon.train.policy.policy.Policy.save`).
 
-``_save_checkpoint_and_get_sampling_client`` takes the trainer first and is the rl trainer's method still:
-``PlatoonTinkerRLTrainer`` keeps it under its name, so to replace it, replace the method, on the class or an instance,
-not the function; it calls the trainer's methods through the trainer (what it calls is :class:`SavingTrainer`).
-``_checkpoint_state`` takes the start's rollout source (:class:`~platoon.train.dispatch.source.RolloutSource`), which
-calls it, as does the rl trainer's method of its name.
+The step's save takes the trainer whose steps save (what it calls of it is :class:`SavingTrainer`); the checkpoint
+state takes the start's rollout source (:class:`~platoon.train.dispatch.source.RolloutSource`), which calls it as a
+participant of the run's checkpoints.
 """
 
 import asyncio
@@ -41,10 +39,10 @@ ORDER_POSITION_KEY = "next_position"
 
 
 class SavingTrainer(Protocol):
-    """What a step's save calls on the trainer whose method it is (the rl trainer's seams, which tests replace): the
-    checkpoints its steps save through, the hand-off of a recovery save to its pruner, and its heartbeat."""
+    """What a step's save calls on the trainer whose steps save: the checkpoints its steps save through, the hand-off of
+    a recovery save to its pruner, and its heartbeat."""
 
-    def _checkpoints(self, training_client: tinker.TrainingClient) -> "RunCheckpoints": ...
+    def _checkpoints(self) -> "RunCheckpoints": ...
     def _recovery_saved(
         self, paths: dict[str, str], policy_version: int, policy: PolicyId | None = None, *, published: bool = True
     ) -> None: ...
@@ -106,9 +104,10 @@ async def _save_checkpoint_and_get_sampling_client(
     """Save after step ``i_batch`` of a run of one trained policy, the leader of the trainer's checkpoints
     (``_checkpoints``), which trains with ``training_client``, and return its new sampling client
     (:func:`save_after_step`): its full checkpoint, when one is due, records the ``policy_version`` and
-    ``optimizer_steps`` given, else ``i_batch + 1``, since its weights are the ones *after* training on ``i_batch``."""
+    ``optimizer_steps`` given, else ``i_batch + 1``, since its weights are the ones *after* training on ``i_batch``.
+    The step's line before it names this function (:func:`~platoon.train.step.publish.publish_policies`)."""
 
-    checkpoints = trainer._checkpoints(training_client)
+    checkpoints = trainer._checkpoints()
     leader, next_batch = checkpoints.policies.leader, i_batch + 1
     counters = Counters(
         next_batch if policy_version is None else policy_version,

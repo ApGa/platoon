@@ -1,7 +1,7 @@
-"""A settled group as a step dequeues it (``_Settled``): its output with the entry and label of its row, its record
-and its draw, and the markers of the groups an admission rule decided when they settled.  And what the settled groups
-add to the statistics of the training step or the evaluation that consumes them: their statistics before any group,
-the reward keys trained so far and each group's own statistics.
+"""A settled group as a step dequeues it (:class:`SettledGroup`): its output with the entry and label of its row, its
+record and its draw, and the markers of the groups an admission rule decided when they settled.  And what the settled
+groups add to the statistics of the training step or the evaluation that consumes them: their statistics before any
+group, the reward keys trained so far and each group's own statistics.
 """
 
 from collections.abc import Iterable
@@ -19,7 +19,7 @@ LABEL_STATS = ("task_reward", "num_steps")
 
 
 @dataclass(frozen=True)
-class _Settled:
+class SettledGroup:
     """A group's output as a rollout group hands it to the step that consumes it, with the environment entry and the
     label of the row it ran.  The stale filter and the label metrics read those from the row, which the group holds,
     not from the output: a custom workflow's plain list of datums cannot carry them.
@@ -38,7 +38,7 @@ class _Settled:
 
     entry: str | None
     label: str | None
-    rollout: Any
+    output: Any
     record: Any = None
     key: tuple[int, int] | None = None
     admitted: str | None = None
@@ -86,20 +86,20 @@ class _Emptied(list):
         self.report = report
 
 
-def _output_label(rollout: Any) -> str | None:
+def _output_label(output: Any) -> str | None:
     """The label a group's output gives in its report (``GroupRolloutWorkflow``'s ``label``), if any."""
 
-    return report_of(rollout).label
+    return report_of(output).label
 
 
-def _settled(item: Any) -> _Settled:
-    """A result queue item as a worker's :class:`_Settled`: itself, or a bare output (a test's or a custom loop's),
-    whose entry and label are its report's (``GroupRolloutWorkflow``'s ``entry`` and ``label``), when it gives them."""
+def as_settled_group(item: Any) -> SettledGroup:
+    """A result queue item as a :class:`SettledGroup`: itself, or a bare output (a test's or a custom loop's), whose
+    entry and label are its report's (``GroupRolloutWorkflow``'s ``entry`` and ``label``), when it gives them."""
 
-    if isinstance(item, _Settled):
+    if isinstance(item, SettledGroup):
         return item
     report = report_of(item)
-    return _Settled(report.entry, report.label, item)
+    return SettledGroup(report.entry, report.label, item)
 
 
 def _no_groups_yet() -> RolloutStats:
@@ -120,7 +120,7 @@ def _count_every_reward_key(seen: set[str], stats: Iterable[RolloutStats]) -> No
             item.counts.setdefault(name, 0)
 
 
-def _record_group_stats(rollout: Any, tracker: StatsTracker) -> None:
+def _record_group_stats(output: Any, tracker: StatsTracker) -> None:
     """Record what a group's workflow measured about the group (its report's ``group_stats``) in the consuming step.
 
     ``GroupRolloutWorkflow`` keeps a group's completion statistics, credit and workload distributions with the
@@ -128,6 +128,6 @@ def _record_group_stats(rollout: Any, tracker: StatsTracker) -> None:
     this one, and their statistics would land in this step (a step counting 20 rollouts against the 16 it trained).
     """
 
-    group_stats = report_of(rollout).group_stats
+    group_stats = report_of(output).group_stats
     if group_stats is not None:
         group_stats.record(tracker)

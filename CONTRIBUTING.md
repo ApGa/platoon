@@ -27,6 +27,7 @@ repositories start with an RFC; see [When a change needs an RFC](#when-a-change-
 |---|---|
 | Report a bug | An issue with the command you ran, the config (or the smallest one that fails), the platoon commit, and the full traceback |
 | Fix a bug or improve docs | A pull request; a fix comes with a test that fails without it |
+| Change the trainer | [The training code](docs/training-code.md), a map of `platoon/train` from `platoon train` to one step, and the invariants a change must keep |
 | Add an environment, harness, program, reward rule, judge, sandbox provider or renderer | Usually your own package, with no change to platoon: [Extending platoon](docs/extending/index.md) has a guide to each, and the sections below sum up the common ones and cover adding one to platoon itself |
 | Change a public contract or add a subsystem | An RFC ([process](docs/rfcs/README.md)) |
 

@@ -18,6 +18,7 @@ from fakes.config import make_config, trainer_config
 from fakes.loop import loop_state, loop_trainer
 from fakes.trainer import TrainingClient, Workflow, interrupt_at, make_trainer
 
+from platoon.train.evaluation.loop import eval_worker
 from platoon.train.trainer import signals as signals_module
 from platoon.utils.stats_tracker import get as get_tracker
 
@@ -111,9 +112,7 @@ def test_after_a_shutdown_request_an_evaluation_s_rollout_workers_take_no_task(n
     async def serve() -> tuple[int, int]:
         tasks, results = asyncio.Queue(), asyncio.Queue()
         tasks.put_nowait({"task_id": "a"})
-        worker = asyncio.ensure_future(
-            trainer._rollout_workflow_worker_loop(shared, Workflow(0), tasks, results, tracker=get_tracker("eval"))
-        )
+        worker = asyncio.ensure_future(eval_worker(shared, Workflow(0), tasks, results, tracker=get_tracker("eval")))
         try:
             await asyncio.wait({worker}, timeout=1)  # one that stops returns at once; one that serves blocks
             return tasks.qsize(), results.qsize()

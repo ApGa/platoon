@@ -415,9 +415,9 @@ platoon.experimental.ScoringFailed: class ScoringFailed(RuntimeError)
 platoon.experimental.ShareLedger: class ShareLedger(Protocol)
 platoon.experimental.ShareLedger.consumed: def consumed(policy: PolicyId, keys: Iterable[DrawKey | None], *, step: int, fates: Mapping[DrawKey, str] | None = None) -> None
 platoon.experimental.ShareLedger.done: def done(policy: PolicyId) -> bool
-platoon.experimental.ShareLedger.judge_version: def judge_version(policy: PolicyId, group: Settled) -> int
+platoon.experimental.ShareLedger.judge_version: def judge_version(policy: PolicyId, group: SettledGroup) -> int
 platoon.experimental.ShareLedger.lock: attribute asyncio.Lock
-platoon.experimental.ShareLedger.take: async def take(policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[Settled]
+platoon.experimental.ShareLedger.take: async def take(policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[SettledGroup]
 platoon.experimental.Slot: @dataclass(frozen=True) class Slot
 platoon.experimental.Slot.entry: field str
 platoon.experimental.StepEnd: @dataclass(eq=False) class StepEnd

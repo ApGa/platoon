@@ -3,7 +3,7 @@ metrics and its commit (:class:`StepTally`), and the dispatcher as a step tells 
 (:class:`StepDispatch`).  And what a step reads of each group beside its datums: the workload its output's report
 gives, which a custom workflow need not give.
 
-The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, dequeues the groups and counts each here.
+The step itself, :class:`~platoon.train.step.step.TrainStep`, dequeues the groups and counts each here.
 """
 
 import logging
@@ -19,15 +19,15 @@ from platoon.utils.rollout_workload import RolloutWorkload
 
 if TYPE_CHECKING:
     from platoon.train.dispatch.dispatcher import Dispatcher
-    from platoon.train.dispatch.settled import _Settled
+    from platoon.train.dispatch.settled import SettledGroup
     from platoon.train.dispatch.source import RolloutSource
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class _TaskWorkloadPayload:
-    """Validated workload sidechannel attached to a list-compatible result."""
+class _GroupWorkload:
+    """What generating a group took, as its output's report gives it, checked: its workload and its rollout counts."""
 
     workload: RolloutWorkload
     requested_rollouts: int
@@ -36,20 +36,20 @@ class _TaskWorkloadPayload:
     task_retained_datums: int
 
 
-def _get_task_workload_payload(rollout: Any) -> _TaskWorkloadPayload | None:
+def _group_workload(output: Any) -> _GroupWorkload | None:
     """The workload a group's output gives in its report (:func:`~platoon.train.workflow.protocol.report_of`), with
     its rollout counts; None when it gives none, as a custom workflow's need not.  Malformed counts it carries are
     logged (:func:`~platoon.train.workflow.protocol.malformed_counts`), and left out with its workload."""
 
-    report = report_of(rollout)
+    report = report_of(output)
     # Each of the five is checked, so that each is known to be set; a workload comes with its four counts.
     workload, requested, observed = report.workload, report.requested_rollouts, report.observed_rollouts
     trainable, retained = report.trainable_rollouts, report.task_retained_datums
     if workload is None or requested is None or observed is None or trainable is None or retained is None:
-        if (malformed := malformed_counts(rollout)) is not None:
+        if (malformed := malformed_counts(output)) is not None:
             logger.warning("Ignoring malformed task workload rollout counts: %s", malformed)
         return None
-    return _TaskWorkloadPayload(workload, requested, observed, trainable, retained)
+    return _GroupWorkload(workload, requested, observed, trainable, retained)
 
 
 @dataclass(kw_only=True)
@@ -60,12 +60,12 @@ class StepTally:
     groups.  :meth:`empty` builds the four without a default."""
 
     # --- collect: each group the step dequeued, stale or not ---------------------------------------------------------
-    total_tasks: int = 0
+    groups_dequeued: int = 0
     # The draws of the groups it dequeued: a checkpoint keeps them until the step commits.
     keys: list[tuple[int, int] | None] = field(default_factory=list)
     groups_without_stats: int = 0
     # What generating them took, of those whose output carries its workload.
-    total_tasks_with_workload_metadata: int = 0
+    groups_with_workload: int = 0
     workload: RolloutWorkload
     total_requested_rollouts: int = 0
     total_observed_rollouts: int = 0
@@ -110,29 +110,29 @@ class StepTally:
             kinds={"": Counter(), **{label: Counter() for label in labels}},
         )
 
-    def count_dequeued(self, settled: "_Settled") -> RolloutStats | None:
+    def count_dequeued(self, settled: "SettledGroup") -> RolloutStats | None:
         """Count a group the step dequeued, stale or not: its draw, and the workload its output gives; the group's
         rollout statistics, when its output's report gives them."""
 
         self.keys.append(settled.key)
-        rollout = settled.rollout
-        self.total_tasks += 1
-        rollout_stats = report_of(rollout).rollout_stats
+        output = settled.output
+        self.groups_dequeued += 1
+        rollout_stats = report_of(output).rollout_stats
         if rollout_stats is None:
             self.groups_without_stats += 1
-        workload_payload = _get_task_workload_payload(rollout)
-        if workload_payload is not None:
+        workload = _group_workload(output)
+        if workload is not None:
             # Attribute generation work when this outer batch
             # actually consumes the queue item.  Producer-side
             # recording would leak prefetched future tasks into
             # the current step.  Stale work is deliberately
             # included so wasted inference remains visible.
-            self.total_tasks_with_workload_metadata += 1
-            self.workload += workload_payload.workload
-            self.total_requested_rollouts += workload_payload.requested_rollouts
-            self.total_observed_rollouts += workload_payload.observed_rollouts
-            self.total_workflow_trainable_rollouts += workload_payload.trainable_rollouts
-            self.total_task_retained_datums += workload_payload.task_retained_datums
+            self.groups_with_workload += 1
+            self.workload += workload.workload
+            self.total_requested_rollouts += workload.requested_rollouts
+            self.total_observed_rollouts += workload.observed_rollouts
+            self.total_workflow_trainable_rollouts += workload.trainable_rollouts
+            self.total_task_retained_datums += workload.task_retained_datums
         return rollout_stats
 
     def record_fate(self, key: tuple[int, int] | None, fate: str) -> None:
@@ -199,7 +199,7 @@ class StepDispatch:
         if self.dispatcher is not None:
             self.dispatcher.dequeued()
 
-    def took(self, taken: str, settled: "_Settled") -> bool:
+    def took(self, taken: str, settled: "SettledGroup") -> bool:
         """A step under a group admission rule took ``settled`` as ``taken``: whether that counts toward its cap."""
 
         return self.dispatcher.took(taken, settled.window, held=settled.held) if self.dispatcher is not None else True

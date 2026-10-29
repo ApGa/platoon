@@ -2,7 +2,9 @@
 :mod:`platoon.train.workflow.members`, :mod:`platoon.train.workflow.requests`, :mod:`platoon.train.workflow.output`,
 :mod:`platoon.train.credit.group`, :mod:`platoon.train.workflow.telemetry`, :mod:`platoon.train.workflow.context`,
 :mod:`platoon.train.policy.binding`.  Its names still import from here, and so do the names it imported, each with a
-``PlatoonDeprecationWarning`` that names its new module, until platoon 0.6.0 removes this module."""
+``PlatoonDeprecationWarning`` that names its new module, until platoon 0.6.0 removes this module;
+``_SingleRolloutOutcome``, ``_TaskRolloutOutput`` and ``_GroupAdmission`` read as ``MemberOutcome``, ``GroupOutput``
+and ``StartupPass``, their names since."""
 
 from platoon.train.tinker._moved import moved as _moved
 
@@ -47,5 +49,10 @@ __getattr__, __dir__ = _moved(
         "current_entry": "platoon.train.workflow",
         "group_baselines": "platoon.train.workflow",
         "GroupRolloutWorkflow": "platoon.train.workflow",
+    },
+    renamed={
+        "_SingleRolloutOutcome": "MemberOutcome",
+        "_TaskRolloutOutput": "GroupOutput",
+        "_GroupAdmission": "StartupPass",
     },
 )

@@ -19,7 +19,7 @@ from tinker import TensorData
 from platoon.train.config_defs import WorkflowConfig
 from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
 from platoon.train.workflow.group import GroupRolloutWorkflow
-from platoon.train.workflow.output import _SingleRolloutOutcome
+from platoon.train.workflow.output import MemberOutcome
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import StatsTracker
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
@@ -39,7 +39,7 @@ def _datum(reward: float) -> tinker.Datum:
     )
 
 
-def _member(reward: float, key: str | None) -> _SingleRolloutOutcome:
+def _member(reward: float, key: str | None) -> MemberOutcome:
     """A member whose root completed with a scored outcome of ``reward``, trained under ``key``."""
 
     stats = TrajectoryStats("root", reward, num_steps=1, num_input_tokens=3, num_output_tokens=2, num_datums=1)
@@ -47,9 +47,7 @@ def _member(reward: float, key: str | None) -> _SingleRolloutOutcome:
         datums=[_datum(reward)], task_reward=reward, trajectory_stats=[stats], root_rewards_dict={}
     )
     workload = RolloutWorkload(postmerge_datums=1, policy_eligible_datums=1, post_sampling_datums=1)
-    return _SingleRolloutOutcome(
-        result=result, workload=workload, observed=True, outcome_status="scored", reward_key=key
-    )
+    return MemberOutcome(result=result, workload=workload, observed=True, outcome_status="scored", reward_key=key)
 
 
 def _group(members: list[tuple[float, str | None]]):

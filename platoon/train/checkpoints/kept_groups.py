@@ -115,7 +115,7 @@ def write_kept_groups(
     shares: Mapping[tuple[int, int], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Write the groups that start ``start``'s checkpoint ``checkpoint`` keeps (``kept``: ``(key, item)`` each, an item
-    as a step dequeues it, with its ``entry``, ``label``, ``record`` and ``rollout``), those that can be kept, each with
+    as a step dequeues it, with its ``entry``, ``label``, ``record`` and ``output``), those that can be kept, each with
     its ``shares`` and ``recorded`` when the policies step independently (``shares``, by key), and return
     :func:`write_kept`'s record; None when none can, or, with a warning, when the disk refuses the file: a resume from
     the checkpoint then rolls their tasks out again."""
@@ -128,7 +128,7 @@ def write_kept_groups(
                 entry=item.entry,
                 label=item.label,
                 record=item.record,
-                output=item.rollout,
+                output=item.output,
             )
         except Exception:  # a group that cannot be kept is rolled out again, and costs no other
             logger.warning("Cannot keep the settled group %s with checkpoint %s", key, checkpoint, exc_info=True)

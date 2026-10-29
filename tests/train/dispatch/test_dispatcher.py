@@ -553,9 +553,9 @@ def test_a_checkpoint_saves_the_dispatcher_s_state_and_its_kept_groups_in_files_
     a failed group is kept as failed, and a group whose output cannot be kept is not."""
 
     kept = [
-        ((3, 0), SimpleNamespace(entry="a", label="a", record=None, rollout=[_datum(4)])),
-        ((3, 1), SimpleNamespace(entry="a", label="a", record=None, rollout=None)),  # its workflow failed
-        ((3, 2), SimpleNamespace(entry="a", label="a", record=None, rollout={"not": "kept"})),
+        ((3, 0), SimpleNamespace(entry="a", label="a", record=None, output=[_datum(4)])),
+        ((3, 1), SimpleNamespace(entry="a", label="a", record=None, output=None)),  # its workflow failed
+        ((3, 2), SimpleNamespace(entry="a", label="a", record=None, output={"not": "kept"})),
     ]
     state = {"start": 3, "next_position": 9, "outstanding": [[3, 0, "a0", 4]], "waiting": {}, "fingerprint": {}}
 
@@ -594,7 +594,7 @@ def test_a_state_or_kept_groups_that_cannot_be_written_cost_their_checkpoint_alo
 
     monkeypatch.setattr(dispatch_state_module, "write_tasks_file", flaky)
     monkeypatch.setattr("platoon.train.checkpoints.kept_groups.write_tasks_file", flaky)
-    kept = [((1, 0), SimpleNamespace(entry=None, label=None, record=None, rollout=[_datum(0)]))]
+    kept = [((1, 0), SimpleNamespace(entry=None, label=None, record=None, output=[_datum(0)]))]
     state = {"start": 1, "next_position": 2, "outstanding": [[1, 0, "t0", 0]], "waiting": {}, "fingerprint": {}}
 
     with caplog.at_level(logging.WARNING):

@@ -269,12 +269,12 @@ class SupervisedTrainer(TrainerBase):
         keep = self.config.checkpoint.keep_recovery
         if keep is None:
             return None
-        base_url = self._policy().spec.tinker_base_url
         return pruning.RecoveryCheckpointPruner(
             run_dir=self.run_log_path,
             keep=keep,
             max_staleness=None,
-            service_client_factory=lambda: tinker.ServiceClient(base_url=base_url),
+            # Sessions on the service the policy trains on, as its spec read it when the trainer was built.
+            service_client_factory=self._policy().new_service_client,
         )
 
     def _recovery_saved(self, paths: dict[str, str], policy_version: int) -> None:

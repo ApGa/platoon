@@ -49,6 +49,7 @@ settings through ``self.config``.
 import asyncio
 import logging
 import os
+import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -59,6 +60,7 @@ import tinker
 import torch
 from tinker import TensorData
 
+from platoon.deprecations import PlatoonDeprecationWarning
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN, row_entry
 from platoon.train.config_defs import RolloutConfig, WorkflowConfig
@@ -84,14 +86,7 @@ from platoon.train.workers.workload import add_datum_funnel, workload_from_raw_r
 from platoon.train.workflow import crediting, members, requests, telemetry
 from platoon.train.workflow import output as group_output
 from platoon.train.workflow.context import _group_config, _group_entry, _group_stats
-from platoon.train.workflow.output import (
-    GroupOutput,
-    PolicyGroupOutput,
-    _member,
-    _SingleRolloutOutcome,
-    _TaskRolloutOutput,
-    _trained_keys,
-)
+from platoon.train.workflow.output import GroupOutput, MemberOutcome, PolicyGroupOutput, _member, _trained_keys
 from platoon.train.workflow.protocol import StaleFilterSetting, WorkflowSetup, _built_by_keywords
 from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import StartLimit
@@ -108,6 +103,9 @@ logger = logging.getLogger(__name__)
 # those through which it credits its groups without an estimator (``applies_credit``).
 _LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
 _CREDIT_METHODS = ("compute_baselines", "assign_advantages")
+# The startup gate's methods under their names before platoon 0.5.0, which the workflow no longer calls: a subclass that
+# overrides one is warned of, until platoon 0.6.0 (``__init_subclass__``).
+_RENAMED_METHODS = {"_admit_group": "_enter_startup_gate", "_admission_semaphore": "_startup_semaphore"}
 
 
 # The workload helpers of ``workers.workload`` (which the rollout worker calls too) under the names that
@@ -117,15 +115,15 @@ _workload_from_raw_rollout = workload_from_raw_rollout
 _add_datum_funnel = add_datum_funnel
 
 
-def as_member_outcomes(raw_outcomes: Sequence) -> list[_SingleRolloutOutcome]:
+def as_member_outcomes(raw_outcomes: Sequence) -> list[MemberOutcome]:
     """What ``_run_group_rollouts`` returned, as one outcome per member.  ``arun_episode_single`` always returns an
     outcome; an override of it (a custom workflow's, a test's) may return a ``TrajectoryCollectionResult`` or None
     instead, which becomes an outcome with its datum funnel, observed unless None."""
 
     return [
         outcome
-        if isinstance(outcome, _SingleRolloutOutcome)
-        else _SingleRolloutOutcome(
+        if isinstance(outcome, MemberOutcome)
+        else MemberOutcome(
             result=outcome,
             workload=_add_datum_funnel(RolloutWorkload(), outcome),
             observed=outcome is not None,
@@ -233,18 +231,27 @@ class GroupRolloutWorkflow:
     rollout_fn_ref: str | None = None
     subagent_datum_sampler: DeterministicSubagentDatumSampler | None = None
     # The rollout worker supervisor (``supervisor``), and the semaphore of the startup gate with its limit
-    # (members._admission_semaphore), each made at its first use.
+    # (members._startup_semaphore), each made at its first use.
     _supervisor: RolloutWorkerSupervisor | None = None
-    _admission: asyncio.Semaphore | None = None
-    _admission_limit: int = 0
+    _startup_semaphore_cache: asyncio.Semaphore | None = None
+    _startup_semaphore_limit: int = 0
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         """The ``runs_rollouts_on_lease`` and ``applies_credit`` flags of a subclass whose own body does not set them:
         each that of the class that sets it nearest in its method resolution order, unless one of its methods
         (:data:`_LEASE_METHODS`, :data:`_CREDIT_METHODS`) comes from a class other than this one that the declaring
-        class does not derive from (the subclass itself, a mixin, another branch of a diamond): False."""
+        class does not derive from (the subclass itself, a mixin, another branch of a diamond): False.  And a warning
+        for each method the subclass defines under a name the workflow no longer calls (:data:`_RENAMED_METHODS`)."""
 
         super().__init_subclass__(**kwargs)
+        for old, new in _RENAMED_METHODS.items():
+            if old in cls.__dict__:
+                warnings.warn(
+                    f"{cls.__qualname__}.{old} is never called: platoon 0.5.0 renamed GroupRolloutWorkflow.{old} to "
+                    f"{new}, so override {new} instead (platoon 0.6.0 removes this warning)",
+                    PlatoonDeprecationWarning,
+                    stacklevel=2,
+                )
         for flag, methods in (("runs_rollouts_on_lease", _LEASE_METHODS), ("applies_credit", _CREDIT_METHODS)):
             if flag not in cls.__dict__ and _overrides(cls, flag, methods):
                 setattr(cls, flag, False)
@@ -433,7 +440,7 @@ class GroupRolloutWorkflow:
             _group_entry.reset(entry_token)
             _group_config.reset(config_token)
             _group_stats.reset(token)
-        if isinstance(output, _TaskRolloutOutput):
+        if isinstance(output, GroupOutput):
             output.label = task_label(data, self.label_by)
             output.entry = entry
         elif isinstance(output, PolicyGroupOutput):
@@ -460,7 +467,7 @@ class GroupRolloutWorkflow:
         if self.stale_filter == "datum":  # the per-datum stale filter judges each datum by its own version
             self._stamp_own_versions(data, results)
 
-        def output(datums: list[tinker.Datum], verdict: str, trainable_rollouts: int = 0) -> _TaskRolloutOutput:
+        def output(datums: list[tinker.Datum], verdict: str, trainable_rollouts: int = 0) -> GroupOutput:
             return self._make_task_output(
                 datums, outcomes=outcomes, trainable_rollouts=trainable_rollouts, verdict=verdict, members=members
             )
@@ -519,7 +526,7 @@ class GroupRolloutWorkflow:
     def _untrainable_verdict(
         self,
         data: dict,
-        outcomes: list[_SingleRolloutOutcome],
+        outcomes: list[MemberOutcome],
         results: list[TrajectoryCollectionResult],
         datums: list[tinker.Datum],
     ) -> str | None:
@@ -649,8 +656,8 @@ class GroupRolloutWorkflow:
     _credit_group = crediting._credit_group
     _credit_failed = crediting._credit_failed
     _credited_output = crediting._credited_output
-    _admission_semaphore = members._admission_semaphore
-    _admit_group = members._admit_group
+    _startup_semaphore = members._startup_semaphore
+    _enter_startup_gate = members._enter_startup_gate
     _run_group_member = members._run_group_member
     _member_start_slot = members._member_start_slot
     _run_group_rollouts = members._run_group_rollouts

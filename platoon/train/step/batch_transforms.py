@@ -1,5 +1,5 @@
 """The batch transforms: what a training step does to each microbatch's datums before their forward-backward pass
-(:func:`run_batch_transforms`, which the training loop calls, :mod:`platoon.train.trainer.loops`), such as weighting
+(:func:`run_batch_transforms`, which the training step calls, :mod:`platoon.train.step.step`), such as weighting
 or discounting them by their depth in the trajectory tree, and the zero-advantage and loss-normalization helpers.
 
 These transforms operate at the Tinker microbatch boundary.

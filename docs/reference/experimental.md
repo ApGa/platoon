@@ -2284,11 +2284,11 @@ checkpoint holds, which a resume puts back, and when a group retires.
 #### `ShareLedger.take`
 
 ```python
-async def take(policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[Settled]
+async def take(policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[SettledGroup]
 ```
 
 `n` of `policy`'s shares, in the order they settled, those a resume put back first: each a settled
-group, as the source's `take` gives one in lockstep, whose output (`rollout`) holds `policy`'s rows of
+group, as the source's `take` gives one in lockstep, whose output (`output`) holds `policy`'s rows of
 the group only (the leader's share of a group without its rows holds none; that of a group that failed is
 None), and whose `key` names its draw.  Fewer (none at all, perhaps) once no share will come
 (`done`): at the plan's end, or once a stop request ended another policy's loop and no group starts
@@ -2299,7 +2299,7 @@ judges each at `judge_version`.
 #### `ShareLedger.judge_version`
 
 ```python
-def judge_version(policy: PolicyId, group: Settled) -> int
+def judge_version(policy: PolicyId, group: SettledGroup) -> int
 ```
 
 The version of `policy` that the staleness of its share `group` (one `take` gave, not yet

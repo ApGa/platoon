@@ -27,8 +27,15 @@ from fakes.loop import loop_state, loop_trainer  # noqa: E402
 from fakes.trainer import StepLog, TrainingClient  # noqa: E402
 
 from platoon.train.config_defs import CheckpointConfig, EvalConfig  # noqa: E402
+from platoon.train.evaluation.loop import (  # noqa: E402
+    _eval_loop,
+    _wait_for_last_step_evaluation,
+    _wait_for_starting_policy_evaluation,
+)
+from platoon.train.evaluation.plan import _evaluates_during_training  # noqa: E402
 from platoon.train.evaluation.record import completed_evaluation_steps  # noqa: E402
 from platoon.train.trainer import signals as signals_module  # noqa: E402
+from platoon.train.trainer.loops import _train_loop  # noqa: E402
 from platoon.utils.jsonl import read_jsonl  # noqa: E402
 
 
@@ -81,9 +88,9 @@ def test_only_an_eval_setting_that_triggers_starts_the_eval_loop(eval_config, ev
     trainer = loop_trainer(config, eval_dataset=object())
     state = loop_state(trainer)
 
-    assert trainer._evaluates_during_training(state) is evaluates
+    assert _evaluates_during_training(trainer, state) is evaluates
     without = loop_trainer(config)  # no eval split: nothing to evaluate on
-    assert without._evaluates_during_training(loop_state(without)) is False
+    assert _evaluates_during_training(without, loop_state(without)) is False
 
 
 # One group a step, of one rollout, under the cispo loss.
@@ -120,11 +127,22 @@ def _datum(advantage: float = 0.0) -> tinker.Datum:
 def _feed_training(trainer, feed) -> None:
     """The training steps' groups come from ``feed(shared_state, results)``, in place of the dispatcher's groups."""
 
-    def dispatch(task_group, shared_state, start_batch, end_batch, workflow, results):
+    def dispatch(task_group, shared_state, results):
         task_group.create_task(feed(shared_state, results))
         return None
 
     trainer._dispatch = dispatch
+
+
+class _EvalGroups:
+    """The evaluation's workflow: each group runs ``run(row)``, then fails, as it returns no output."""
+
+    def __init__(self, run) -> None:
+        self.run = run
+
+    async def arun_episode(self, row: dict) -> None:
+        await self.run(row)
+        return None
 
 
 class _EvalSplit:
@@ -152,8 +170,8 @@ def _train_and_evaluate(
 ) -> tuple[list[int], StepLog]:
     """Run the training loop from step ``start`` to ``steps`` with zero-advantage steps beside the evaluation loop, as
     ``train`` runs them, with fake rollouts; return the training steps current when tasks were evaluated and what was
-    logged (a ``StepLog``).  ``paced`` holds each step's rollouts back until the evaluation loop has handled the
-    step before, so that no evaluation due is overtaken (a real step takes longer than its evaluation's start).
+    logged (a ``StepLog``).  ``paced`` holds each step's group back until the step began and the evaluation loop has
+    handled it, so that no evaluation due is overtaken (a real step takes longer than its evaluation's start).
     ``at_start`` is ``eval.at_start``; ``completed`` the steps whose evaluation an earlier start of the run completed,
     as its ``evaluations.jsonl`` lists them, which ``train`` reads when it resumes; ``record`` the file each completed
     evaluation is appended to."""
@@ -165,39 +183,33 @@ def _train_and_evaluate(
     evaluated: list[int] = []
 
     async def train_groups(shared_state, results):  # every step's group is ready at once, with no training signal
-        for _ in range(steps - start):
-            while paced and shared_state.eval_handled_step != shared_state.train_step:
+        for step in range(start, steps):
+            while paced and not (shared_state.train_step == step == shared_state.eval_handled_step):
                 await asyncio.sleep(0)
             results.put_nowait([_datum()])
 
     _feed_training(trainer, train_groups)
+    state = loop_state(trainer, start_batch=start, batches_per_epoch=4)
 
-    async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
-        while True:  # an evaluation worker
-            await queue.get()
-            evaluated.append(shared_state.train_step)
-            results.put_nowait(None)
-
-    trainer._rollout_workflow_worker_loop = worker
+    async def evaluate(row: dict) -> None:  # an evaluation group: the training step current as it runs
+        evaluated.append(state.train_step)
 
     async def run():
-        state = loop_state(trainer, start_batch=start, batches_per_epoch=4)
         state.start_step = start
         state.start_step_evaluated = start in completed
         state.evaluations_path = None if record is None else str(record)
         state.eval_dataloader = _EvalSplit(2)
-        state.sampling_client_updated_event.set()  # as at launch
-        state.eval_loop_running = trainer._evaluates_during_training(state)
+        state.step_ended.set()  # as at launch
+        state.eval_loop_running = _evaluates_during_training(trainer, state)
         try:
             async with asyncio.TaskGroup() as group:
-                group.create_task(trainer._train_loop(group, state, start, steps, object()))
-                group.create_task(trainer._eval_loop(state, object()))
+                group.create_task(_train_loop(trainer, group, state, start, steps, object()))
+                group.create_task(_eval_loop(trainer, state, _EvalGroups(evaluate)))
         except* signals_module.TerminateTrainLoop:
             pass
-        return state
 
-    state = asyncio.run(run())
-    assert state.train_step == steps
+    asyncio.run(run())
+    assert state.train_step == steps and isinstance(state.stats_logger, StepLog)
     return evaluated, state.stats_logger
 
 
@@ -304,11 +316,11 @@ def test_a_shutdown_request_ends_the_wait_for_an_evaluation():
     evaluation whose workers no longer take tasks."""
 
     trainer = loop_trainer(_config(EvalConfig(every=1), CheckpointConfig()))
-    state = loop_state(trainer)
-    state.eval_loop_running, state.train_step = True, 3  # the evaluation loop has not handled step 3 yet
+    state = loop_state(trainer, start_batch=3)
+    state.eval_loop_running = True  # the evaluation loop has not handled step 3 yet
 
     async def run():
-        waiting = asyncio.create_task(trainer._wait_for_last_step_evaluation(state))
+        waiting = asyncio.create_task(_wait_for_last_step_evaluation(state))
         await asyncio.sleep(0.05)
         assert not waiting.done()
         state.shutdown_event.set()
@@ -347,24 +359,19 @@ def _first_update(
 
     _feed_training(trainer, train_groups)
 
-    async def worker(shared_state, workflow, queue, results, tracker=None, rows=None):
-        while True:  # an evaluation worker, slower than training's first step
-            await queue.get()
-            await asyncio.sleep(0.02)
-            evaluated.append(shared_state.train_step)
-            results.put_nowait(None)
-
-    trainer._rollout_workflow_worker_loop = worker
+    async def evaluate(row: dict) -> None:  # an evaluation group, slower than training's first step
+        await asyncio.sleep(0.02)
+        evaluated.append(state.train_step)
 
     async def run():
         state.start_step_evaluated = start in completed
         state.eval_dataloader = _EvalSplit(2)
-        state.sampling_client_updated_event.set()  # as at launch
-        state.eval_loop_running = trainer._evaluates_during_training(state)
+        state.step_ended.set()  # as at launch
+        state.eval_loop_running = _evaluates_during_training(trainer, state)
         try:
             async with asyncio.TaskGroup() as group:
-                group.create_task(trainer._train_loop(group, state, start, 4, object()))
-                group.create_task(trainer._eval_loop(state, object()))
+                group.create_task(_train_loop(trainer, group, state, start, 4, object()))
+                group.create_task(_eval_loop(trainer, state, _EvalGroups(evaluate)))
         except* _FirstUpdate:
             pass
 
@@ -412,12 +419,12 @@ def test_a_shutdown_request_ends_the_wait_for_the_evaluation_of_the_starting_pol
     state = loop_state(trainer)
 
     async def run():
-        await asyncio.wait_for(trainer._wait_for_starting_policy_evaluation(state), timeout=5)  # no evaluation loop
+        await asyncio.wait_for(_wait_for_starting_policy_evaluation(state), timeout=5)  # no evaluation loop
         state.eval_loop_running = True  # one that has not handled step 0 yet
         state.config = _config(EvalConfig(every=1), CheckpointConfig())  # without at_start
-        await asyncio.wait_for(trainer._wait_for_starting_policy_evaluation(state), timeout=5)  # nothing to wait for
+        await asyncio.wait_for(_wait_for_starting_policy_evaluation(state), timeout=5)  # nothing to wait for
         state.config = _config(EvalConfig(every=1, at_start=True), CheckpointConfig())
-        waiting = asyncio.create_task(trainer._wait_for_starting_policy_evaluation(state))
+        waiting = asyncio.create_task(_wait_for_starting_policy_evaluation(state))
         await asyncio.sleep(0.05)
         assert not waiting.done()
         state.shutdown_event.set()

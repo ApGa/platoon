@@ -40,14 +40,14 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from platoon.train.policy.spec import PolicyId
-from platoon.train.trainer.waiting import _next_rollout
+from platoon.train.trainer.waiting import _next_group
 from platoon.train.workflow.protocol import OutputReport, report_of, rows_by_policy
 
 if TYPE_CHECKING:
     from platoon.train.checkpoints.resume import StartPoint
     from platoon.train.dispatch.dispatcher import Dispatcher
     from platoon.train.dispatch.horizons import Horizons
-    from platoon.train.dispatch.settled import _Settled as Settled  # a settled group, as a step takes it
+    from platoon.train.dispatch.settled import SettledGroup  # a settled group, as a step takes it
     from platoon.train.policy.set import PolicySet
 
 DrawKey = tuple[int, int]
@@ -65,9 +65,9 @@ class ShareLedger(Protocol):
     # none of it.
     lock: asyncio.Lock
 
-    async def take(self, policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[Settled]:
+    async def take(self, policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[SettledGroup]:
         """``n`` of ``policy``'s shares, in the order they settled, those a resume put back first: each a settled
-        group, as the source's ``take`` gives one in lockstep, whose output (``rollout``) holds ``policy``'s rows of
+        group, as the source's ``take`` gives one in lockstep, whose output (``output``) holds ``policy``'s rows of
         the group only (the leader's share of a group without its rows holds none; that of a group that failed is
         None), and whose ``key`` names its draw.  Fewer (none at all, perhaps) once no share will come
         (:meth:`done`): at the plan's end, or once a stop request ended another policy's loop and no group starts
@@ -76,7 +76,7 @@ class ShareLedger(Protocol):
         judges each at :meth:`judge_version`."""
         ...
 
-    def judge_version(self, policy: PolicyId, group: Settled) -> int:
+    def judge_version(self, policy: PolicyId, group: SettledGroup) -> int:
         """The version of ``policy`` that the staleness of its share ``group`` (one :meth:`take` gave, not yet
         consumed) is judged at: the policy's version now, but for a share a resume put back, the version at which it
         has the age it had when the policy first consumed it (the oldest version stamped on its rows plus that age).
@@ -123,7 +123,7 @@ class Share:
       the leader's share of a group without its rows."""
 
     policy: PolicyId
-    group: Settled
+    group: SettledGroup
     age: int | None = None
     peers: Mapping[PolicyId, int] = field(default_factory=dict)
 
@@ -163,7 +163,7 @@ class _Group:
     """A group the ledger keeps: the group as it settled (``item``), its shares and their states, by policy, and whether
     its fate went to the per-task statistics (``recorded``)."""
 
-    item: Settled
+    item: SettledGroup
     shares: dict[PolicyId, Share]
     states: dict[PolicyId, _ShareState]
     recorded: bool = False
@@ -219,7 +219,7 @@ class Shares:
 
     # --- the settle section ------------------------------------------------------------------------------------------
 
-    def put_nowait(self, item: Settled) -> None:
+    def put_nowait(self, item: SettledGroup) -> None:
         """A group settled (the dispatcher hands it here in place of the result queue, after credit, in the settle
         section, with no await): split it into shares, one per trained policy with rows in it and always the leader's
         (:meth:`_split`), each queued for its policy's steps and counted on its horizon.  A group a resume kept takes
@@ -245,15 +245,15 @@ class Shares:
         self._retire(group)
         self._wake()
 
-    def _split(self, item: Settled) -> dict[PolicyId, Share]:
+    def _split(self, item: SettledGroup) -> dict[PolicyId, Share]:
         """A group's shares, by policy, in the run's order, the leader's first: each trained policy's rows of it, and
         the leader's share even without its rows, which carries the group's report and record, so that the leader's
         steps take every group, as the plan counts them; the leader's share alone, as the group is, for a group that
         failed or holds no trained policy's rows."""
 
-        from platoon.train.dispatch.settled import _Settled  # what a step takes; it loads the statistics' tensors
+        from platoon.train.dispatch.settled import SettledGroup  # what a step takes; it loads the statistics' tensors
 
-        output = item.rollout
+        output = item.output
         rows = {} if output is None else dict(rows_by_policy(output, self.leader))
         holders = [policy for policy in self.trained if rows.get(policy)]
         if not holders:
@@ -266,7 +266,7 @@ class Shares:
         for index, policy in enumerate(holders):
             own = report if index == 0 else _without_workload(report)
             record = item.record if index == 0 else None
-            group = _Settled(item.entry, item.label, _ShareRows(rows.get(policy, ()), own), record, item.key)
+            group = SettledGroup(item.entry, item.label, _ShareRows(rows.get(policy, ()), own), record, item.key)
             peers = {peer: version for peer, version in oldest.items() if peer != policy and version is not None}
             shares[policy] = Share(policy, group, peers=peers if rows.get(policy) else {})
         return shares
@@ -280,26 +280,26 @@ class Shares:
 
         return ShareQueue(self, policy)
 
-    async def take(self, policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[Settled]:
+    async def take(self, policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[SettledGroup]:
         """:meth:`ShareLedger.take`: ``n`` of ``policy``'s shares (:meth:`queue`), each as its settled group; fewer once
         no share will come (:meth:`done`); ``TrainInterrupted`` once ``stop`` is set."""
 
         queue, taken = self.queue(policy), []
         while len(taken) < n:
-            share = await _next_rollout(queue, stop, interruptible=stop is not None)
+            share = await _next_group(queue, stop, interruptible=stop is not None)
             if share is PLAN_END:
                 break
             taken.append(share.group)
         return taken
 
-    def judge_version(self, policy: PolicyId, group: Settled) -> int:
+    def judge_version(self, policy: PolicyId, group: SettledGroup) -> int:
         """:meth:`ShareLedger.judge_version`: for a share a resume put back (unconsumed, with a recorded age), the
         oldest version stamped on its rows plus that age, as :meth:`Share.judged_at`; else ``policy``'s version now."""
 
         kept = self._groups.get(group.key) if group.key is not None else None
         state = kept.states.get(policy) if kept is not None else None
         if state is not None and state.step is None:  # unconsumed: put back by a resume when it has an age
-            judged = _judged_at(() if group.rollout is None else group.rollout, state.age)
+            judged = _judged_at(() if group.output is None else group.output, state.age)
             if judged is not None:
                 return judged
         return self.policies[policy].version
@@ -495,7 +495,7 @@ def _without_workload(report: OutputReport) -> OutputReport:
 def _rows_of(share: Share) -> Sequence[Any]:
     """A share's rows (none for a group that failed)."""
 
-    output = share.group.rollout
+    output = share.group.output
     return () if output is None else output
 
 

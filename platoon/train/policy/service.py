@@ -2,8 +2,7 @@
 state a resume takes up: :func:`create_training_client`), asked again after each refusal that asking again may change
 (:func:`open_training_client`).
 
-``PlatoonTinkerRLTrainer`` opens main's through its methods ``_open_training_client`` and ``_create_training_client``,
-which call these: to replace one, replace the method, on the class or an instance, not the function.
+A start opens each policy's through these (:meth:`~platoon.train.policy.policy.Policy.open`).
 """
 
 import asyncio

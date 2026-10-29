@@ -13,8 +13,8 @@ A step hook that updates a policy at the step's end does so through that policy'
 objective (the step's end hands it out), whose metrics go under the lane's prefix, and the lane counts the hook's
 updates beside the step's own; a policy that either updated publishes once.  A run of one trained policy has one lane,
 the leader's, whose counts are the step's own: it steps, logs and publishes call for call as before.  The step itself,
-``TrainStep`` in :mod:`platoon.train.trainer.loops`, takes the lanes this module builds once per start, and walks each
-group through them.
+:class:`~platoon.train.step.step.TrainStep`, takes the lanes this module builds once per start, and walks each group
+through them.
 """
 
 from collections.abc import Awaitable, Callable, Sequence

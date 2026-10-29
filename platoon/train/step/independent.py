@@ -2,7 +2,7 @@
 independent``): one loop per trained policy, each on its own clock (:func:`train_policies`).
 
 Each policy's loop (:class:`PolicyLoop`) runs one :class:`PolicyStep` after the other.  A policy step is the lockstep
-step (``TrainStep``, :mod:`platoon.train.trainer.loops`) with the policy's one lane, which takes the policy's shares of
+step (:class:`~platoon.train.step.step.TrainStep`) with the policy's one lane, which takes the policy's shares of
 the groups from the share ledger (:mod:`platoon.train.dispatch.shares`) in place of the result queue: its own batch of
 them (``policies.<id>.batch_size``; the leader's ``train.batch_size``), on its own clock.  A share a resume put back is
 judged by the age it had when the policy first consumed it.  At its end the step records what it consumed, under the
@@ -36,13 +36,16 @@ from typing import TYPE_CHECKING, Any
 from platoon.train import entry_settings
 from platoon.train.checkpoints.saving import _feeding
 from platoon.train.dispatch.permits import _rollouts_at_once
-from platoon.train.dispatch.settled import _Settled
+from platoon.train.dispatch.settled import SettledGroup
 from platoon.train.dispatch.shares import PLAN_END, Share
+from platoon.train.dispatch.source import training_tasks
+from platoon.train.evaluation.loop import _wait_for_last_step_evaluation, _wait_for_starting_policy_evaluation
 from platoon.train.labels import label_column, metric_labels, metric_prefix
 from platoon.train.policy.learner import Learner
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.spec import PolicyId
 from platoon.train.step import publish
+from platoon.train.step import step as lockstep
 from platoon.train.step.collect import StepDispatch
 from platoon.train.step.lanes import PolicyLane
 from platoon.train.step.metrics import Censoring, RunTotals
@@ -51,6 +54,7 @@ from platoon.train.step.staleness import StaleFilter, StaleVerdict, StaleWatch
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.trainer import loops
 from platoon.train.trainer.signals import TrainInterrupted
+from platoon.train.trainer.waiting import _next_group
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
@@ -79,14 +83,14 @@ async def train_policies(
     run, source = trainer._run, trainer._rollouts
     assert run is not None and source is not None and source.ledger is not None  # the run opened its draws
     # The groups settle into the share ledger, in place of the result queue a lockstep step dequeues from.
-    trainer._dispatch(task_group, shared_state, run.start.step, end_batch, train_workflow, asyncio.Queue())
-    loops._publish_first_bindings(trainer, shared_state, train_workflow)
+    trainer._dispatch(task_group, shared_state, asyncio.Queue())
+    loops._publish_first_bindings(shared_state, train_workflow)
     budget = trainer.config.train.max_concurrent_rollouts
     client_monitor("train").set_configured_concurrency(
         _rollouts_at_once(trainer.config, "train", budget), budget=budget
     )
     policies = shared_state.policies
-    assert policies is not None and shared_state.clocks is not None  # the trainer made each policy's clock
+    assert shared_state.clocks is not None  # the trainer made each policy's clock
     logger.info(
         "Starting training from batch %s to %s, each trained policy on its own clock (%s)",
         run.start.step,
@@ -94,19 +98,19 @@ async def train_policies(
         ", ".join(f"{policy}: step {clock.step}" for policy, clock in shared_state.clocks.items()),
     )
     column = label_column(trainer.config)
-    labels = metric_labels(trainer._training_tasks(), column)
+    labels = metric_labels(training_tasks(trainer._task_sources()), column)
     policy_loops = [
         PolicyLoop(trainer, shared_state, policy, end_batch=end_batch, workflow=train_workflow, labels=labels)
         for policy in policies.trainable()
     ]
-    with publish.subscribed_bindings(trainer, policies, train_workflow):
+    with publish.subscribed_bindings(policies, train_workflow):
         async with asyncio.TaskGroup() as group:
             for loop in policy_loops:
                 group.create_task(loop.run_steps(), name=f"train_loop:{loop.policy.id}")
         if any(loop.interrupted for loop in policy_loops):
             raise TrainInterrupted()
-        await trainer._wait_for_last_step_evaluation(shared_state)
-        await trainer.shutdown_loops(shared_state)
+        await _wait_for_last_step_evaluation(shared_state)
+        await loops.shutdown_loops(shared_state)
 
 
 class _PlanEnded(Exception):
@@ -130,7 +134,7 @@ class PolicyLoop:
     ) -> None:
         run, source, policies, clocks = trainer._run, trainer._rollouts, shared_state.policies, shared_state.clocks
         assert run is not None and source is not None and source.ledger is not None  # the run opened its draws
-        assert policies is not None and clocks is not None  # the trainer made each policy's clock
+        assert clocks is not None  # the trainer made each policy's clock
         self.trainer, self.run, self.policy = trainer, run, policy
         self.ledger = source.ledger
         self.clock = clocks[policy.id]
@@ -156,7 +160,9 @@ class PolicyLoop:
             self.interrupted = True
             self.ledger.stopped(self.policy.id)  # an open step of another policy waits for no share it would hold back
 
-    def _context(self, shared_state: "TrainLoopSharedState", workflow: Any, labels: Sequence[str]) -> loops.StepContext:
+    def _context(
+        self, shared_state: "TrainLoopSharedState", workflow: Any, labels: Sequence[str]
+    ) -> lockstep.StepContext:
         """What the policy's steps share: the leader's are the loops' shared state, its tracker and the run's dispatcher
         and statistics; another policy's a view of the state (:func:`_view`), a tracker of its own and neither; each
         its share queue, its clock, its one lane and its own stale watch."""
@@ -171,7 +177,7 @@ class PolicyLoop:
         own = policy.spec.max_staleness
         bound = config.train.max_staleness if self.leads or own is None else own
         begins = run.start.policies[policy.id].step
-        return loops.StepContext(
+        return lockstep.StepContext(
             trainer=trainer,
             state=state,
             workflow=workflow,
@@ -192,7 +198,6 @@ class PolicyLoop:
             lanes=(self._lane(state, settings),),
             clock=self.clock,
             run=run,
-            hooks=run.hooks,
         )
 
     def _lane(self, state: "TrainLoopSharedState", settings: Any) -> PolicyLane:
@@ -205,9 +210,9 @@ class PolicyLoop:
         stale_filter = StaleFilter.of_run(config.train, settings)
         learner = Learner(
             policy,
-            objective=loops._objective(policy.spec),
+            objective=lockstep._objective(policy.spec),
             timeouts=config.train,
-            wait=loops._update_waiter(trainer, state.watchdog),
+            wait=lockstep._update_waiter(trainer, state.watchdog),
             tracker=state.train_tracker,
             fail_closed=trainer.needs(config, trainer.options).fail_closed_updates,
             before_update=self._starting_evaluation(),
@@ -221,12 +226,12 @@ class PolicyLoop:
         """What the policy's first update of a run launched at step 0 awaits: the evaluation of the starting policies
         (``eval.at_start``), as the lockstep step's barrier does, through the loops' shared state."""
 
-        trainer, policy, shared_state = self.trainer, self.policy, self.trainer._shared_state
+        policy, shared_state = self.policy, self.trainer._shared_state
         begins = self.run.start.policies[policy.id].step
 
         async def before_update() -> None:
             if not begins and policy.optimizer_steps == 0:
-                await trainer._wait_for_starting_policy_evaluation(shared_state)
+                await _wait_for_starting_policy_evaluation(shared_state)
 
         return before_update
 
@@ -249,11 +254,11 @@ class PolicyLoop:
         return self.trainer._recovery_pruner if self.leads else self.trainer._policy_pruners.get(self.policy.id)
 
 
-class PolicyStep(loops.TrainStep):
+class PolicyStep(lockstep.TrainStep):
     """One step of one policy on its own clock: the lockstep step with the policy's one lane (see the module
     docstring), whose ``loop`` gives its share queue, its batch and its publication."""
 
-    def __init__(self, context: loops.StepContext, totals: RunTotals, loop: PolicyLoop) -> None:
+    def __init__(self, context: lockstep.StepContext, totals: RunTotals, loop: PolicyLoop) -> None:
         super().__init__(context, totals)
         self.loop = loop
         self.geometry = StepGeometry.of(context.trainer.config, batch_size=loop.batch_size)
@@ -270,16 +275,16 @@ class PolicyStep(loops.TrainStep):
         the loop."""
 
         fill, context = MicrobatchFill(), self.context
-        while fill.places < self.geometry.tasks_per_microbatch and not self.counting.closed:
+        while fill.places < self.geometry.groups_per_microbatch and not self.counting.closed:
             waited = time.perf_counter()
-            item = await context.trainer._next_rollout(
+            item = await _next_group(
                 context.queue,
                 self.state.shutdown_event,
                 interruptible=not any(tally.optimizer_steps for tally in self.tallies.values()),
             )
             self.share_wait += time.perf_counter() - waited
             if item is PLAN_END:
-                if not self.tally.total_tasks:
+                if not self.tally.groups_dequeued:
                     raise _PlanEnded()
                 self.counting.closed = True
                 break
@@ -297,7 +302,7 @@ class PolicyStep(loops.TrainStep):
         for peer, version in share.peers.items():
             self.lags.setdefault(peer, []).append(versions[peer].version - version)
 
-    def _judge(self, settled: _Settled, lane: PolicyLane, rows: "Sequence[tinker.Datum] | None") -> StaleVerdict:
+    def _judge(self, settled: SettledGroup, lane: PolicyLane, rows: "Sequence[tinker.Datum] | None") -> StaleVerdict:
         """The stale filter's verdict on the share's rows; a share a resume put back is judged at the version its
         recorded age gives, as it was when its policy first consumed it."""
 
@@ -330,7 +335,7 @@ class PolicyStep(loops.TrainStep):
 
         (lane,) = updated
         sampling_client = await self.loop.sampler_after_step(self.state.train_step)
-        publish._publish(self.context, lane, sampling_client)
+        lane.policy.publish(sampling_client)
 
     def _log_stats(self, batch_elapsed: float) -> None:
         """The step's row (see the module docstring), logged without a W&B step of its own, and its line."""
@@ -348,8 +353,8 @@ class PolicyStep(loops.TrainStep):
         if loop.leads:
             stats["train/epoch"] = step // state.num_train_batches_per_epoch
             stats["progress/done_frac"] = step / context.end_batch
-            stats.update(loops._ptc_cell_guard_stats("train"))
-            stats.update(loops.client_step_metrics("train"))
+            stats.update(lockstep._ptc_cell_guard_stats("train"))
+            stats.update(lockstep.client_step_metrics("train"))
             row = {**stats, **own, "run/retained_groups": float(loop.ledger.retained()), "run/step": step}
             axis = "run/step"
         else:
@@ -392,7 +397,7 @@ def _view(shared_state: "TrainLoopSharedState", policy: PolicyId) -> "TrainLoopS
     model info, clients and counters, as the leader's (``state.policies.leader``), so in this view "the leader" is the
     policy whose steps run; the run's own leader, which carries the plan, stays ``trainer.policies.leader``."""
 
-    assert shared_state.policies is not None and shared_state.clocks is not None  # the trainer made each policy's clock
+    assert shared_state.clocks is not None  # the trainer made each policy's clock
     view = copy.copy(shared_state)
     view.policies = shared_state.policies.led_by(policy)
     view.clock = shared_state.clocks[policy]

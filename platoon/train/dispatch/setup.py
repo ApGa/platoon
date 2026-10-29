@@ -2,8 +2,7 @@
 task group, its groups run by :mod:`platoon.train.dispatch.runner`.
 
 Each function here takes the start's rollout source (:class:`~platoon.train.dispatch.source.RolloutSource`), whose
-parts it reads and sets: the source calls them (its ``new_dispatcher`` and ``start``), and so do the rl trainer's
-methods of the same names, with its source.
+parts it reads and sets: the source calls them (its ``new_dispatcher`` and ``start``).
 """
 
 import asyncio

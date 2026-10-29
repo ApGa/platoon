@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from platoon.train.objectives.api import Objective
     from platoon.train.policy.learner import Learner
     from platoon.train.policy.policy import Policy
-    from platoon.train.trainer.run import TrainerRun
+    from platoon.train.trainer.run import StepClock, TrainerRun
     from platoon.utils.stats_tracker import StatsTracker
 
 logger = logging.getLogger(__name__)
@@ -314,22 +314,11 @@ class StepHooks:
         return len(self._hooks)
 
 
-class _Clock(Protocol):
-    """The clock a step's end opens and advances (:class:`~platoon.train.trainer.run.StepClock`): whether the step
-    sent training work, whether its end runs its hooks, and each policy's update that is open, sent and not applied."""
-
-    step_open: bool
-    ending: bool
-    open_updates: dict[PolicyId, Any]
-
-    def advance(self, *, consumed: Any = None) -> None: ...
-
-
 async def finish_step(
     hooks: StepHooks,
     end_of: Callable[[], StepEnd],
     *,
-    clock: _Clock,
+    clock: "StepClock",
     source: Any,
     publish: Callable[[StepEnd | None], Awaitable[Mapping[PolicyId, int]]],
 ) -> Mapping[PolicyId, int]:
@@ -368,7 +357,7 @@ async def hear_launch(hooks: StepHooks, end: StepEnd) -> None:
     await _hear(hooks, end)
 
 
-def _left_open(clock: _Clock, who: str) -> RuntimeError:
+def _left_open(clock: "StepClock", who: str) -> RuntimeError:
     """What refuses a step's end that finds an update open, sent by ``who`` and not applied (its optimizer step not
     sent, or not counted yet): the next optimizer step would take in its gradients, or the publication would carry an
     optimizer step that no count holds."""

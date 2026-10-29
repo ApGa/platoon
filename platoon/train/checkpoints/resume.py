@@ -4,8 +4,7 @@ and its samplers' states, which the start's rollout source takes up (``_restore_
 
 ``_restore_dispatch`` and ``_read_kept_groups`` take the start's rollout source
 (:class:`~platoon.train.dispatch.source.RolloutSource`), whose per-task statistics and run directory they read.  The
-source calls ``_restore_dispatch`` as it resumes, as does the rl trainer's method of its name; the steps below it call
-the others here as module functions.
+source calls ``_restore_dispatch`` as it resumes; the steps below it call the others here.
 """
 
 import logging
@@ -28,7 +27,7 @@ from platoon.train.checkpoints.dispatch_state import (
 from platoon.train.checkpoints.kept_groups import decode_group, kept_shares, read_kept
 from platoon.train.checkpoints.saving import ORDER_POSITION_KEY
 from platoon.train.dispatch.dispatcher import Dispatcher
-from platoon.train.dispatch.settled import _Settled
+from platoon.train.dispatch.settled import SettledGroup
 from platoon.train.policy.spec import MAIN, PolicyId
 from platoon.train.sampling import fingerprint_changes
 from platoon.train.task_records import TaskRecorder, record_sampling_changed
@@ -81,17 +80,6 @@ class StartPoint:
     optimizer_steps: int
     loop_state: Mapping[str, Any]
     policies: Mapping[PolicyId, PolicyStart] = field(default_factory=dict)
-
-    # The row and the step under the names the rl trainer reads them by: its tests give its methods stand-in starts
-    # that have only those (0.5.0 development names, which go once the tests give start points).
-
-    @property
-    def resume_info(self) -> checkpoint_utils.CheckpointRecord | None:
-        return self.record
-
-    @property
-    def batch(self) -> int:
-        return self.step
 
     @classmethod
     def read(
@@ -252,7 +240,7 @@ class SavedDispatch:
 
     state: Mapping[str, Any]
     position: int
-    kept: dict[tuple[int, int], _Settled]
+    kept: dict[tuple[int, int], SettledGroup]
     plan: ResumePlan
     rows: dict[tuple[int, int], dict[str, Any]]
     taken: dict[tuple[int, int], tuple[int | None, str | None]]
@@ -400,7 +388,7 @@ def _saved_samplings(
     return drawn, tokens, fallbacks
 
 
-def _read_kept_groups(source: "RolloutSource", record: Any) -> dict[tuple[int, int], "_Settled"]:
+def _read_kept_groups(source: "RolloutSource", record: Any) -> dict[tuple[int, int], "SettledGroup"]:
     """The groups the checkpoint a start resumes from kept, as the steps dequeue them, by draw, in the order they
     settled; none, with a warning, when their file cannot be read, so that their tasks are rolled out again.  When the
     run's policies step independently, the source's share ledger takes up what each policy did with each group's
@@ -421,5 +409,5 @@ def _read_kept_groups(source: "RolloutSource", record: Any) -> dict[tuple[int, i
         )
         return {}
     return {
-        key: _Settled(entry, label, output, group_record, key) for key, entry, label, group_record, output in groups
+        key: SettledGroup(entry, label, output, group_record, key) for key, entry, label, group_record, output in groups
     }

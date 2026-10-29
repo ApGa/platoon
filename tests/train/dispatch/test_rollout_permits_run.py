@@ -32,7 +32,7 @@ from fakes.config import mixture_config, trainer_config
 from fakes.dispatcher import settle
 from fakes.members import ScriptedMembers, member_datum, scripted_group, until
 from fakes.runs import RecordingClient, weighted_mixture
-from fakes.trainer import make_trainer
+from fakes.trainer import draws_of, make_trainer
 
 from platoon.train.config_defs import StragglerPolicy, WorkflowConfig
 from platoon.train.dispatch.dispatcher import POSITION_COLUMN
@@ -90,7 +90,7 @@ def _straggler_run(tmp_path: Path, release: str, workflow_class: Any = ScriptedM
     async def run() -> None:
         train = asyncio.ensure_future(trainer.train(train_workflow=workflow))
         await until(lambda: workflow.started(1) == [0, 1, 2, 3] and ("end", 0, 2) in workflow.log)
-        permits = trainer._dispatcher._rows.permits
+        permits = draws_of(trainer).dispatcher._rows.permits
         if third:  # it starts, and once it and the last group have ended, the permits held are the running members'
             await until(lambda: workflow.started(2) == [0, 1, 2, 3] and permits.held == 5)
         else:
@@ -140,8 +140,8 @@ def test_which_subclasses_run_their_rollouts_on_the_lease():
     class Declared(group_module.GroupRolloutWorkflow):
         runs_rollouts_on_lease = True
 
-        async def _run_group_member(self, data, rollout_number, admission):
-            return await super()._run_group_member(data, rollout_number, admission)
+        async def _run_group_member(self, data, rollout_number, startup_pass):
+            return await super()._run_group_member(data, rollout_number, startup_pass)
 
     class Bypassing:
         async def _run_group_rollouts(self, data):
@@ -150,7 +150,7 @@ def test_which_subclasses_run_their_rollouts_on_the_lease():
     class DeclaringMixin:
         runs_rollouts_on_lease = True  # it vouches for its own override
 
-        async def _run_group_member(self, data, rollout_number, admission):
+        async def _run_group_member(self, data, rollout_number, startup_pass):
             return None
 
     class GrandchildOfCredit(Credit): ...
@@ -228,7 +228,7 @@ def test_a_custom_workflow_without_the_flag_that_uses_the_lease_returns_permits_
     async def run() -> None:
         train = asyncio.ensure_future(trainer.train(train_workflow=workflow))
         await until(lambda: third() == [0, 1, 2, 3])
-        assert trainer._dispatcher.rolling is False and ("start", 0, 3) in workflow.log
+        assert draws_of(trainer).dispatcher.rolling is False and ("start", 0, 3) in workflow.log
         straggler.set()
         held.set()
         await asyncio.wait_for(train, 60)
@@ -436,8 +436,8 @@ def test_under_rolling_starts_late_members_get_their_full_grace_and_are_cut_each
 class _MemberWrapper(ScriptedMembers):
     """Overrides ``_run_group_member`` and runs the member itself, without ``super()``, keeping the startup slot."""
 
-    async def _run_group_member(self, data, rollout_number, admission):
-        slot = admission.member_slot()
+    async def _run_group_member(self, data, rollout_number, startup_pass):
+        slot = startup_pass.member_slot()
         try:
             return await self.arun_episode_single(data, rollout_number)
         finally:

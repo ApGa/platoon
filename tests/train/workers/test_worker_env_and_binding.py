@@ -24,7 +24,7 @@ import pytest
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
 
-from platoon.train.trainer.rl import PlatoonTinkerRLTrainer  # noqa: E402
+from platoon.train.policy.binding import _publish_worker_binding  # noqa: E402
 from platoon.train.workers import env as worker_env  # noqa: E402
 
 
@@ -109,29 +109,29 @@ class _Workflow:
 def test_initial_binding_failure_is_fatal_in_process_mode():
     workflow = _Workflow("process", fail=True)
     with pytest.raises(OSError):
-        PlatoonTinkerRLTrainer._publish_worker_binding(workflow, object(), 3, required=True)
+        _publish_worker_binding(workflow, object(), 3, required=True)
 
 
 def test_republication_failure_is_survivable():
     """A worker keeps the client it holds; under full finetune that is the newest."""
 
     workflow = _Workflow("process", fail=True)
-    PlatoonTinkerRLTrainer._publish_worker_binding(workflow, object(), 4)
+    _publish_worker_binding(workflow, object(), 4)
 
 
 def test_inprocess_mode_never_fails_on_a_binding():
     workflow = _Workflow("inprocess", fail=True)
-    PlatoonTinkerRLTrainer._publish_worker_binding(workflow, object(), 5, required=True)
+    _publish_worker_binding(workflow, object(), 5, required=True)
 
 
 def test_a_workflow_without_workers_is_a_no_op():
-    PlatoonTinkerRLTrainer._publish_worker_binding(SimpleNamespace(), object(), 6, required=True)
+    _publish_worker_binding(SimpleNamespace(), object(), 6, required=True)
 
 
 def test_a_successful_publish_reaches_the_workflow():
     workflow = _Workflow("process", fail=False)
     client = object()
-    PlatoonTinkerRLTrainer._publish_worker_binding(workflow, client, 7, required=True)
+    _publish_worker_binding(workflow, client, 7, required=True)
     assert workflow.published == [(client, 7)]
 
 

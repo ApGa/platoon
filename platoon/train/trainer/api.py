@@ -19,11 +19,14 @@ from platoon.sandbox import cleanup as sandbox_cleanup
 from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec, Stepping
 from platoon.train.trainer import signals, waiting
 
+# A start's stats logger is made of this module's name (TrainerBase._new_stats_logger), so that a patch of it reaches
+# the stats logger a start opens, also one made through the old path platoon.train.tinker.rl, as in platoon 0.4.0.
+from platoon.utils.stats_logger import StatsLogger
+
 if TYPE_CHECKING:
     from platoon.train.checkpoints.resume import StartPoint
     from platoon.train.policy.set import PolicySet
     from platoon.train.trainer.run import TrainerRun
-    from platoon.utils.stats_logger import StatsLogger
     from platoon.utils.stats_tracker import StatsTracker
 
 logger = logging.getLogger(__name__)
@@ -149,7 +152,7 @@ class TrainerBase:
     options: Any = None
     # The run's policies, registered as the trainer is built.
     policies: "PolicySet"
-    _stats_logger: "StatsLogger | None" = None
+    _stats_logger: StatsLogger | None = None
     _train_tracker: "StatsTracker | None" = None
     _sandbox_labels: ExitStack | None = None
 
@@ -232,10 +235,8 @@ class TrainerBase:
             self._stats_logger.close()
         return False
 
-    def _new_stats_logger(self, stats_logger_config: Any) -> "StatsLogger":
+    def _new_stats_logger(self, stats_logger_config: Any) -> StatsLogger:
         """The run's stats logger, with the run's config as its W&B run's config."""
-
-        from platoon.utils.stats_logger import StatsLogger
 
         return StatsLogger(stats_logger_config, exp_config=self.config)
 

@@ -103,21 +103,21 @@ async def _await_rollout_with_heartbeat(
 
 
 class _Results(Protocol):
-    """What a step dequeues settled groups from: a start's result queue, or a policy's share queue."""
+    """What a step dequeues settled groups from: a start's queue of settled groups, or a policy's share queue."""
 
     async def get(self) -> Any: ...
     def get_nowait(self) -> Any: ...
     def empty(self) -> bool: ...
 
 
-async def _next_rollout(
+async def _next_group(
     queue: _Results, shutdown_event: asyncio.Event | None, *, interruptible: bool, ready: bool = False
 ):
-    """The next rollout result from ``queue``, where a start's training groups settle; with ``interruptible`` (no
+    """The next settled group from ``queue``, where a start's training groups settle; with ``interruptible`` (no
     update of the current batch applied yet), ``TrainInterrupted`` once a shutdown is requested (``shutdown_event``;
     None: never) instead, since the feeders stop on it and the batch may never complete.  The batch is then dropped
     whole: a resume from the last completed step redoes it.
-    With ``ready`` (a step under a group admission rule), a result already queued is taken without letting
+    With ``ready`` (a step under a group admission rule), a group already queued is taken without letting
     other tasks run first: a step takes the queued markers in one go, so that groups that end at once cannot start
     again in the slots those markers free and queue more markers between two of them.
     """

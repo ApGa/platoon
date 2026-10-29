@@ -18,7 +18,7 @@ from datasets import Dataset
 from fakes.config import make_config, mixture_config, trainer_config
 from fakes.runs import run_start
 from fakes.tinker_service import FakeTinkerService, make_service_trainer
-from fakes.trainer import TrainingClient, Workflow, datum, make_trainer
+from fakes.trainer import TrainingClient, Workflow, datum, draws_of, make_trainer
 
 from platoon.task import Task
 from platoon.train import entry_settings, task_records
@@ -30,7 +30,7 @@ from platoon.train.task_stats import TaskStatsStore, read_events, snapshot_bytes
 from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
 from platoon.train.workflow import members as members_module
 from platoon.train.workflow.group import GroupRolloutWorkflow
-from platoon.train.workflow.output import _TaskRolloutOutput
+from platoon.train.workflow.output import GroupOutput
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 
@@ -131,7 +131,7 @@ def test_a_cpu_run_logs_each_label_s_pass_at_1_and_pass_at_G_every_step(tmp_path
         assert step["train/batch/informative_groups"] + step["train/batch/all_pass_groups"] == 2
         assert step["train/batch/all_fail_groups"] == step["train/batch/uniform_mixed_groups"] == 0
     # The reward processor's 0.98 changed no pass: half of each quick group's members passed, and every slow one.
-    store = trainer._recorder.store
+    store = draws_of(trainer).recorder.store
     for task_id in store.task_ids():
         task = store.task(task_id)
         assert task.passes == (task.attempts if task_id.startswith("slow::") else task.attempts // 2) and task.groups
@@ -285,7 +285,7 @@ def test_a_resume_without_its_statistics_goes_on_from_an_older_snapshot_and_reco
     else:
         assert lost["problem"].endswith("does not have the SHA-256 its checkpoint recorded")
     assert lost["loaded"] == (None if damage == "every snapshot" else "recovery-000000")
-    store = second._recorder.store
+    store = draws_of(second).recorder.store
     assert sum(store.task(task_id).groups for task_id in store.task_ids()) == 2  # step 2's groups alone
     start = [event for event in read_events(run_dir) if event["event"] == "start"][-1]
     assert (start["state_lost"], start["loaded"]) == (lost["problem"], lost["loaded"])
@@ -344,7 +344,7 @@ def test_a_snapshot_that_cannot_be_written_costs_its_checkpoint_alone(tmp_path, 
         "recovery-000004": True,
         "final": True,
     }
-    assert not first._recorder.stopped
+    assert not draws_of(first).recorder.stopped
     assert any(
         "Could not write the per-task statistics with checkpoint recovery-000002" in r.message for r in caplog.records
     )
@@ -363,7 +363,7 @@ def test_a_snapshot_that_cannot_be_written_costs_its_checkpoint_alone(tmp_path, 
     [lost] = json.loads((run_dir / "lock.json").read_text())[LOST_KEY]
     assert (lost["checkpoint"], lost["loaded"]) == ("recovery-000002", "recovery-000001")
     groups = sum(older.task(task_id).groups for task_id in older.task_ids())
-    store = second._recorder.store
+    store = draws_of(second).recorder.store
     # The older statistics, and each group the resume rolled out; the draws themselves resume exactly, from the
     # dispatcher's own state, which recovery-000002 saved.
     assert groups > 0 and sum(store.task(task_id).groups for task_id in store.task_ids()) == groups + workflow.started
@@ -429,7 +429,7 @@ class _OverClaiming(Workflow):
 
     async def arun_episode(self, data):
         datums = await super().arun_episode(data)
-        return _TaskRolloutOutput(
+        return GroupOutput(
             datums,
             workload=RolloutWorkload(),  # no post-merge datum
             requested_rollouts=1,
@@ -469,7 +469,7 @@ def test_a_custom_workflow_s_plain_datums_give_no_evidence(tmp_path):
     last = logged.stats[-1]
     assert (last["train/tasks/no_evidence"], last["train/tasks/coverage"]) == (0.0, 0.0)
     assert not [key for key in last if key.endswith(("pass_at_1", "pass_at_G"))]
-    store = trainer._recorder.store
+    store = draws_of(trainer).recorder.store
     assert all(store.task(task_id).groups and not store.task(task_id).reported_groups for task_id in store.task_ids())
 
 

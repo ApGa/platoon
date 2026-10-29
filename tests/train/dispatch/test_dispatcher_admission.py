@@ -16,7 +16,7 @@ import tinker
 from fakes.dispatcher import LabelledRows, Recorder, settle
 
 from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
-from platoon.train.dispatch.settled import _Settled, emptied
+from platoon.train.dispatch.settled import SettledGroup, emptied
 
 
 class _Harness:
@@ -57,10 +57,10 @@ class _Harness:
         finally:
             release()
         if self.admit.get(draw.key, True):
-            self.dispatcher.settle(draw, _Settled(None, draw.label, [], None, draw.key))
+            self.dispatcher.settle(draw, SettledGroup(None, draw.label, [], None, draw.key))
         else:
             held = self.hold.get(draw.key, False)
-            marker = _Settled(
+            marker = SettledGroup(
                 None,
                 draw.label,
                 [],

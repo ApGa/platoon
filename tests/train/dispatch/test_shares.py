@@ -22,7 +22,7 @@ from fakes.dispatcher import LabelledRows, settle
 from platoon.train.credit.api import TrainingSample
 from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
 from platoon.train.dispatch.horizons import Horizons
-from platoon.train.dispatch.settled import _Settled
+from platoon.train.dispatch.settled import SettledGroup
 from platoon.train.dispatch.shares import PLAN_END, Share, ShareQueue, Shares
 from platoon.train.trainer.signals import TrainInterrupted
 from platoon.train.workflow.output import PolicyGroupOutput
@@ -52,7 +52,7 @@ def _row(version: int) -> tinker.Datum:
     )
 
 
-def _group(key: tuple[int, int], rows: dict[str, int], *, record: Any = "record") -> _Settled:
+def _group(key: tuple[int, int], rows: dict[str, int], *, record: Any = "record") -> SettledGroup:
     """A settled group of draw ``key`` with one row of each policy of ``rows`` at its version, whose report gives a
     workload."""
 
@@ -65,7 +65,7 @@ def _group(key: tuple[int, int], rows: dict[str, int], *, record: Any = "record"
         task_retained_datums=len(samples),
         verdict="trains",
     )
-    return _Settled("entry", "label", PolicyGroupOutput(samples, report), record, key)
+    return SettledGroup("entry", "label", PolicyGroupOutput(samples, report), record, key)
 
 
 class _Run:
@@ -113,7 +113,9 @@ def test_a_group_splits_into_a_share_per_trained_policy_and_the_leader_s_carries
         harness = _Run()
         harness.start(2)
         harness.settle(harness.draws[0], {"main": 0, "worker": 0})
-        harness.dispatcher.settle(harness.draws[1], _Settled("entry", "label", None, "record", harness.draws[1].key))
+        harness.dispatcher.settle(
+            harness.draws[1], SettledGroup("entry", "label", None, "record", harness.draws[1].key)
+        )
         main, failed = await harness.ledger.take("main", 2)  # a trainer's take: each share as its settled group
         worker = await _share(harness.ledger.queue("worker"))  # the rl trainer's: the share
         assert (main.key, failed.key, worker.group.key) == (
@@ -121,11 +123,11 @@ def test_a_group_splits_into_a_share_per_trained_policy_and_the_leader_s_carries
             harness.draws[1].key,
             harness.draws[0].key,
         )
-        assert len(main.rollout) == 1 and len(worker.group.rollout) == 1
+        assert len(main.output) == 1 and len(worker.group.output) == 1
         assert main.record == "record" and worker.group.record is None
-        assert report_of(main.rollout).workload is not None
-        assert report_of(worker.group.rollout).workload is None and report_of(worker.group.rollout).verdict == "trains"
-        assert failed.rollout is None  # a group that failed is the leader's share alone
+        assert report_of(main.output).workload is not None
+        assert report_of(worker.group.output).workload is None and report_of(worker.group.output).verdict == "trains"
+        assert failed.output is None  # a group that failed is the leader's share alone
         assert worker.peers == {"main": 0}
         assert harness.dispatcher.pipeline == 0
 
@@ -148,9 +150,9 @@ def test_a_group_without_the_leader_s_rows_is_a_share_of_the_leader_s_with_none_
         worker = _queued(harness.ledger.queue("worker"))
         assert [share.group.key for share in main] == [draw.key for draw in harness.draws]
         empty, rows = main[1], worker[1]
-        assert len(empty.group.rollout) == 0 and empty.group.record == "record" and empty.peers == {}
-        assert report_of(empty.group.rollout).workload is not None
-        assert rows.group.record is None and report_of(rows.group.rollout).workload is None and rows.peers == {}
+        assert len(empty.group.output) == 0 and empty.group.record == "record" and empty.peers == {}
+        assert report_of(empty.group.output).workload is not None
+        assert rows.group.record is None and report_of(rows.group.output).workload is None and rows.peers == {}
         assert not harness.ledger.horizons.plan_has_room(0)  # taken, they still count
         # Its fate is its rows': stale when the worker's went stale, as a lockstep step judges the group.
         harness.ledger.consumed("main", [key], step=0)
