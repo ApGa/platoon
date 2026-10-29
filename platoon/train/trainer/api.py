@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
 from platoon.sandbox import cleanup as sandbox_cleanup
-from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec
+from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec, Stepping
 from platoon.train.trainer import signals, waiting
 
 if TYPE_CHECKING:
@@ -66,6 +66,9 @@ class TrainerNeeds:
     # Whether each training episode sees its draw (ctx.draw: platoon.programs.DrawInfo), the key that a step's end
     # names it by (StepEnd.consumed).  Off, the rollouts' requests are as they always were.
     draw_provenance: bool = False
+    # The clocks the run builds for its trained policies: one for them all (lockstep), or one each (independent: each
+    # policy steps, publishes and saves on its own; a run of one trained policy has one clock either way).
+    stepping: Stepping = "lockstep"
 
 
 @dataclass(frozen=True)

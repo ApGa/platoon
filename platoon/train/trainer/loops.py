@@ -10,8 +10,9 @@ each microbatch's datums and sends them, updates each trained policy once per mi
 the run's step hooks drain and update the policies, the step publishes each policy that it or a hook updated once, the
 hooks hear of it, and the step moves on to the next (:func:`~platoon.train.trainer.hooks.finish_step`; with no hook,
 the publication and the move); then it logs its metrics.  In a run that trains several policies in lockstep, each
-policy's rows of each group go their own lane through those stages (:mod:`platoon.train.step.lanes`).  The parts of
-each stage are in :mod:`platoon.train.step`.
+policy's rows of each group go their own lane through those stages (:mod:`platoon.train.step.lanes`); when they step
+independently, each policy has a loop of its own, whose steps take its shares of the groups
+(:mod:`platoon.train.step.independent`).  The parts of each stage are in :mod:`platoon.train.step`.
 
 The step's flow stays in this module, beside the loop, because tests read it here: the source of the batch transforms
 before the one zero-advantage filter (:meth:`TrainStep.prepare`, then :meth:`TrainStep._with_nonzero_objective`) and
@@ -84,6 +85,7 @@ from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
     from platoon.train.dispatch.dispatcher import Dispatcher
+    from platoon.train.dispatch.shares import ShareQueue
     from platoon.train.policy.checkpoints import Waiter
     from platoon.train.task_records import TaskRecorder
     from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
@@ -104,8 +106,10 @@ async def _train_loop(
     ``task_group``, publish the first sampler of each policy the agents sample, then run one :class:`TrainStep` per
     step, each trained policy handing the samplers it publishes to the rollout workers (``subscribed_bindings``); then
     let the evaluation loop handle the last step, and stop the loops (``shutdown_loops``, which ends this one with
-    ``TerminateTrainLoop``)."""
+    ``TerminateTrainLoop``).  When the run's trained policies step independently, each runs a loop of its own."""
 
+    if getattr(shared_state, "clocks", None) is not None:  # each trained policy on its own clock
+        return await _policy_loops(trainer, task_group, shared_state, end_batch, train_workflow)
     column = label_column(trainer.config)
     # Every task the run draws from, a weighted order's tasks that its first epoch leaves out included.
     tasks = trainer._training_tasks()
@@ -152,6 +156,21 @@ async def _train_loop(
         await trainer.shutdown_loops(shared_state)
 
 
+async def _policy_loops(
+    trainer: "PlatoonTinkerRLTrainer",
+    task_group: asyncio.TaskGroup,
+    shared_state: TrainLoopSharedState,
+    end_batch: int,
+    train_workflow: RolloutWorkflow,
+) -> None:
+    """The train loop of a start whose trained policies step independently: each policy's own loop
+    (:func:`~platoon.train.step.independent.train_policies`)."""
+
+    from platoon.train.step.independent import train_policies  # it builds on this module's step
+
+    await train_policies(trainer, task_group, shared_state, end_batch, train_workflow)
+
+
 def _publish_first_bindings(
     trainer: "PlatoonTinkerRLTrainer", shared_state: TrainLoopSharedState, train_workflow: RolloutWorkflow
 ) -> None:
@@ -182,7 +201,8 @@ class StepContext:
     """What the steps of a start share, set up before the first step:
 
     - ``trainer``, whose seams the steps call, and ``state``, what the loops share;
-    - ``workflow``, the training workflow, and ``queue``, the queue its groups settle into;
+    - ``workflow``, the training workflow, and ``queue``, the queue its groups settle into (a policy's share queue,
+      when the policies step independently);
     - ``dispatch``: the start's draws and the dispatcher that starts their groups.  The steps tell it what they
       dequeued and committed;
     - ``start_batch`` and ``end_batch``: the start's first batch and its end;
@@ -203,7 +223,7 @@ class StepContext:
     trainer: "PlatoonTinkerRLTrainer"
     state: TrainLoopSharedState
     workflow: RolloutWorkflow
-    queue: "asyncio.Queue[_Settled]"
+    queue: "asyncio.Queue[_Settled] | ShareQueue"
     dispatch: StepDispatch
     start_batch: int
     end_batch: int
@@ -699,6 +719,8 @@ class TrainStep:
             step_updates={lane.policy_id: self.tally_of(lane).optimizer_steps for lane in lanes},
             consumed=dict(self.tally.fates),
             learner_of=learners.__getitem__,
+            policy=self.context.clock.policy,  # whose step, when the policies step independently
+            tracker=self.state.train_tracker,
         )
 
     async def publish(self, end: StepEnd | None) -> dict[PolicyId, int]:
@@ -717,7 +739,7 @@ class TrainStep:
         ]
         published: dict[PolicyId, int] = {}
         if updated:
-            await publish_policies(self.context, updated)
+            await self._publish(updated)
             if end is not None:  # who published, which the hooks hear
                 published = {lane.policy_id: lane.version() for lane in updated}
         for lane in self.context.lanes:
@@ -738,6 +760,13 @@ class TrainStep:
         update_elapsed = time.perf_counter() - update_start
         state.train_tracker.scalar(update_weights_time=update_elapsed)
         return published
+
+    async def _publish(self, updated: Sequence[PolicyLane]) -> None:
+        """Save and publish the policies of the ``updated`` lanes
+        (:func:`~platoon.train.step.publish.publish_policies`): the cadence's checkpoint of every trained policy when
+        one is due, else their weights alone."""
+
+        await publish_policies(self.context, updated)
 
     # --- log: the step's metrics, then its line ----------------------------------------------------------------------
 
@@ -930,6 +959,7 @@ class _StateClock:
 
     def __init__(self, state: Any) -> None:
         self.state = state
+        self.policy = None  # the run's one clock
         self.step_open = False
         self.ending = False
         self.open_updates: dict[PolicyId, Any] = {}

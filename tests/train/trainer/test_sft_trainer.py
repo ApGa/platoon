@@ -425,7 +425,13 @@ def test_a_step_that_trains_nothing_saves_the_checkpoint_the_cadence_asks_for_wi
 
 def test_the_train_keys_only_rl_reads_are_refused_with_the_option_to_set_instead(tmp_path, data):
     settings = sft_settings(tmp_path, data)
-    settings["train"] |= {"batch_size": 8, "max_staleness": 2, "stale_filter": "datum", "loss_fn": "ppo"}
+    settings["train"] |= {
+        "batch_size": 8,
+        "max_staleness": 2,
+        "stale_filter": "datum",
+        "stepping": "independent",  # sft trains one policy, which has no clock but the run's
+        "loss_fn": "ppo",
+    }
     settings["eval"] = {"every": 5}
 
     with pytest.raises(ConfigError) as refused:
@@ -435,6 +441,7 @@ def test_the_train_keys_only_rl_reads_are_refused_with_the_option_to_set_instead
         "train.batch_size: only the rl trainer reads it, and this run trains with sft: set trainer_options.batch_size",
         "train.max_staleness: only the rl trainer reads it, and this run trains with sft: leave it out",
         "train.stale_filter: only the rl trainer reads it, and this run trains with sft: leave it out",
+        "train.stepping: only the rl trainer reads it, and this run trains with sft: leave it out",
         "train.loss_fn: only the rl trainer reads it, and this run trains with sft: leave it out",
         "eval.every: trainer: sft does not evaluate during training yet: set eval.every: 0, and evaluate the run's "
         "checkpoints with platoon eval",

@@ -8,6 +8,7 @@ through properties of the same names.  The step the loops are at and the event o
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import InitVar, dataclass, field
 from typing import Any
 
@@ -84,6 +85,8 @@ class TrainLoopSharedState(_GivenPolicyState):
     policies: PolicySet | None = None
     # The run's step clock, which each step's end advances; None only until __post_init__ makes the state's own.
     clock: StepClock | None = None
+    # Each trained policy's clock when they step independently, the leader's ``clock`` (None: in lockstep).
+    clocks: Mapping[str, StepClock] | None = None
     sampling_client_step: int
     stats_logger: StatsLogger
     train_tracker: StatsTracker

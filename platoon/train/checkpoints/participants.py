@@ -6,7 +6,9 @@ of the run's ``checkpoints.jsonl``, the leader policy's save, whose ``loop_state
 (:data:`COUNTER_KEYS`), then each participant's entries, in the order the participants registered.  A trainer registers
 its participants with the run (``run.checkpoints``); the rl trainer's is its draws: the per-task statistics and the
 dispatcher's state.  In a run of several trained policies a checkpoint is a barrier of their saves, which the leader's
-row, written last, commits (:mod:`platoon.train.checkpoints.barrier`).
+row, written last, commits (:mod:`platoon.train.checkpoints.barrier`).  When they step independently, every full save
+of any policy is a commit of its own (:meth:`RunCheckpoints.commit`, :mod:`platoon.train.checkpoints.commits`), and the
+start's launch and exit barriers are commits too.
 
 The participants' rules (RFC 0021, section 8): each key is its participant's own (:meth:`RunCheckpoints.register`
 refuses one that the counters, the keys kept for several policies, the row itself (:func:`row_fields`) or another
@@ -27,6 +29,7 @@ from platoon.train.policy.spec import failure_note
 
 if TYPE_CHECKING:
     from platoon.train.checkpoints.barrier import Counters
+    from platoon.train.checkpoints.commits import Commits
     from platoon.train.checkpoints.resume import StartPoint
     from platoon.train.policy.checkpoints import Waiter
     from platoon.train.policy.set import PolicySet
@@ -41,10 +44,10 @@ POLICIES_KEY = "policies"
 # The keys kept for runs of several policies, which no participant may hold: the other trained policies' rows of a
 # checkpoint (POLICIES_KEY), and commit_seq.
 RESERVED_KEYS = (POLICIES_KEY, "commit_seq")
-# The keys of a row that the run claims whoever takes part: its counters, the other trained policies' rows, and its
-# draws' (the rollout source's, its credit estimators' state included), the only other keys a platoon release writes,
-# so that every run directory a release wrote resumes.
-CORE_KEYS = (*COUNTER_KEYS, POLICIES_KEY, "tasks", "next_position", "dispatch", "credit")
+# The keys of a row that the run claims whoever takes part: its counters, the other trained policies' rows, a commit's
+# number, and its draws' (the rollout source's, its credit estimators' state included), the only other keys a platoon
+# release writes, so that every run directory a release wrote resumes.
+CORE_KEYS = (*COUNTER_KEYS, POLICIES_KEY, "commit_seq", "tasks", "next_position", "dispatch", "credit")
 
 
 @functools.cache
@@ -77,6 +80,11 @@ class CheckpointParticipant(Protocol):
         ...
 
     # Optional: ``async def aclose(self) -> None``, which the run calls as the start ends, also after a failure.
+    # Optional: ``capture(name) -> Awaitable[Mapping[str, Any]]``, a plain method that takes what checkpoint ``name``
+    # saves at once (no await: immutable values, or references to them) and returns the writing still to do, whose
+    # result is its entries.  When the run's policies step independently, a commit calls it under the commit lock and
+    # awaits the writing after releasing it; a participant without it has its ``checkpoint_state`` awaited under the
+    # lock (:mod:`platoon.train.checkpoints.commits`).
 
 
 class RunCheckpoints:
@@ -100,6 +108,8 @@ class RunCheckpoints:
         self._joined = joined
         # Where the start begins, once it is read (resume); None before.
         self.start: "StartPoint | None" = None
+        # The commits of a run whose trained policies step independently (None: they step in lockstep).
+        self.commits: "Commits | None" = None
         # The name of the newest full checkpoint this start saved; None before its launch save.
         self.last_saved: str | None = None
 
@@ -171,9 +181,12 @@ class RunCheckpoints:
         else its own now), and the leader's row names their rows (``policies``,
         :func:`~platoon.train.checkpoints.barrier.save_others`); then the leader policy saves
         (:meth:`~platoon.train.policy.policy.Policy.save`, under ``wait``), and ``checkpoints.jsonl`` records the row
-        once its save succeeded: the row that commits the checkpoint.  The paths the save wrote, by policy."""
+        once its save succeeded: the row that commits the checkpoint.  When the policies step independently, the
+        barrier is a commit too: its row's ``commit_seq`` follows the counters, and ``policies`` names every policy's
+        row, the leader's own included, with each one's published version and step (each other's in ``others``).  The
+        paths the save wrote, by policy."""
 
-        from platoon.train.checkpoints.barrier import save_others  # Tinker loads with the saves
+        from platoon.train.checkpoints.barrier import Counters, save_others  # Tinker loads with the saves
 
         loop_state: dict[str, Any] = {
             "batch": step,
@@ -181,9 +194,18 @@ class RunCheckpoints:
             "policy_version": policy_version,
             "optimizer_steps": optimizer_steps,
         }
+        if (commits := self.commits) is not None:
+            loop_state["commit_seq"] = commits.take_seq()
         for participant in self.participants:
-            loop_state.update(await participant.checkpoint_state(name))
+            if commits is not None and callable(capture := getattr(participant, "capture", None)):
+                loop_state.update(await capture(name))  # a commit's entries: the shares of the kept groups too
+            else:
+                loop_state.update(await participant.checkpoint_state(name))
         saved, named = await save_others(self.policies, self.run_dir, name, step=step, counters=others or {}, wait=wait)
+        if named and commits is not None:  # independent stepping: every policy's entry, as a commit names them
+            named = commits.barrier_entries(
+                name, named, leader=Counters(policy_version, optimizer_steps), step=step, others=others or {}
+            )
         if named:  # several trained policies: the leader's row names each other one's
             loop_state[POLICIES_KEY] = named
         leader = self.policies[self.policies.leader]
@@ -193,7 +215,24 @@ class RunCheckpoints:
             if named:  # among several policies, the error says whose save failed
                 error.add_note(failure_note(leader.spec, f"saving checkpoint {name}"))
             raise
+        if named and commits is not None:
+            commits.barrier_saved(named, saved[leader.id])
         self.last_saved = name
+        return saved
+
+    async def commit(self, policy: "PolicyId", name: str, *, step: int, counters: "Counters", wait: "Waiter") -> Any:
+        """Stepping independently, ``policy``'s full checkpoint ``name`` at its own step ``step``, a commit
+        (:meth:`~platoon.train.checkpoints.commits.Commits.commit`): the paths its save wrote.  A failure names the
+        policy and its service."""
+
+        assert self.commits is not None  # only a run that steps independently commits one policy at a time
+        try:
+            saved = await self.commits.commit(policy, name, step=step, counters=counters, wait=wait)
+        except Exception as error:
+            error.add_note(failure_note(self.policies[policy].spec, f"saving checkpoint {name}"))
+            raise
+        if policy == self.policies.leader:
+            self.last_saved = name
         return saved
 
 

@@ -217,8 +217,15 @@ class EvaluationLoop:
         eval_stats["eval/num_tasks"] = total_eval_tasks
         # The step whose policy the evaluation started on; it is logged at the step training reached by its end.
         eval_stats["eval/step"] = step
-        # Use force=True since train already logged at this step
-        shared_state.stats_logger.log(step=shared_state.train_step, stats=eval_stats, force=True)
+        independent = getattr(shared_state, "clocks", None) is not None  # the policies step each on its own clock
+        if independent:  # a row of its own, on the run's axis (the leader's steps), as the leader's rows are
+            eval_stats["run/step"] = shared_state.train_step
+            shared_state.stats_logger.log_row(eval_stats, axis="run/step")
+        else:
+            # Use force=True since train already logged at this step
+            shared_state.stats_logger.log(step=shared_state.train_step, stats=eval_stats, force=True)
+        # Stepping independently, the policies may publish while the evaluation runs: their versions at its end.
+        moved = {"versions_end": end} if independent and (end := _versions(shared_state.policies)) != versions else {}
         if shared_state.evaluations_path is not None:  # so that a start that resumes at step does not rerun it
             record_evaluation(
                 shared_state.evaluations_path,
@@ -227,6 +234,7 @@ class EvaluationLoop:
                 tasks=total_eval_tasks,
                 seconds=eval_elapsed,
                 **({"versions": versions} if versions else {}),
+                **moved,
             )
 
     async def _run_groups(self) -> tuple[int, dict[str, RolloutStats]]:

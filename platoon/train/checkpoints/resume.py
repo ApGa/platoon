@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from tinker_cookbook import checkpoint_utils
 
 from platoon.train.checkpoints.barrier import newest_barrier
+from platoon.train.checkpoints.commits import newest_commit, resumed_version
 from platoon.train.checkpoints.dispatch_state import (
     ResumePlan,
     plan_resume,
@@ -24,7 +25,7 @@ from platoon.train.checkpoints.dispatch_state import (
     saved_fallback_slots,
     saved_token_positions,
 )
-from platoon.train.checkpoints.kept_groups import decode_group, read_kept
+from platoon.train.checkpoints.kept_groups import decode_group, kept_shares, read_kept
 from platoon.train.checkpoints.saving import ORDER_POSITION_KEY
 from platoon.train.dispatch.dispatcher import Dispatcher
 from platoon.train.dispatch.settled import _Settled
@@ -56,12 +57,14 @@ def _resume_policy_counters(resume_info, num_minibatches: int) -> tuple[int, int
 @dataclass(frozen=True)
 class PolicyStart:
     """Where one policy begins a start: the checkpoint row it resumes from (``record``: its weights and its optimizer's
-    state; None for a fresh run), and the policy version and optimizer steps that row saved."""
+    state; None for a fresh run), the policy version it resumes at and the optimizer steps that row saved, and, when
+    the run's policies step independently, its own step (None: the run's)."""
 
     policy: PolicyId
     record: checkpoint_utils.CheckpointRecord | None
     version: int
     optimizer_steps: int
+    step: int | None = None
 
 
 @dataclass(frozen=True)
@@ -92,14 +95,24 @@ class StartPoint:
 
     @classmethod
     def read(
-        cls, run_dir: str, num_minibatches: int, *, leader: PolicyId = MAIN, others: Sequence[PolicyId] = ()
+        cls,
+        run_dir: str,
+        num_minibatches: int,
+        *,
+        leader: PolicyId = MAIN,
+        others: Sequence[PolicyId] = (),
+        independent: bool = False,
     ) -> "StartPoint":
         """The start point of a start of the run in ``run_dir``, whose steps take ``num_minibatches`` optimizer steps
         each (what a checkpoint without the counters implies): ``leader``'s newest row in the run's
         ``checkpoints.jsonl``, for a run of one trained policy; with the run's other trained policies (``others``),
         the newest whose rows of them each one still has, and each one's start from the row it names
-        (:func:`~platoon.train.checkpoints.barrier.newest_barrier`)."""
+        (:func:`~platoon.train.checkpoints.barrier.newest_barrier`); when they step ``independent``ly, the newest
+        commit in any policy's file whose named rows hold, each policy starting from the row it names, at its own step
+        (:func:`~platoon.train.checkpoints.commits.newest_commit`)."""
 
+        if others and independent:
+            return cls._read_commit(run_dir, num_minibatches, (leader, *others))
         if others:
             return cls._read_barrier(run_dir, num_minibatches, leader, others)
         resume_info = checkpoint_utils.get_last_checkpoint(run_dir)
@@ -126,6 +139,25 @@ class StartPoint:
             version, steps = _resume_policy_counters(row, num_minibatches)
             policies[policy] = PolicyStart(policy, row, version, steps)
         return cls(record, record.batch or 0, policy_version, optimizer_steps, _row_loop_state(record), policies)
+
+    @classmethod
+    def _read_commit(cls, run_dir: str, num_minibatches: int, policies: Sequence[PolicyId]) -> "StartPoint":
+        """The start point of a run whose trained policies (``policies``, the leader first) step independently: the
+        newest commit that holds; each policy starts from the row it names, at its own step and at the version the
+        version rule gives (:func:`~platoon.train.checkpoints.commits.resumed_version`).  A fresh run's at 0."""
+
+        commit = newest_commit(run_dir, policies)
+        if commit is None:
+            fresh = {policy: PolicyStart(policy, None, 0, 0, 0) for policy in policies}
+            return cls(None, 0, 0, 0, {}, fresh)
+        starts = {}
+        for policy in policies:
+            row, entry = commit.rows[policy], commit.entries[policy]
+            version, steps = _resume_policy_counters(row, num_minibatches)
+            starts[policy] = PolicyStart(policy, row, resumed_version(entry, version), steps, int(entry["step"]))
+        record, leader = commit.record, starts[policies[0]]
+        step = record.batch or 0
+        return cls(record, step, leader.version, leader.optimizer_steps, _row_loop_state(record), starts)
 
 
 def _row_loop_state(resume_info: checkpoint_utils.CheckpointRecord | None) -> dict[str, Any]:
@@ -370,12 +402,17 @@ def _saved_samplings(
 
 def _read_kept_groups(source: "RolloutSource", record: Any) -> dict[tuple[int, int], "_Settled"]:
     """The groups the checkpoint a start resumes from kept, as the steps dequeue them, by draw, in the order they
-    settled; none, with a warning, when their file cannot be read, so that their tasks are rolled out again."""
+    settled; none, with a warning, when their file cannot be read, so that their tasks are rolled out again.  When the
+    run's policies step independently, the source's share ledger takes up what each policy did with each group's
+    share."""
 
     if not isinstance(record, Mapping):
         return {}
     try:
-        groups = [decode_group(group) for group in read_kept(source.run_dir, record)]
+        kept = read_kept(source.run_dir, record)
+        groups = [decode_group(group) for group in kept]
+        if source.ledger is not None:  # independent stepping: what each policy did with its share of each group
+            source.ledger.restore(kept_shares(kept))
     except ValueError as exc:
         logger.warning(
             "The groups the checkpoint kept, which had settled and no step had trained yet, cannot be read, so "

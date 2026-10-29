@@ -24,7 +24,7 @@ from platoon.train.components import (
     _sampler_checks,
     normalize_environment_configs,
 )
-from platoon.train.policy.spec import policy_problems
+from platoon.train.policy.spec import Stepping, policy_problems
 from platoon.train.trainer.registry import rolls_out, trainer_problems
 from platoon.train.workflow.protocol import StaleFilterSetting
 from platoon.utils.config import ConfigError, value_hint
@@ -380,9 +380,9 @@ class RefillConfig:
             raise ValueError(f"train.refill.max_groups_per_step: {problem}")
 
 
-# The ``train:`` keys that only the rl trainer reads (RFC 0021): its batch, its duration, its loss and its rollouts.
-# The others declare the policy every trainer trains (``main``: its model, renderer, adapter and optimizer) and the
-# deadlines of its updates.  Under another trainer, setting one of these is a load error
+# The ``train:`` keys that only the rl trainer reads (RFC 0021): its batch, its duration, its loss, its stepping and its
+# rollouts.  The others declare the policy every trainer trains (``main``: its model, renderer, adapter and optimizer)
+# and the deadlines of its updates.  Under another trainer, setting one of these is a load error
 # (platoon.train.trainer.registry).
 RL_ONLY_TRAIN_KEYS = (
     "batch_size",
@@ -392,6 +392,7 @@ RL_ONLY_TRAIN_KEYS = (
     "num_microbatches",
     "max_staleness",
     "stale_filter",
+    "stepping",
     "loss_fn",
     "loss_fn_config",
     "workflow_config",
@@ -491,6 +492,14 @@ class TrainConfig:
     # version (``GroupRolloutWorkflow`` does) has each datum judged by its rollout's (see
     # docs/how-to/train-and-eval.md).
     stale_filter: StaleFilterSetting = "group"
+    # How the run's trained policies step, when it trains several (experimental): ``lockstep`` (the default), every
+    # policy in each step, on its rows of the step's batch_size groups, each checkpoint saving them all; or
+    # ``independent``, each policy on its own clock, with its own batch (``policies.<id>.batch_size``), staleness bound
+    # and checkpoint cadence (``policies.<id>.checkpoint``), no policy waiting for another's training or saves, and
+    # every full save of any policy a point a resume can start from. With one trained policy both are the same. A
+    # resume keeps the run's stepping. Only the rl trainer reads it: trainer: sft, which trains one policy, refuses it.
+    # See docs/how-to/train-and-eval.md.
+    stepping: Stepping = "lockstep"
     optimizer: AdamParams = field(default_factory=AdamParams)
     # Tinker loss function, for example ``cispo`` or ``importance_sampling``.
     loss_fn: str = "cispo"
@@ -606,6 +615,8 @@ class TrainConfig:
             raise ValueError(f"train.permit_release must be 'group' or 'rollout', got {self.permit_release!r}")
         if self.stale_filter not in get_args(StaleFilterSetting):
             raise ValueError(f"train.stale_filter must be 'group' or 'datum', got {self.stale_filter!r}")
+        if self.stepping not in get_args(Stepping):
+            raise ValueError(f"train.stepping must be 'lockstep' or 'independent', got {self.stepping!r}")
         limit = self.max_starting_rollouts
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             raise ValueError(
@@ -624,22 +635,35 @@ def _check_sample_timeout(key: str, seconds: Any) -> None:
 
 
 @dataclass
+class PolicyCheckpointConfig:
+    """``policies.<id>.checkpoint``: when a policy the run trains saves full checkpoints, under ``train.stepping:
+    independent``, counted in its own steps.  A key left out is the run's (``checkpoint.every``, in steps, and
+    ``checkpoint.recovery_every``)."""
+
+    # Its own steps between permanent checkpoints; 0 saves none (None: checkpoint.every, in steps).
+    every: int | None = None
+    # Its own steps between recovery checkpoints (None: checkpoint.recovery_every). With checkpoint.keep_recovery,
+    # keep_recovery × this must exceed the policy's bound (its max_staleness, else the run's largest), which its own
+    # pruner keeps.
+    recovery_every: int | None = None
+
+    def __post_init__(self) -> None:
+        every, recovery = self.every, self.recovery_every
+        if every is not None and (isinstance(every, bool) or not isinstance(every, int) or every < 0):
+            raise ValueError(f"checkpoint.every must be a number of the policy's steps, or 0 for never, got {every!r}")
+        if recovery is not None and (isinstance(recovery, bool) or not isinstance(recovery, int) or recovery < 1):
+            raise ValueError(f"checkpoint.recovery_every must be 1 or more, or null, got {recovery!r}")
+
+
+@dataclass
 class PolicyConfig:
     """A ``policies:`` entry: a model the run trains, samples or scores with besides ``main``, under ``train:``'s names
-    for the same settings (experimental).  A policy the run trains (``trainable``, the default) steps in lockstep with
-    main: each step trains every trained policy on its rows of the step's groups, each on its own Tinker service with
-    its own optimizer and loss, and each checkpoint saves them all.  A frozen one (``trainable: false``) is sampled by
+    for the same settings (experimental).  A policy the run trains (``trainable``, the default) steps with main, in
+    lockstep (``train.stepping``, the default: each step trains every trained policy on its rows of the step's groups,
+    and each checkpoint saves them all) or on its own clock (``independent``: its own batch and checkpoint cadence),
+    each on its own Tinker service with its own optimizer and loss.  A frozen one (``trainable: false``) is sampled by
     the agents ``agents:`` binds to it or scores for a credit estimator (a teacher), and is never stepped, saved or
     pruned."""
-
-    # Keys that steer a policy's own clock, which lockstep does not have: every trained policy steps on the run's.
-    UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
-        "batch_size": "not in this release: in lockstep every trained policy trains its rows of the step's "
-        "train.batch_size groups; a policy's own batch arrives with independent stepping (RFC 0021, milestone B4b)",
-        "checkpoint": "not in this release: in lockstep each checkpoint saves every trained policy together, at "
-        "checkpoint.every and checkpoint.recovery_every; a policy's own cadence arrives with independent stepping "
-        "(RFC 0021, milestone B4b)",
-    }
 
     # Hugging Face model name of the base model.
     model_name: str
@@ -674,6 +698,12 @@ class PolicyConfig:
     # else train.max_staleness). The dispatcher's horizon counts the smallest bound of the trained policies that agents
     # sample, train.max_staleness included when main's is unset.
     max_staleness: int | None = None
+    # Under train.stepping: independent, how many of the policy's shares (its rows of a group) each of its steps trains
+    # (None: train.batch_size); a smaller batch steps more often.
+    batch_size: int | None = None
+    # Under train.stepping: independent, when the policy saves full checkpoints, counted in its own steps (None: the
+    # run's checkpoint.every and checkpoint.recovery_every, in its steps).
+    checkpoint: PolicyCheckpointConfig | None = None
 
     def __post_init__(self) -> None:
         # As train:'s own; the loader checks the keys' types, as it does train:'s, and names the entry in front of a
@@ -684,9 +714,9 @@ class PolicyConfig:
 
 def _check_training_keys(policy: PolicyConfig) -> None:
     """Refuse a ``policies:`` entry's training keys that no run could take, as ``train:``'s own are refused (the loader
-    checks their types): an adapter rank below 1, a negative staleness bound and an empty loss name, each named by its
-    key; the loader puts the entry's path in front (``policies.worker: lora_rank ...``), since the entry does not know
-    its id."""
+    checks their types): an adapter rank below 1, a negative staleness bound, an empty loss name and a batch below 1,
+    each named by its key; the loader puts the entry's path in front (``policies.worker: lora_rank ...``), since the
+    entry does not know its id."""
 
     rank = policy.lora_rank
     if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int) or rank < 1):
@@ -696,6 +726,13 @@ def _check_training_keys(policy: PolicyConfig) -> None:
         raise ValueError(f"max_staleness must be a whole number of versions, 0 or more, or null, got {bound!r}")
     if policy.loss_fn is not None and (not isinstance(policy.loss_fn, str) or not policy.loss_fn):
         raise ValueError(f"loss_fn must name a Tinker loss, or be null, got {policy.loss_fn!r}")
+    batch = policy.batch_size
+    if batch is not None and (isinstance(batch, bool) or not isinstance(batch, int) or batch < 1):
+        raise ValueError(f"batch_size must be a whole number, 1 or more, or null, got {batch!r}")
+    if isinstance(policy.checkpoint, Mapping):  # a section built in Python from a mapping
+        if unknown := sorted(set(policy.checkpoint) - {"every", "recovery_every"}):
+            raise ValueError(f"checkpoint takes every and recovery_every, not {', '.join(map(str, unknown))}")
+        policy.checkpoint = PolicyCheckpointConfig(**policy.checkpoint)
 
 
 @dataclass

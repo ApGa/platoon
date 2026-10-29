@@ -574,7 +574,7 @@ def test_a_hook_alone_is_tested_on_a_step_s_end_built_for_the_test():
 
 def test_a_step_s_end_shows_its_hooks_what_they_read_and_keeps_the_run_s_side_private():
     public = [item.name for item in dataclasses.fields(px.StepEnd) if not item.name.startswith("_")]
-    assert public == ["kind", "step", "step_updates", "consumed", "tracker", "published"]
+    assert public == ["kind", "step", "step_updates", "consumed", "tracker", "published", "policy"]
     reference = Path(__file__).resolve().parents[3] / "docs" / "reference" / "experimental.md"
     assert "| `_" not in reference.read_text(encoding="utf-8")  # no private field in any table
     assert px.TrainInterrupted is signals.TrainInterrupted  # what an interruptible wait raises

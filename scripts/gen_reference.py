@@ -1144,17 +1144,23 @@ def render_experimental() -> str:
             "the group it credits with its members, agents and rows, and the decorator that registers it "
             "([Write a credit estimator](../extending/credit-estimators.md)).",
         ),
+        (
+            "Independent stepping",
+            "The shares of a run's groups when its trained policies step each on its own clock: what a trainer's "
+            "steps take each policy's shares from.",
+        ),
     )
     names = experimental.__all__
     statistics, admission, leases = names.index("EntryInfo"), names.index("Admission"), names.index("RolloutLease")
-    trainers, credit = names.index("Trainer"), names.index("CreditEstimator")
+    trainers, credit, shares = names.index("Trainer"), names.index("CreditEstimator"), names.index("ShareLedger")
     groups = (
         names[:statistics],
         names[statistics:admission],
         names[admission:leases],
         names[leases:trainers],
         names[trainers:credit],
-        names[credit:],
+        names[credit:shares],
+        names[shares:],
     )
     lines = [
         GENERATED,

@@ -39,6 +39,24 @@ service names the policy and the service, as the step's own updates' errors do. 
 updated publishes once, in one checkpoint of them all when the cadence saves one, and `end.published` names each at
 its new version; at the launch it names every trained policy. A frozen policy takes no update (`ValueError`).
 
+When the trained policies step each on its own clock ([Step each policy on its own
+clock](../how-to/train-and-eval.md#step-each-policy-on-its-own-clock-experimental)), the sequence runs at the end of
+each policy's own step, and `end.policy` names whose step it is (None in lockstep). A hook may update that policy only:
+`end.learner` and `end.train` of another refuse it (`ValueError`), as the run's learners (`run.learner`) refuse to send
+anything from a hook (`RuntimeError`), so a hook that serves one policy returns early at the others' step ends. Only
+that policy publishes, on its own checkpoint cadence. The policies' steps end at their own times, so `drain`, `update`
+and `published` may run for two policies' step ends at once: a hook keeps what it does at one end apart from another's,
+and guards state they share. A commit of any policy waits until no step's end runs its hooks, so the state a hook saves
+(`keys`) is never taken part-way through one of its methods; it is the state as of the commit, which the other policies
+resume behind ([Keep its state across restarts](#keep-its-state-across-restarts)). A trainer of your own whose policies
+step independently ends each policy's step with `await run.end_step(policy=...)`, on that policy's clock
+(`run.clocks[policy]`), and takes the policy's shares from `run.rollouts().ledger` (a
+`platoon.experimental.ShareLedger`: `take(policy, n, stop=run.shutdown)`, then `consumed` under its `lock` once the step
+trained them); the leader's shares are every group, so a share of it may hold none of its rows (and a group that failed
+none at all, `rollout` None). One that drops stale shares judges each at `judge_version(policy, group)`: a share that a
+resume put back has the age it had when the policy first consumed it, and judged against the policy's version now it
+could be dropped.
+
 ## Write one
 
 ```python
@@ -129,6 +147,41 @@ checkpoints too. The rules:
   start (exit 78): resume with the hooks that saved it, or start a new run.
 - **Every full checkpoint holds it**, the launch, cadenced, interrupted and final ones; a weights-only save holds
   none.
+- **Stepping independently, it follows each policy's own step.** A commit of any policy saves the hook's state as it is
+  when the commit captures it, but each other policy resumes from the older row the commit names, and its step ends
+  since that row run again. State that moves at a policy's step ends (a cursor of the examples a hook trains into the
+  policy, say), taken up as saved, is ahead of the weights the policy resumes with: the step ends that run again would
+  skip their work. Keep it by that policy's own step, and in `resume(start)` take it at the step the policy resumes
+  from, `start.policies[<id>].step`. A commit names the policy's newest full checkpoint row, which a policy that updates
+  at each of its steps saves every `recovery_every` of them (its own, `policies.<id>.checkpoint`, else the run's), so
+  older entries are never read again: drop them, or every commit writes them all.
+
+```python
+class Examples(px.StepHookBase):
+    keys = ("examples_after",)
+    KEEP = 4                               # the worker's checkpoint.recovery_every
+
+    def __init__(self) -> None:
+        self.after = {0: 0}                # the cursor after each of the worker's steps, by step
+
+    async def checkpoint_state(self, name):
+        return {"examples_after": {str(step): cursor for step, cursor in self.after.items()}}
+
+    def resume(self, start):
+        saved = start.loop_state.get("examples_after") or {"0": 0}
+        step = start.policies["worker"].step  # its step ends since then run again
+        self.after = {int(at): cursor for at, cursor in saved.items() if int(at) <= step}
+
+    async def update(self, end):
+        if end.policy == "worker":
+            cursor = self.after[end.step]
+            await end.train("worker", self.examples[cursor : cursor + 2], objective=CrossEntropy())
+            self.after[end.step + 1] = cursor + 2
+            # it updates the worker at each of its steps: no commit names a row of it more than KEEP steps back
+            self.after = {at: c for at, c in self.after.items() if at >= end.step + 1 - self.KEEP}
+```
+
+State that the step alone gives (the example at `end.step`) needs no keys at all.
 
 A hook (and a participant) may close what it opened in `async aclose()`: the run calls each, in reverse order of
 registration, after the trainer's `close()`, also when the start failed. A start that failed raises its error as it

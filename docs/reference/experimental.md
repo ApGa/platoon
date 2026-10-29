@@ -55,6 +55,11 @@ and checked at load (`CreditCheckContext`); its `assign` sees a `CreditGroup` of
 (`ScoringFailed`) fails the group.  It is registered with
 `credit_estimator` or named as `module:Class`, and `platoon.testing.check_credit_estimator` checks it.
 `docs/extending/credit-estimators.md` is the guide.
+And independent stepping (RFC 0021): when a run's trained policies step each on its own clock
+(`TrainerNeeds.stepping`, `train.stepping: independent`), each settled group splits into one share per trained
+policy, its rows of the group, which a trainer's steps of that policy take from the run's `ShareLedger`
+(`source.ledger`: `take`, judged stale or not at `judge_version`, then `consumed` under its `lock` once the
+step trained them), each step ending with `run.end_step(policy=...)` on the policy's own clock (`run.clocks`).
 
 This module imports neither `tinker` nor `datasets`.
 
@@ -129,6 +134,7 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`PolicyView`](#platoon-experimental-policyview) | What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into text, its version now, and its scores of other rows (`score`), for a policy that scores: a frozen teacher. |
 | [`ScoringFailed`](#platoon-experimental-scoringfailed) | A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token. An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under `credit/failures`) and trains nothing, and the run goes on. |
 | [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
+| [`ShareLedger`](#platoon-experimental-shareledger) | The shares of a run's groups, as a trainer of its own whose policies step independently takes them (`run.rollouts().ledger`; `TrainerNeeds.stepping`): each step of policy `p` takes `p`'s shares (`take`), trains them (a trainer that drops stale ones judges each at `judge_version`), records them consumed under the commit lock (`async with ledger.lock:` `consumed`), then ends with `await run.end_step(policy=p)` on `p`'s own clock (`run.clocks[p]`). The run keeps the rest: which shares a checkpoint holds, which a resume puts back, and when a group retires. |
 
 ## Task samplers
 
@@ -1243,6 +1249,7 @@ the second and third).
 | `atomic_steps` | `bool` | `True` | Whether its steps reach a checkpoint whole or not at all: once a step sent training work, an interrupt saves no <step>_interrupted checkpoint of it, and the resume starts from the last full one. The rl trainer's are not. |
 | `fail_closed_updates` | `bool` | `True` | Whether an optimizer step that the service skipped, or whose metrics are not finite, raises (UpdateRejected) before anything publishes, for every update, the step hooks' too. The rl trainer only logs such metrics. |
 | `draw_provenance` | `bool` | `False` | Whether each training episode sees its draw (ctx.draw: platoon.programs.DrawInfo), the key that a step's end names it by (StepEnd.consumed). Off, the rollouts' requests are as they always were. |
+| `stepping` | `Literal['lockstep', 'independent']` | `"lockstep"` | The clocks the run builds for its trained policies: one for them all (lockstep), or one each (independent: each policy steps, publishes and saves on its own; a run of one trained policy has one clock either way). |
 
 <a id="platoon-experimental-trainersetup"></a>
 
@@ -1362,6 +1369,8 @@ optimizer, and the loss its rows train under).
 | `loss_fn` | `str \| None` | `None` |  |
 | `loss_fn_config` | `dict[str, Any] \| None` | `None` |  |
 | `max_staleness` | `int \| None` | `None` | How many of its own versions old its rows may be and still train; None: their entry's bound, else train.max_staleness (the stale filter's, platoon.train.step.staleness). |
+| `batch_size` | `int \| None` | `None` | Stepping independently (train.stepping: independent), how many of its shares (its rows of a group) each of its steps trains; None: train.batch_size, the leader's. |
+| `checkpoint` | `PolicyCheckpointConfig \| None` | `None` | Stepping independently, when it saves full checkpoints, counted in its own steps; None: the run's checkpoint.every and checkpoint.recovery_every, in its steps. |
 
 <a id="platoon-experimental-main"></a>
 
@@ -1589,6 +1598,7 @@ optimizer steps each policy took since the step's end began, whatever a hook cou
 | `consumed` | `Mapping[tuple[int, int], str]` | required | The draws the step committed, by key, each with its fate (consumed, stale or failed). |
 | `tracker` | `StatsTracker` | required | The step's metrics row: what a hook records here is logged with the step. |
 | `published` | `Mapping[str, int]` | `{}` | Who published at the end of this step, at which new version; set before the hooks hear it. |
+| `policy` | `str \| None` | `None` | Whose step ends, when the run's policies step independently (each on its own clock); None: the run's one step. |
 | `hook_updates` | `dict[str, int]` | | The hooks' optimizer updates so far, by policy, as platoon counts them. Read-only. |
 
 #### `StepEnd.for_test`
@@ -1604,13 +1614,15 @@ def for_test(
     tracker: StatsTracker | None = None,
     published: Mapping[str, int] | None = None,
     learner: Any = None,
+    policy: str | None = None,
 ) -> StepEnd
 ```
 
 A step's end built by hand, to test a hook alone: `end.learner(...)`, and so `end.train(...)`, hand
 out `learner` whatever the policy and the objective (a fake of
 `platoon.train.policy.learner.Learner` that records what the hook sends; None: they raise),
-`end.wait` awaits, and `hook_updates` is empty.  `tracker` defaults to a fresh `StatsTracker`.
+`end.wait` awaits, and `hook_updates` is empty.  `tracker` defaults to a fresh `StatsTracker`;
+`policy` names whose step ends, as when the run's policies step independently.
 
 #### `StepEnd.learner`
 
@@ -1621,7 +1633,9 @@ def learner(policy: str, *, objective: Objective) -> Learner
 The learner of `policy` under `objective`, for the hook whose `update()` runs, which may use it there
 only (it refuses to send anything after, in a later step too, and so does a learner made from it under another
 objective): the policy's training client and optimizer parameters, the ones the step's own updates used,
-failing closed when the trainer's needs say so, its metrics under `<hook name>/` in the step's row.
+failing closed when the trainer's needs say so, its metrics under `<hook name>/` in the step's row.  When the
+run's policies step independently, only the policy whose step ends (`policy`) may be updated: updating
+another at its end is refused (ValueError).
 
 #### `StepEnd.train`
 
@@ -2243,6 +2257,82 @@ Register a credit estimator class under `name`, from a module that an environmen
 so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its
 load-time check.  Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are
 reserved, whatever their case and their `-` or `_`; a name registered twice is an error.
+
+## Independent stepping
+
+The shares of a run's groups when its trained policies step each on its own clock: what a trainer's steps take each policy's shares from.
+
+<a id="platoon-experimental-shareledger"></a>
+
+### `platoon.experimental.ShareLedger`
+
+```python
+class ShareLedger(Protocol)
+```
+
+The shares of a run's groups, as a trainer of its own whose policies step independently takes them
+(`run.rollouts().ledger`; `TrainerNeeds.stepping`): each step of policy `p` takes `p`'s shares
+(`take`), trains them (a trainer that drops stale ones judges each at `judge_version`), records them
+consumed under the commit lock (`async with ledger.lock:` `consumed`), then ends with
+`await run.end_step(policy=p)` on `p`'s own clock (`run.clocks[p]`).  The run keeps the rest: which shares a
+checkpoint holds, which a resume puts back, and when a group retires.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `lock` | `asyncio.Lock` | The commit lock, which a step holds while it records what it consumed, so that a commit captures all of it or none of it. |
+
+#### `ShareLedger.take`
+
+```python
+async def take(policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[Settled]
+```
+
+`n` of `policy`'s shares, in the order they settled, those a resume put back first: each a settled
+group, as the source's `take` gives one in lockstep, whose output (`rollout`) holds `policy`'s rows of
+the group only (the leader's share of a group without its rows holds none; that of a group that failed is
+None), and whose `key` names its draw.  Fewer (none at all, perhaps) once no share will come
+(`done`): at the plan's end, or once a stop request ended another policy's loop and no group starts
+again.  Once `stop` is set (the run's shutdown request, `run.shutdown`), `TrainInterrupted` instead:
+the shares it took stay unconsumed, which the checkpoint at exit keeps.  A trainer that drops stale shares
+judges each at `judge_version`.
+
+#### `ShareLedger.judge_version`
+
+```python
+def judge_version(policy: PolicyId, group: Settled) -> int
+```
+
+The version of `policy` that the staleness of its share `group` (one `take` gave, not yet
+consumed) is judged at: the policy's version now, but for a share a resume put back, the version at which it
+has the age it had when the policy first consumed it (the oldest version stamped on its rows plus that age).
+The resume's version rule moves the policy's version past the row it resumes from, so a share put back,
+judged against the version now, could be dropped as stale, though it trained once on the same lineage.
+
+#### `ShareLedger.consumed`
+
+```python
+def consumed(
+    policy: PolicyId,
+    keys: Iterable[DrawKey | None],
+    *,
+    step: int,
+    fates: Mapping[DrawKey, str] | None = None,
+) -> None
+```
+
+`policy`'s step `step` (its clock's) trained or dropped its shares of the groups of `keys`, each with
+its fate (`fates`: `consumed`, `stale` or `failed`; default `consumed`).  Call it under `lock`,
+before the step ends.
+
+#### `ShareLedger.done`
+
+```python
+def done(policy: PolicyId) -> bool
+```
+
+Whether `policy`'s loop may end: no group runs that may still give it a share, it has none left to take,
+and none will start: the plan is drawn, or a stop request ended another policy's loop, whose full horizon holds
+back every group for good.
 
 ## The types these take and return
 

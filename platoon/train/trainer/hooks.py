@@ -24,9 +24,16 @@ hooks or without.  From the hooks' drain to the advance the clock says the step 
 the trainer's steps are not atomic, an interrupt then saves no checkpoint of the step either (rule 10), since its own
 updates and its commit are done and its hooks' perhaps half.
 
+When the run's policies step independently, the sequence runs at the end of each policy's own step (``end.policy``), and
+publishes that policy only: a hook may update that policy alone (``end.learner`` refuses another, and the run's learners
+send nothing from a hook), so a hook that serves one policy returns early at the others' step ends.  The ends of
+different policies' steps run at the same time, so a hook's ``drain``, ``update`` and ``published`` may run for several
+policies at once; a commit captures no hook's state while any of them runs (``StepHooks.running``, rule 10).
+
 Imports no Tinker, so that ``platoon.experimental`` re-exports it.
 """
 
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -139,6 +146,8 @@ class StepEnd:
     tracker: "StatsTracker"
     # Who published at the end of this step, at which new version; set before the hooks hear it.
     published: Mapping[PolicyId, int] = field(default_factory=dict)
+    # Whose step ends, when the run's policies step independently (each on its own clock); None: the run's one step.
+    policy: PolicyId | None = None
     # The run's side (None: a step's end that a test built).
     _run: RunSide | None = field(default=None, kw_only=True, repr=False)
     # The hook whose update() runs, which alone may update meanwhile.
@@ -165,11 +174,13 @@ class StepEnd:
         tracker: "StatsTracker | None" = None,
         published: Mapping[PolicyId, int] | None = None,
         learner: Any = None,
+        policy: PolicyId | None = None,
     ) -> "StepEnd":
         """A step's end built by hand, to test a hook alone: ``end.learner(...)``, and so ``end.train(...)``, hand
         out ``learner`` whatever the policy and the objective (a fake of
         :class:`~platoon.train.policy.learner.Learner` that records what the hook sends; None: they raise),
-        ``end.wait`` awaits, and ``hook_updates`` is empty.  ``tracker`` defaults to a fresh ``StatsTracker``."""
+        ``end.wait`` awaits, and ``hook_updates`` is empty.  ``tracker`` defaults to a fresh ``StatsTracker``;
+        ``policy`` names whose step ends, as when the run's policies step independently."""
 
         from platoon.utils.stats_tracker import StatsTracker
 
@@ -180,6 +191,7 @@ class StepEnd:
             consumed=consumed or {},
             tracker=tracker if tracker is not None else StatsTracker(),
             published=published or {},
+            policy=policy,
         )
         end._test_learner = learner
         return end
@@ -199,8 +211,15 @@ class StepEnd:
         """The learner of ``policy`` under ``objective``, for the hook whose ``update()`` runs, which may use it there
         only (it refuses to send anything after, in a later step too, and so does a learner made from it under another
         objective): the policy's training client and optimizer parameters, the ones the step's own updates used,
-        failing closed when the trainer's needs say so, its metrics under ``<hook name>/`` in the step's row."""
+        failing closed when the trainer's needs say so, its metrics under ``<hook name>/`` in the step's row.  When the
+        run's policies step independently, only the policy whose step ends (``policy``) may be updated: updating
+        another at its end is refused (ValueError)."""
 
+        if self.policy is not None and policy != self.policy:
+            raise ValueError(
+                f"policy {policy!r} steps on its own clock: at the end of policy {self.policy!r}'s step a hook updates "
+                f"{self.policy!r} only (train.stepping: independent takes no update of another policy at a step's end)"
+            )
         run, hook = self._run, self._updating
         if run is None:
             if self._test_learner is None:
@@ -254,7 +273,10 @@ class StepEnd:
 class StepHooks:
     """The run's step hooks, in the order they registered, which is the order they run in.  A hook with ``keys`` is
     a participant of the run's checkpoints (``checkpoints``) too, which registering it here registers it with;
-    ``joined`` hears of each hook, so that the run closes it."""
+    ``joined`` hears of each hook, so that the run closes it.  ``running`` is held while a step's end runs the hooks'
+    ``drain`` and ``update``, and while they hear its publication: nothing in lockstep; when the policies step
+    independently, the commits' hook phase, so that no commit captures a hook's state part-way through its work at
+    another policy's step end (:meth:`~platoon.train.checkpoints.commits.Commits.hook_phase`)."""
 
     def __init__(
         self, checkpoints: "RunCheckpoints | None" = None, *, joined: Callable[[Any], None] | None = None
@@ -262,6 +284,7 @@ class StepHooks:
         self._hooks: list[StepHook] = []
         self._checkpoints = checkpoints
         self._joined = joined
+        self.running: Callable[[], contextlib.AbstractAsyncContextManager[Any]] = contextlib.nullcontext
 
     def register(self, hook: StepHook) -> None:
         """``hook`` runs at every step's end from now on, after those registered before it; one with ``keys`` takes
@@ -324,14 +347,16 @@ async def finish_step(
     else:
         clock.ending = True
         end = end_of()
-        await _drain(hooks, end)
-        clock.step_open = True
-        await _update(hooks, end)
+        async with hooks.running():  # stepping independently, no commit captures the hooks' state meanwhile
+            await _drain(hooks, end)
+            clock.step_open = True
+            await _update(hooks, end)
         if clock.open_updates:
             raise _left_open(clock, "a step hook")
         end.tracker.scalar(**{"batch/hook_optimizer_updates": float(sum(end.hook_updates.values()))})
         end.published = published = await publish(end)
-        await _hear(hooks, end)
+        async with hooks.running():
+            await _hear(hooks, end)
         end._over = True
     clock.advance(consumed=source)
     return published

@@ -27,7 +27,7 @@ from platoon.train.policy.spec import (
     policy_specs,
     trained_policies,
 )
-from platoon.utils.config import ConfigError, build_config, validate_config
+from platoon.utils.config import ConfigError, build_config
 
 SETTINGS: dict[str, Any] = {
     "train": {
@@ -85,11 +85,10 @@ def test_a_trained_policy_takes_train_s_adapter_rank_optimizer_and_loss_unless_i
 
 
 @pytest.mark.parametrize("key", ["batch_size", "checkpoint"])
-def test_a_policy_s_own_batch_or_cadence_is_refused_naming_independent_stepping(key):
-    data = {**copy.deepcopy(SETTINGS), **worker(**{key: 4 if key == "batch_size" else {"recovery_every": 5}})}
-    [problem] = [found for found in validate_config(data, PlatoonTinkerRLTrainerConfig) if key in found]
-    assert problem.startswith(f"policies.worker.{key}: unknown key")
-    assert "in lockstep" in problem and "independent stepping (RFC 0021, milestone B4b)" in problem
+def test_a_policy_s_own_batch_or_cadence_is_refused_in_lockstep_naming_independent_stepping(key):
+    [problem] = problems(**worker(**{key: 4 if key == "batch_size" else {"recovery_every": 5}}))
+    assert problem.startswith(f"policies.worker.{key}: a policy's own ")
+    assert "(train.stepping: independent); stepping together (in lockstep, as train.stepping or the" in problem
 
 
 @pytest.mark.parametrize(

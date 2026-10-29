@@ -1,13 +1,15 @@
 """A policy as the config declares it (:class:`PolicySpec`), the run's policies as its config declares them
 (:func:`policy_specs`), which policy each agent samples (:class:`AgentBindings`, :func:`agent_bindings`) and which
 tools each agent role may call (:func:`role_tools`), the bound the dispatcher's horizon counts (:func:`horizon_bound`),
-and what loading refuses of them (:func:`policy_problems`, and :func:`workflow_problems` against the run's workflow
-class) or warns of (:func:`policy_warnings`).  Imports no Tinker.
+how the trained policies step (:data:`Stepping`, :func:`steps_independently`), and what loading refuses of them
+(:func:`policy_problems`, and :func:`workflow_problems` against the run's workflow class) or warns of
+(:func:`policy_warnings`).  Imports no Tinker.
 
 ``main`` is the policy ``train:`` declares: each field of its spec keeps its ``train.*`` name, so that one vocabulary
 names a policy wherever it is declared.  ``policies:`` declares the run's others under the same names (RFC 0021): ones
-the run trains in lockstep with main, each with its own optimizer, loss and staleness bound, and frozen ones, sampled
-by the agents ``agents:`` binds to them or scoring for a credit estimator, and never stepped, saved or pruned.
+the run trains with main, each with its own optimizer, loss and staleness bound (and, stepping independently, its own
+batch and checkpoint cadence), and frozen ones, sampled by the agents ``agents:`` binds to them or scoring for a credit
+estimator, and never stepped, saved or pruned.
 """
 
 import difflib
@@ -15,16 +17,19 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from platoon.train import task_stats
 from platoon.utils.judges import JUDGE_ROLE, VERIFIER_ROLE
 from platoon.utils.role_tools import unmatched
 
 if TYPE_CHECKING:
-    from platoon.train.config_defs import AdamParams
+    from platoon.train.config_defs import AdamParams, PolicyCheckpointConfig
 
 PolicyId = str
+# How a run's trained policies step (train.stepping, a trainer's TrainerNeeds.stepping): all together, in each step
+# (lockstep), or each on its own clock (independent).
+Stepping = Literal["lockstep", "independent"]
 # The policy that ``train:`` declares.  The same object as ``task_stats.MAIN``, by whose versions the per-task
 # statistics age their evidence, so that their snapshots keep their format.
 MAIN: Final[PolicyId] = task_stats.MAIN
@@ -62,6 +67,12 @@ class PolicySpec:
     # How many of its own versions old its rows may be and still train; None: their entry's bound, else
     # train.max_staleness (the stale filter's, platoon.train.step.staleness).
     max_staleness: int | None = None
+    # Stepping independently (train.stepping: independent), how many of its shares (its rows of a group) each of its
+    # steps trains; None: train.batch_size, the leader's.
+    batch_size: int | None = None
+    # Stepping independently, when it saves full checkpoints, counted in its own steps; None: the run's checkpoint.every
+    # and checkpoint.recovery_every, in its steps.
+    checkpoint: "PolicyCheckpointConfig | None" = field(default=None, hash=False)
 
 
 def service_name(spec: PolicySpec) -> str:
@@ -141,6 +152,8 @@ def _trained_settings(declared: Any, train: Any) -> dict[str, Any]:
         "loss_fn_config": loss_fn_config,
         "max_staleness": declared.max_staleness,
         "load_optimizer_state": declared.load_optimizer_state,
+        "batch_size": declared.batch_size,
+        "checkpoint": declared.checkpoint,
     }
 
 
@@ -203,6 +216,16 @@ def trained_policies(config: Any) -> tuple[PolicyId, ...]:
 
     declared = _declared(config)
     return (MAIN, *(policy for policy, entry in declared.items() if getattr(entry, "trainable", True)))
+
+
+def steps_independently(config: Any, stepping: Stepping | None = None) -> bool:
+    """Whether the run steps its trained policies each on its own clock: its trainer's stepping is ``independent``
+    (``stepping``, its ``needs().stepping``; None: ``train.stepping``, the rl trainer's answer, the only trainer a
+    config selects in this release), and it trains two or more (with one, independent stepping is lockstep: there is
+    one clock)."""
+
+    stepping = config.train.stepping if stepping is None else stepping
+    return stepping == "independent" and len(trained_policies(config)) > 1
 
 
 def horizon_bound(config: Any) -> int | None:
@@ -275,7 +298,9 @@ def policy_problems(config: Any) -> list[str]:
         problems.extend(_tools_problems(role, bound.tools))
     # Which policies the agents sample is read from bindings that the problems above may find wrong (a role bound to an
     # unknown policy, a frozen default): only once they hold does a policy no agent samples say something true.
-    return problems or _unsampled_problems(config)
+    if problems:
+        return problems
+    return [*_unsampled_problems(config), *stepping_problems(config, independent=steps_independently(config))]
 
 
 # The keys of a policies: entry that only a trained policy reads, and the value each has when it is left out.
@@ -286,7 +311,12 @@ _TRAINING_KEYS = {
     "loss_fn_config": None,
     "max_staleness": None,
     "load_optimizer_state": False,
+    "batch_size": None,
+    "checkpoint": None,
 }
+# The keys of a policies: entry that only a policy on its own clock reads (train.stepping: independent), each with the
+# key of train: or checkpoint: that a policy stepping in lockstep follows instead.
+_OWN_CLOCK_KEYS = {"batch_size": "train.batch_size", "checkpoint": "checkpoint.every and checkpoint.recovery_every"}
 
 
 def _entry_problems(where: str, policy: Any) -> list[str]:
@@ -349,6 +379,45 @@ def _tools_problems(role: str, tools: Any) -> list[str]:
     ]
 
 
+def stepping_problems(config: Any, *, independent: bool) -> list[str]:
+    """What the run refuses of how its trained policies step, ``independent``ly or together: a trained policy's own
+    batch or checkpoint cadence when they step together, where it would be ignored; and, stepping independently, a
+    batch that the step's minibatches and microbatches do not divide, and a group admission rule, whose steps under a
+    cap this release counts for a run that steps together only.  Loading asks it of ``train.stepping``
+    (:func:`steps_independently`), and the run again of its trainer's ``needs().stepping``."""
+
+    train, problems = config.train, []
+    parts = train.num_minibatches * train.num_microbatches
+    for policy_id, declared in _declared(config).items():
+        if not getattr(declared, "trainable", True):
+            continue  # a frozen policy's training keys are refused with the others (_entry_problems)
+        for key, instead in _OWN_CLOCK_KEYS.items():
+            if getattr(declared, key, None) is not None and not independent:
+                problems.append(
+                    f"policies.{policy_id}.{key}: a policy's own {key.replace('_', ' ')} is for policies that step "
+                    f"on their own clocks (train.stepping: independent); stepping together (in lockstep, as "
+                    f"train.stepping or the trainer's needs() say), every trained policy follows {instead}: set "
+                    "train.stepping: independent, or leave it out"
+                )
+        batch = getattr(declared, "batch_size", None)
+        if independent and isinstance(batch, int) and batch % parts:
+            problems.append(
+                f"policies.{policy_id}.batch_size: {batch} does not split into train.num_minibatches × "
+                f"train.num_microbatches ({parts}) parts: give a multiple of {parts}"
+            )
+    if independent:
+        from platoon.train.admissions import rule_mode  # the rules' names, read at load only
+
+        if rule_mode(config):
+            problems.append(
+                "train.stepping: independent steps each policy on its own clock, and a group admission rule other "
+                "than all (train.group_admission, or an entry's) counts its groups toward the steps of a run that "
+                "steps together: this release takes no rule under independent stepping; leave the rules at all, or "
+                "step in lockstep"
+            )
+    return problems
+
+
 def workflow_problems(config: Any, workflow_cls: Any, reference: str) -> list[str]:
     """Agents bound to several policies beside a workflow class that cannot bind them: one that does not declare
     ``binds_policies`` (its capabilities, :func:`~platoon.train.workflow.protocol.capabilities_of`), whose rollouts
@@ -369,9 +438,10 @@ def policy_warnings(config: Any) -> list[str]:
     """What loading warns of the config's ``policies:`` and ``agents:``, one line each: a frozen policy that no agent
     samples and no entry's ``credit_options`` names (a teacher's), which the run opens and never uses; a policy
     bound to the role ``policy``, the root agent's, which the root never samples (it samples ``agents.policy``); a
-    role that looks like a misspelling of one of :data:`PLATOON_ROLES` (:func:`_role_typos`); and a role's tool
-    pattern that matches no tool of the run's environments, when each declares its tools up front
-    (:func:`_tool_warnings`)."""
+    role that looks like a misspelling of one of :data:`PLATOON_ROLES` (:func:`_role_typos`); a role's tool pattern
+    that matches no tool of the run's environments, when each declares its tools up front (:func:`_tool_warnings`);
+    and, stepping independently, a trained policy that saves no full checkpoint before the run's end
+    (:func:`_unsaved_policies`)."""
 
     agents = agent_bindings(config)
     used = set(agents.sampled())
@@ -389,7 +459,7 @@ def policy_warnings(config: Any) -> list[str]:
             f"agents.policy ({agents.default}) whatever its role: only a subagent minted with the role {ROOT_ROLE} "
             "samples this policy"
         )
-    return [*lines, *_role_typos(config), *_tool_warnings(config)]
+    return [*lines, *_role_typos(config), *_tool_warnings(config), *_unsaved_policies(config)]
 
 
 def _role_typos(config: Any) -> list[str]:
@@ -404,6 +474,37 @@ def _role_typos(config: Any) -> list[str]:
             lines.append(
                 f"agents.roles.{role}: platoon opens no agent of this role, so its settings reach only the agents a "
                 f"harness mints with it; did you mean {close[0]!r}?"
+            )
+    return lines
+
+
+def _unsaved_policies(config: Any) -> list[str]:
+    """Stepping independently, each trained policy that saves no full checkpoint before the run's end: no permanent
+    cadence (``checkpoint.every``, its own or the run's, is 0) and no ``recovery_every``.  Each group whose share it
+    consumed stays kept until then, and every other policy's commit writes them all again."""
+
+    if not steps_independently(config):
+        return []
+    checkpoint = config.checkpoint
+    lines = []
+    if not checkpoint.every and checkpoint.recovery_every is None:
+        lines.append(
+            f"{MAIN} saves no full checkpoint before the run's end (checkpoint.every is 0 and "
+            "checkpoint.recovery_every unset), and its policies step independently: each group it consumed stays kept "
+            "until then, and every commit writes them all; set checkpoint.recovery_every"
+        )
+    for policy_id, declared in _declared(config).items():
+        own = getattr(declared, "checkpoint", None)
+        every, recovery = checkpoint.every, checkpoint.recovery_every
+        if own is not None:  # its own cadence, each key left out the run's
+            every = every if own.every is None else own.every
+            recovery = recovery if own.recovery_every is None else own.recovery_every
+        if getattr(declared, "trainable", True) and not every and recovery is None:
+            lines.append(
+                f"policies.{policy_id} saves no full checkpoint before the run's end (its checkpoint.every, or the "
+                "run's, is 0, and no recovery_every is set), and the policies step independently: each group it "
+                "consumed stays kept until then, and every commit writes them all; set "
+                f"policies.{policy_id}.checkpoint.recovery_every"
             )
     return lines
 

@@ -947,16 +947,16 @@ agents:
     subagent: {policy: worker}                  # the agents ctx.agents.spawn opens train the worker
 ```
 
-Every step trains every policy, in lockstep (RFC 0021; each policy stepping on its own clock is independent stepping,
-its milestone B4b):
+Every step trains every policy, in lockstep (RFC 0021; each policy may step on its own clock instead: [Step each
+policy on its own clock](#step-each-policy-on-its-own-clock-experimental)):
 
 - **Each policy's keys.** A trained policy takes `train:`'s names, each unset one `train:`'s: `lora_rank`,
   `optimizer`, `loss_fn`, `loss_fn_config` (when unset, `train.loss_fn_config` if its loss is `train:`'s, else none:
   the loss's own defaults), `max_staleness` (when unset, its entry's bound, else `train.max_staleness`), and
   `load_checkpoint_path` with `load_optimizer_state: true` to start a new run from a checkpoint's weights and its Adam
-  state. `batch_size` and `checkpoint` per policy are refused: in lockstep every policy trains on
-  the step's `train.batch_size` groups and saves at `checkpoint.every` and `checkpoint.recovery_every`; a policy's own
-  batch and cadence arrive with independent stepping (RFC 0021, milestone B4b).
+  state. `batch_size` and `checkpoint` per policy are refused in lockstep, where every policy trains on the step's
+  `train.batch_size` groups and saves at `checkpoint.every` and `checkpoint.recovery_every`: they are for policies that
+  step on their own clocks.
 - **Credit, then rows by policy.** A group is credited once, over every agent of every rollout; then its rows split by
   the policy that sampled them, each to its own policy's learner. An entry without `credit:` credits with `keyed` on
   `[task, policy, role]` in a run of several trained policies: each agent is centered on the mean reward of the
@@ -1008,12 +1008,117 @@ ever train it), `main` included when `agents.policy` names another; a frozen `ag
 trained policy's keys (`lora_rank`, `optimizer`, `loss_fn`, `loss_fn_config`, `max_staleness`,
 `load_optimizer_state`); `load_optimizer_state` without `load_checkpoint_path`; a `lora_rank` below 1, a negative
 `max_staleness` and an empty `loss_fn`, each named by its policy (`policies.worker: lora_rank must be ...`); a policy's
-`batch_size` or `checkpoint`; a reverse-KL teacher whose tokenizer differs from any trained policy's; and an entry
+`batch_size` or `checkpoint` in lockstep; a reverse-KL teacher whose tokenizer differs from any trained policy's; and an entry
 whose workflow credits with hooks of its own (`applies_credit` false). A resume that trains a policy that was frozen,
 or freezes one that trained, stops with exit code 78, as any change of the policy table does.
 
 [`examples/two-agent-lockstep`](../../examples/two-agent-lockstep/README.md) trains the subagents example's delegator
 and its workers as two policies, on one service and on two.
+
+## Step each policy on its own clock (experimental)
+
+`train.stepping: independent` lets each trained policy step, publish and save on its own clock, with its own batch,
+staleness bound and checkpoint cadence, and no policy waits for another's training or saves (RFC 0021, section 2.11).
+`lockstep` stays the default, and with one trained policy both are the same.
+
+```yaml
+train:
+  stepping: independent                         # default: lockstep
+  batch_size: 8                                 # main's batch, and the plan's groups per step
+  max_staleness: 1                              # main's bound: a horizon of (1 + 1) x 8 = 16 groups
+policies:
+  worker:
+    model_name: Qwen/Qwen3-4B-Instruct-2507
+    renderer_name: qwen3_instruct
+    batch_size: 2                               # its own batch (default: train.batch_size)
+    max_staleness: 7                            # its own bound: a horizon of (7 + 1) x 2 = 16
+    checkpoint: {recovery_every: 4}             # its own cadence, in its own steps (default: checkpoint.*)
+agents:
+  roles:
+    subagent: {policy: worker}
+checkpoint:
+  recovery_every: 1                             # main's cadence, in its steps
+```
+
+- **Shares.** Each group is credited once, over every agent, as in lockstep. Then it splits into one share per trained
+  policy with rows in it: that policy's rows of the group. A policy's steps take its shares in the order they settled,
+  `policies.<id>.batch_size` of them (`train.batch_size` for `main`), each trained by its own learner; then the policy
+  publishes its new sampler, and only it. Every group is a share of `main`'s too, one that holds none of its rows when
+  it has none, so that `main`'s steps take every group, as a lockstep step does; a group that failed is `main`'s share
+  alone.
+- **Rates stay coupled.** The plan is `train.batch_size` groups per `main` step, as in lockstep: each of `main`'s shares
+  is one group of the plan. Each policy has a horizon of its own, `(max_staleness + 1) x batch_size` of its shares, and
+  a group starts only when every policy's horizon has room, since which policies a rollout samples is known only once it
+  settles. Every group feeds every policy whose agents run in it, so the slowest learner still bounds how many groups
+  start; what changes is that no policy waits for another, and a policy with a smaller batch steps more often. A
+  policy's rows then age faster in its own versions, so its bound grows by the same factor, `(k + 1) x batch >= main's
+  (k + 1) x batch`, or its horizon holds dispatch back. `train/dispatch/blocked_share/horizon:<id>` says which horizon
+  did.
+- **Staleness.** Each policy judges its own shares, against its version and bound. A stale share is dropped for that
+  policy alone; the group's other shares are untouched. `policies/<id>/peer_lag/<q>` reports how many versions each
+  other policy moved between the sampling of the shares' rows and their training.
+- **Commits.** Every full save of any policy is a commit: a point a resume starts from. It captures, at once, the run's
+  draws, every group that has not retired with what each policy did with its share (the step that consumed it and
+  its age then), and every other policy's newest saved row and published version; it then writes them and the
+  policy's weights, and appends the policy's row to its own `checkpoints.jsonl` (`main`'s the run's, another policy's
+  `<run>/policies/<id>/checkpoints.jsonl`), with `loop_state.commit_seq` and `loop_state.policies`, every policy's row
+  by its `state_path`. A group stays kept until each policy that consumed its share has saved a row after that step
+  (`run/retained_groups`), so keep `recovery_every` small. A pruner never deletes a row that a commit in flight, or
+  the newest commit in some policy's file, names.
+- **Resume.** A start resumes from the commit with the highest `commit_seq` in any policy's file whose named rows its
+  policies still have; a newer one that does not hold is skipped and recorded in `lock.json` (`policies_restore`). Each
+  policy goes on from the row the commit names, at its own step. A policy whose samplers published after that row were
+  lost resumes at one version more than the commit records it published, so that no new sampler reuses a lost number.
+  Each share a policy consumed after its row goes back to the front of its queue and trains again, judged at the age it
+  had then (`policies/<id>/retrained_shares`; a trainer of your own judges it at `ledger.judge_version(policy, group)`),
+  so no share trains twice in a policy's weights. A share the commit records as not yet consumed is judged afresh when
+  it is taken, and may be dropped as stale then: the version rule and the shares trained again before it age it, so keep
+  `recovery_every` small. A policy other than `main` names its own commits with its id (`recovery-<id>-<step>`,
+  `<id>-<step>`), apart from the rows the start's launch and exit saves write into its file.
+- **Evaluation** counts `main`'s steps (`eval.every`); an evaluation's row in `evaluations.jsonl` adds `versions_end`
+  when some policy published while it ran.
+- **Metrics.** Each step logs a row of its own: `main`'s with the names a run of one policy gives them, the run's
+  metrics (`train/dispatch/*`, `train/workload/*`, `timing/*`, `run/retained_groups`) and `run/step`; every other
+  policy's under `policies/<id>/`, with `policies/<id>/step`. The rows carry no W&B step of their own: W&B numbers them,
+  and each metric plots against its row's axis. Every policy's rows add `policies/<id>/share_wait_s` (how long its step
+  waited for shares), `policies/<id>/retrained_shares` and `policies/<id>/peer_lag/<q>`.
+- **Step hooks** run at the end of each policy's own step, with `end.policy` naming it, and may update that policy only:
+  `end.learner(other, ...)` is refused, and `run.learner` sends nothing from a hook, whichever policy's learner it is.
+  The ends of different policies' steps run at the same time, so a hook's methods may too; a commit waits until no
+  step's end runs its hooks, and so saves no hook's state part-way. It saves the state as it is then, while every other
+  policy resumes from the older row the commit names and runs its step ends since then again: a hook whose state moves
+  at a policy's step ends keeps it by that policy's own step, and takes it up at `start.policies[<id>].step` ([Keep its
+  state across restarts](../extending/step-hooks.md#keep-its-state-across-restarts)).
+- **Interrupts and exit.** A stop request stops each policy's loop at its step's end; a step that applied an update
+  finishes first. A loop that stopped takes no more shares, so once its horizon is full no group starts again: a step
+  that still waits for shares then closes short with those it has, as at the plan's end (it counts as a step of the
+  plan, so the run draws that many fewer groups), rather than wait for groups that never start or give the stopped
+  policy shares beyond its bound. The save at exit (`<step>_interrupted`, or `final`) saves every policy and names them
+  all. A start that resumes with `main` at the plan's end, after a stop or a crash that came after `main`'s last step,
+  trains the shares the other policies have left and saves `final`. A trainer of your own passes the stop to
+  `ledger.take(policy, n, stop=run.shutdown)`, which raises `TrainInterrupted` once it is set.
+- **Failures.** A policy's service that fails, in an update or a save, stops the start, as in lockstep: the other
+  policy's loop is cancelled, nothing saves at exit, and a commit whose save had not appended its row is not one. The
+  next start resumes from the newest commit, each policy from the row it names. A policy that is slow, or whose save
+  hangs, holds the others back once its horizon fills: rates stay coupled.
+
+**What loading refuses** (exit 78), besides lockstep's: a policy's `batch_size` that `train.num_minibatches x
+train.num_microbatches` does not divide, `checkpoint.recovery_every` below 1 or `checkpoint.every` below 0, and a group
+admission rule other than `all` (`train.group_admission` or an entry's), whose steps count their groups toward a cap
+that this release keeps for steps of every policy at once. With `checkpoint.keep_recovery`, each policy's own pruner
+keeps its promise only when `keep_recovery` times the policy's own `checkpoint.recovery_every` (else the run's), counted
+in its own steps, exceeds its own `max_staleness` (else the run's largest bound): loading refuses a policy whose cadence
+does not. Loading warns of a trained policy that saves no full checkpoint before the run's end (no `recovery_every` and
+`checkpoint.every: 0`): every group it consumed stays kept, and every commit writes them all. A resume that changes the
+stepping stops with exit code 78: `identity.json` records `stepping: independent`, a start checks that its run's rows
+are commits (or are not), and a lockstep resume would train consumed shares again. Loading reads `train.stepping`; a
+trainer of your own whose `needs()` choose the stepping is held to the same rules as its start begins, and sets
+`train.stepping: independent` to give a policy its own `batch_size` or `checkpoint`. `trainer: sft` trains one policy,
+on the run's one clock, and refuses `train.stepping` as it does the other `train:` keys only the rl trainer reads
+([Fine-tune on a dataset](#fine-tune-on-a-dataset)).
+
+[`examples/two-agent-independent`](../../examples/two-agent-independent/README.md) trains the subagents example's
+delegator and its workers, the worker stepping about four times for each of the delegator's steps.
 
 ## Limit the tools each role may call (experimental)
 
@@ -1240,10 +1345,10 @@ checkpoint: {every: 200, recovery_every: 20, keep_recovery: 2}
 | `seed` | 42 | Each epoch's order of the conversations, and the rows `num_samples` takes |
 
 `train:` declares the policy (`model_name`, `renderer_name`, `renderer_kwargs`, `lora_rank`, `optimizer` and the
-deadlines of its updates). Its keys that only the rl trainer reads (its batch, duration, loss, staleness and rollout
-settings) are refused under `sft` when set, each with the `trainer_options` key to set instead when there is one, as
-`train.batch_size` names `trainer_options.batch_size`. An sft run rolls nothing out, so it needs no `environments`,
-and it refuses `policies:` and `agents:`, which only the rl trainer samples or scores with
+deadlines of its updates). Its keys that only the rl trainer reads (its batch, duration, loss, staleness, stepping and
+rollout settings) are refused under `sft` when set, each with the `trainer_options` key to set instead when there is
+one, as `train.batch_size` names `trainer_options.batch_size`. An sft run rolls nothing out, so it needs no
+`environments`, and it refuses `policies:` and `agents:`, which only the rl trainer samples or scores with
 ([Sample several policies](#sample-several-policies-experimental)).
 
 ### The datasets
@@ -1781,6 +1886,7 @@ shows: then raise `worker_launch_concurrent_groups`.
 |---|---|
 | `rollout_client/permits_held_mean` | The permits granted to groups, time-weighted. Held minus `rollouts_in_flight_mean` (`GroupRolloutWorkflow`'s members) is permit time no rollout used: under `group`, mostly finished rollouts waiting for their siblings; under `rollout`, close to 0 |
 | `train/dispatch/blocked_share/<reason>` | The share of the step in which the dispatcher could not start a group, by reason: `permits` (raise `max_concurrent_rollouts`, or, under `group`, return permits as rollouts end), `horizon` (only `max_staleness` or a faster trainer helps), `labels` (every label it could start was at its `rollout_group_limits`), `plan` (the run's remaining steps need no more groups), `sampler` (an adaptive task sampler found no eligible task) |
+| `train/dispatch/blocked_share/horizon:<id>` | When the trained policies step each on its own clock, in `main`'s rows: the share of the step in which policy `<id>`'s horizon held the dispatcher back, `horizon` being any of them. Near 1 for one policy: its horizon, `(max_staleness + 1) x batch_size` of its shares, is smaller than `main`'s (raise its `max_staleness`), or its learner is too slow for the run's rate ([Step each policy on its own clock](#step-each-policy-on-its-own-clock-experimental)) |
 | `rollout_client/startup_gate_waiting_mean` | The groups waiting for a worker-startup slot, time-weighted (process isolation) |
 | `train/batch/censoring/censored_share`, `.../mixed_groups`, `.../slowest_pass_rate`, `.../others_pass_rate`, and each label's under `train/batch/<column>/<label>/censoring/` | Over every group the step dequeued that a straggler policy applies to (none without one): the share of rollouts the policy cancelled, and over the groups whose valid rollouts both passed and failed, the pass rate of each group's slowest valid rollout against that of the others. A slowest rate well below the others' means a cut drops failures more than successes |
 
@@ -1941,6 +2047,9 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/sampler/decision_ms`, `.../decision_ms_max` | A few ms | The mean and longest time a sampler's decisions took since the last step; long ones hold up the event loop. An adaptive entry's `.../tokens` counts its slots waiting for a group to start, and `train/sampler/skipped_slots` those a full queue skipped. `pass_rate`'s own metrics: [Choose tasks by their pass rates](#choose-tasks-by-their-pass-rates-experimental) |
 | `rollout_client/trainer_queue_wait_seconds_total` | Small next to `timing/batch_total` | The trainer waits on rollouts: raise rollout concurrency or speed up the environment |
 | `train/dispatch/blocked_share/permits`, `.../horizon` | One of them near 1 says what decides when groups start | `permits`: the rollout budget binds; a larger `max_concurrent_rollouts` while the engines have room (under `train.permit_release: group`, first the default, `rollout`), unless `rollout_client/start_limit/waiting_mean` is above 0: then rollouts hold permits while they wait to start up, and the lever is `max_starting_rollouts`. `horizon`: only `max_staleness` or a faster trainer helps ([Rollout permits](#rollout-permits)) |
+| `train/dispatch/blocked_share/horizon:<id>`, `policies/<id>/share_wait_s` | Neither near 1, or long, for one policy alone | When the trained policies step each on its own clock ([Step each policy on its own clock](#step-each-policy-on-its-own-clock-experimental)): the share of `main`'s step in which policy `<id>`'s horizon held the dispatcher back, and how long the policy's step waited for its shares. A horizon near 1 is a policy whose `(max_staleness + 1) x batch_size` is below `main`'s, or whose learner is too slow for the run's rate; the others then wait for shares |
+| `policies/<id>/peer_lag/<q>` | Small | How many versions policy `<q>` moved between the sampling of the rows policy `<id>` trained and their training |
+| `policies/<id>/retrained_shares`, `run/retained_groups` | 0 but after a resume; steady | The shares a resume put back that the step trained again, and the groups kept until each policy that consumed its share has saved after that step, which every commit writes: they grow with a policy's `recovery_every` |
 | `rollout_client/permits_held_mean` against `rollout_client/rollouts_in_flight_mean` | Close under `permit_release: rollout`, the default; under `group` the gap is the straggler idle that `rollout` returns | Permits held while no rollout ran: finished rollouts waiting for their group's slowest (`permit_release: group`), groups waiting at the startup gate, or rollouts waiting for a start slot |
 | `rollout_client/start_limit/waiting_mean`, `.../wait_seconds_p90`, and under process isolation `rollout_client/startup_gate_waiting_mean` | Near 0, or briefly at a run's start | With `train.max_starting_rollouts`: rollouts wait to start up, holding their permits. Raise `max_starting_rollouts`, or turn it off, not `max_concurrent_rollouts` ([Rollout start-ups](#rollout-start-ups-experimental)) |
 | `rollout_client/start_limit/releases/<cause>` | Mostly `first_call` | Many `end` or `timer`: the rollouts make no model call through platoon's gateway, or fail before one, so the limit bounds whole rollouts: turn it off for this workload, or fix the failures |

@@ -51,6 +51,11 @@ and checked at load (:class:`CreditCheckContext`); its ``assign`` sees a :class:
 (:class:`ScoringFailed`) fails the group.  It is registered with
 :func:`credit_estimator` or named as ``module:Class``, and ``platoon.testing.check_credit_estimator`` checks it.
 ``docs/extending/credit-estimators.md`` is the guide.
+And independent stepping (RFC 0021): when a run's trained policies step each on its own clock
+(``TrainerNeeds.stepping``, ``train.stepping: independent``), each settled group splits into one share per trained
+policy, its rows of the group, which a trainer's steps of that policy take from the run's :class:`ShareLedger`
+(``source.ledger``: ``take``, judged stale or not at ``judge_version``, then ``consumed`` under its ``lock`` once the
+step trained them), each step ending with ``run.end_step(policy=...)`` on the policy's own clock (``run.clocks``).
 
 This module imports neither ``tinker`` nor ``datasets``.
 """
@@ -78,6 +83,7 @@ from platoon.train.credit.api import (
     TrainingSample,
 )
 from platoon.train.credit.registry import credit_estimator
+from platoon.train.dispatch.shares import ShareLedger
 from platoon.train.leases import RolloutLease, rollout_lease
 from platoon.train.objectives.api import Objective
 from platoon.train.policy.snapshot import PolicyMoved, PolicySnapshot
@@ -197,4 +203,6 @@ __all__ = [
     "PolicyView",
     "ScoringFailed",
     "credit_estimator",
+    # independent stepping (RFC 0021)
+    "ShareLedger",
 ]
