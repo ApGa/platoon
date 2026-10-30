@@ -25,6 +25,7 @@ DEFAULTS = {
     "num_retries": 0,
     "condenser": "none",
     "condenser_max_tokens": 0,
+    "allow_token_count_estimate": False,
 }
 ADAPTER = {"reasoning_replay": False, "request_timeout_s": 300, "num_retries": 5}  # Harbor's openhands-sdk adapter
 WHERE = "environments.0.harness_options"
@@ -149,8 +150,8 @@ def test_a_mixtures_shared_mapping_must_suit_each_of_its_harnesses(tmp_path):
         run_components(load(train_config(tmp_path, entry)))
 
     assert error.value.problems == [
-        f"{WHERE}.system_prompt: unknown key; harness openhands@1.54.0.post1 takes reasoning_replay, "
-        "request_timeout_s, num_retries, condenser, condenser_max_tokens",
+        f"{WHERE}.system_prompt: unknown key; harness openhands@1.54.0.post2 takes reasoning_replay, "
+        "request_timeout_s, num_retries, condenser, condenser_max_tokens, allow_token_count_estimate",
         f"{WHERE}: the harnesses of the mixture ['openhands', 'platoon-react'] share one mapping, which must suit each "
         "of them; give a harness whose options the others do not take an environments entry of its own",
     ]
@@ -290,7 +291,7 @@ def test_lock_json_records_the_options_with_their_defaults(tmp_path, monkeypatch
 
     lock = json.loads((tmp_path / "logs/exp/trial/lock.json").read_text())
     (record,) = [component for component in lock["components"] if component["kind"] == "harness"]
-    assert (record["ref"], record["resolved"]) == ("openhands", "openhands@1.54.0.post1")
+    assert (record["ref"], record["resolved"]) == ("openhands", "openhands@1.54.0.post2")
     assert record["options"] == {"default": {"train": DEFAULTS}}  # no evaluation: only training's
 
 

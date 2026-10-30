@@ -204,7 +204,7 @@ harnesses, with the version of platoon that provides them:
 ```text
 harness                 kind      distribution   source
 mini-swe-agent@2.4.6    spec      platoon 0.5.0  platoon/harness/builtin/specs/mini-swe-agent.toml
-openhands@1.54.0.post1  spec      platoon 0.5.0  platoon/harness/builtin/specs/openhands.toml
+openhands@1.54.0.post2  spec      platoon 0.5.0  platoon/harness/builtin/specs/openhands.toml
 platoon-bash@1          spec      platoon 0.5.0  platoon/harness/builtin/specs/platoon-bash.toml
 platoon-codeact@1       function  platoon 0.5.0  platoon.harness.builtin.codeact.harness:codeact
 platoon-noop@1          function  platoon 0.5.0  platoon.harness.builtin.oracle:noop
