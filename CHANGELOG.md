@@ -2,9 +2,9 @@
 
 What each release of platoon changes. Platoon's version is below 1.0: a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
-release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
+release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
-## 0.5.0 (unreleased)
+## 0.5.0 (2026-10-29)
 
 ### New features
 
@@ -40,8 +40,8 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `NET_ADMIN` included, is refused at fetch, naming the service and key (`compose: <service>.<key>: ...`). A dataset's
   overlay may edit compose services (`[[compose]]`: set, replace or unset their keys, or mark one external) and list
   the host variables a compose file may name (`compose_host_env`), which sessions resolve when they open, so that no
-  host value enters a lock; a read-only bind may name the path a listed variable names, and no other host path.
-  Stacks with services besides `main` stay refused until platoon runs them (RFC 0010)
+  host value enters a lock; a read-only bind may name the path a listed variable names, and no other host path. A
+  file with services besides `main` runs as a stack (below)
   ([Compose files](docs/how-to/sandboxes-and-harbor.md#compose-files)).
 - **Sandboxes can keep a task's processes through `kill_processes`.** `Sandbox.keep_processes(entries)`, optional, spares
   processes a session started for the task before any agent ran, with their descendants; the built-in providers have
@@ -228,12 +228,42 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   the `process` provider's is the port of the host that the stack holds. A socket path too long for an address is
   handed out as a link in node scratch (`platoon.sandbox.stacks.SocketLinks`)
   ([Write a sandbox provider](docs/extending/sandbox-providers.md#run-multi-container-stacks)).
+- **Node services: services a node runs once for every rollout on it.** A Harbor environment declares them
+  (`node_services`, by name: an image, a command, the port stacks reach it at, CPUs of the run's that it keeps from the
+  run's rollouts (whole cores, each node service its own), memory, environment, binds, which a bind with `stage: true`
+  copies to node-local disk once per node, a health check and its front's routes), and a dataset's overlay marks the
+  compose service that one serves (`[[compose]]` `external`, with `scope`, what each rollout's scope of it carries,
+  `${NAME}` read from the task's variables), which then no rollout starts. `platoon train` and `platoon eval` start a
+  supervisor per node service before the first rollout (`python -m platoon.envs.harbor.node_services`, in a session of
+  its own), which owns the service under a lock in node scratch, in a sandbox of the environment's provider with the
+  run's labels, checks it between rollouts, starts it again when it fails, backing off, and gives up after failed starts
+  in a row; the run waits until each one serves, and stops before any rollout when one does not start, replaces a
+  supervisor that died, fails when a service gave up, and stops them as it ends, while a Ctrl+C or a scheduler's
+  SIGTERM leaves them serving its last rollouts. Another run on the node that declares the same service shares it, and
+  takes it over when the first one ends, the scopes its workers open meanwhile waiting for it. A stack reaches the
+  service by the served service's name at its port, through a scope of its own rollout: a socket of the supervisor's
+  front that lets only the declared routes through, adds the token the service checks and the scope's values
+  (`X-Platoon-Scope`), and drops what the rollout sends in their place, so that `main` reaches neither the service's
+  other routes nor another rollout's task; a pod relays it (an upstream at the port, the name a host alias of the pod),
+  and the `process` provider's stacks relay a port of the host to it. A rollout whose node service failed while it used
+  it (a request in flight, or one since the service last passed its health check), or could not answer it, is `invalid`
+  (`node_service_down`), whatever `on_sidecar_down` says; the other rollouts go on with the service's next start, and
+  an outcome records which starts of the service answered it (`node_services`). A site profile may declare node
+  services too (`node_services`), which an entry takes by name (`{name: site}`). Docker's compose projects, the
+  host-network fallback and providers without the new `externals` capability reach no node service: such stacks are
+  refused when the tasks are listed. `StackSpec.externals` (`platoon.sandbox.stacks.ExternalService`) is what a stack
+  provider gets of them ([Node services](docs/how-to/sandboxes-and-harbor.md#node-services)).
+- **A FrontierSmith recipe.** `recipes/frontiersmith` runs FrontierSmith's 200 synthetic competitive-programming
+  problems as agentic Harbor tasks, fetched through its own adapter at its release, with the Frontier-CS judge as a
+  node service in place of each task's privileged judge: go-judge as your own uid (rlimits, not cgroups), on 16 CPUs
+  that the rollouts' agents leave alone, its parallelism from them, reached through a scope of the rollout's own
+  problem; a judge that cannot grade makes the rollout `invalid` rather than 0. It has configs for an evaluation and
+  for a small training check ([`recipes/frontiersmith`](recipes/frontiersmith/README.md)).
 - **Harness specs get a task's own MCP servers.** `{task_mcp_servers}` renders the MCP servers a task offers its agents,
   as a JSON list of each one's `name`, `transport` and `url` as the task's sandbox reaches it (or a `stdio` server's
   `command` and `args`), for a harness in the task's sandbox that reaches them itself, as Harbor's agents do; a harness
   that runs locally gets `[]`, and reaches only the servers that the env's tools serve. A session gives them as
   `task_mcp_servers`, an optional attribute ([Placeholders](docs/tutorials/cli-harness.md#placeholders)).
-
 - **One lifecycle for every trainer, and the trainer API (experimental).** Each start of training goes through
   `platoon.train.trainer.run.TrainerRun`, in the order a start always ran: the trainer's checks, the signal
   handlers, the policies' service clients and the start point, their training clients, the trainer's preparation,
@@ -244,9 +274,41 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `CheckpointParticipant` (a part of the run's state that every full checkpoint holds, after the run's counters, in
   the order the parts registered) and `Objective`, and `platoon.testing.check_trainer` checks a trainer: it trains a
   run of two steps on a fake Tinker service, stops one at a step boundary and resumes it. The config's `trainer:`
-  selects the trainer; this release has one, `rl`, the default (`sft` and `interleaved` are reserved). Nothing a run
-  does changes.
-
+  selects the trainer: `rl`, the default, or `sft` (below; `interleaved` is reserved). Nothing a run does changes.
+- **Supervised fine-tuning on LLaMA-Factory datasets (`trainer: sft`).** A run fine-tunes its policy on chat datasets
+  instead of rollouts, with the loss on the model's turns: the mean negative log-likelihood of the assistant's
+  replies and tool calls (with `mask_history`, of each conversation's last one only), rendered by the policy's renderer
+  as the policy sees them when it samples. The datasets follow LLaMA-Factory's conventions: a `dataset_info.json` in
+  `trainer_options.dataset_dir` names each one, on the Hugging Face Hub (`hf_hub_url`) or in files (`file_name`:
+  json, jsonl, csv, parquet or arrow), with its `formatting`, `split`, `subset`, `folder`, `num_samples`, `columns`
+  and `tags`; `alpaca` rows (`instruction`, `input`, `output`, `system`, `history`) and `sharegpt` conversations
+  (`from`/`value` or `role`/`content` messages, a system prompt, `tools`, and `function_call` and `observation`
+  turns) become conversations as LLaMA-Factory's converters align them, and the rows it would skip are skipped.
+  An entry's `columns` and `tags` replace LLaMA-Factory's defaults whole, as they do there. `trainer_options` sets the
+  datasets, `dataset_dir` (relative to the config file; left out, `data` beside it), `batch_size`, `num_epochs` or
+  `max_training_steps`, `num_microbatches`, `max_length` (shared among a conversation's turns as LLaMA-Factory's
+  `cutoff_len` is), `mask_history` and `seed`, checked when the config loads, `dataset_info.json` with them; `train:`
+  declares the policy, and its keys that only `rl` reads are refused under `sft` when set, naming the option to set
+  instead. Before the service opens, the run renders the first conversation, the first with tools, the first with a
+  tool call and the first with neither a system prompt nor tools, and refuses a renderer that cannot render one,
+  naming its dataset and row (a system message a renderer adds of its own does not train). Each epoch walks every
+  conversation once in a seeded order, and every full checkpoint saves where the run is (`loop_state.sft`), so a
+  resume trains each conversation once an epoch, also with another `batch_size`; a resume with other conversations or
+  another seed is refused. `checkpoint.keep_recovery` needs no `train.max_staleness` under `sft`, since nothing
+  samples the policy. `platoon config validate --tasks` loads the datasets of an sft config. Preference and
+  multimodal datasets, and evaluation during training, are not there yet
+  ([Fine-tune on a dataset](docs/how-to/train-and-eval.md#fine-tune-on-a-dataset), which lists where it differs from
+  LLaMA-Factory; [`examples/sft`](examples/sft/README.md)). Its steps are atomic and its updates fail closed, and
+  each step ends with `run.end_step(sampled=False)`: the step hooks a subclass registers run there, and since nothing
+  else samples the policy, a step without a hook, or one that updated nothing, publishes no sampler and saves only the
+  full checkpoint the cadence asks for. The trainer API has what such a trainer needs: that `sampled=False`,
+  `TrainerBase.stats_logger` and `train_tracker`; a trainable policy has its optimizer's parameters once it opens, the
+  run stops the clock's watchdog after `run_steps`, and a recovery checkpoint that a step's end saves goes to the
+  trainer's pruning.
+  `platoon.testing.check_trainer` takes `options_for_steps`, the options of a run of so many steps, for a trainer
+  whose options say how long it trains, and `platoon.testing.fake_tinker_service` is the fake service it runs on, for
+  a test of a run of one's own: it renders with the toy renderer and records the datums it trains on and the
+  checkpoints it deletes.
 - **Any trainer draws the run's rollouts, and the workflow contract (experimental).** A trainer whose
   `needs()` say it rolls out gets the start's draws from its run, `run.rollouts()`
   (`platoon.train.dispatch.source.RolloutSource`): the run's task order and samplers, the group admission rules, the
@@ -257,6 +319,227 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `WorkflowSetup`, `RolloutOutput`, `OutputReport`, `report_of` and `rows_by_policy`. `platoon train` builds the run's
   workflow class from a `WorkflowSetup`, with its `from_setup` when it has one (`GroupRolloutWorkflow` does), else with
   `GroupRolloutWorkflow`'s keyword arguments, as before. Nothing a run does changes.
+- **Step hooks: work at the end of each training step (experimental).** A step hook (`platoon.experimental.StepHook`,
+  `StepHookBase`) runs at the end of every step of any trainer, after the step's own updates and its commit and before
+  it publishes: each hook drains its side work (`drain`), adds optimizer updates of the step's policy on the same
+  training client and Adam state (`update`, through `end.train(policy, datums, objective=...)` or
+  `end.learner(policy, objective=...)`), and hears what the step published (`published`, also when nothing did, and
+  once after the launch). Platoon counts the hooks' updates from the policy's optimizer steps, and the step publishes
+  each policy it or a hook updated once, as one new version, so the hooks spend no staleness budget; the step's row
+  gains `batch/hook_optimizer_updates`, and each hook's metrics go under `<name>/`. An update takes Adam parameters of
+  its own (`PolicyUpdate.apply(adam_params=...)`, `end.train(..., adam_params=...)`). A hook alone is tested on
+  `StepEnd.for_test(learner=...)` ([Write a step hook](docs/extending/step-hooks.md), `examples/replay-sft-hook`).
+- **Attaching step hooks.** The rl trainer attaches the hooks its options name, from the config:
+  `trainer_options: {hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]}`, checked when the config loads and
+  built with the class's `from_run(run, options)` before the training service opens; a hook that does not import,
+  build or register stops the run with exit code 78. A trainer of its own registers its hooks in `check()`
+  (`run.hooks.register`, which also makes a hook with `keys` a participant of the run's checkpoints) and ends each step
+  with `run.end_step()`: the hooks, then each policy that the step's updates through `run.learner` or a hook's moved
+  publishes once (`run.publish`: a full checkpoint on the cadence, else a weights-only save), and the rollout workers
+  of the draws the run opened get each new sampler, the launch's first.
+- **Failures and interrupts around step hooks.** A hook that raises in `drain` or `update` fails the start before
+  anything publishes; one that is not `critical` only hears publications, and its errors are logged. A hook's learner
+  sends and counts during the `update()` that took it only, under another objective too, the trainer's `run.learner`
+  sends nothing while the hooks run, a policy takes one update at a time, and a step's end refuses an update left open
+  (sent, not applied), with hooks or without. A hook's `end.wait(..., interruptible=True)` raises
+  `TrainInterrupted` (now in `platoon.experimental`) on a stop request when the trainer's steps are atomic; when they
+  are not, the rl trainer's, the step ends first, and an interrupt that comes as the hooks run all the same saves no
+  checkpoint of the step, so that none saves half a step.
+- **The rules of a run's checkpoints and close.** A participant's keys are its own: `run.checkpoints.register` refuses
+  the counters', those kept for several policies, the fields that a `checkpoints.jsonl` row holds itself (`name`,
+  `epoch`, `final`, `state_path` and `sampler_path`, read from tinker_cookbook's `CheckpointRecord`, which an entry of
+  the same name would replace or be replaced by), a step hook's of the draws (`tasks`, `next_position`, `dispatch`,
+  `credit`) and another participant's, with a `ConfigError` (exit 78) that names the participant and the key. Those
+  registered in `check()` take up the start point before any training client opens, and a key of the resumed row that
+  nothing claims stops the start (exit 78). The trainer's `close` runs in `finally`, also after a failure
+  (`run.ended` tells them apart), then each hook's and participant's `aclose`, in reverse order of registration; a start
+  that failed raises its error as it was, the close's errors noted on it.
+- **What a trainer asks of the run (RFC 0021, rule 10).** `TrainerNeeds` says it: `atomic_steps` (an interrupt inside
+  a step that sent training work saves no `<step>_interrupted` checkpoint of it, and the resume starts from the last
+  full one), `fail_closed_updates` (an optimizer step of a learner of the run's that the service skipped, or whose
+  metrics are not finite, raises `UpdateRejected` before it counts) and `draw_provenance` (each training episode sees
+  its draw as `ctx.draw`, a `platoon.experimental.DrawInfo`, which a step's end names in `StepEnd.consumed`). A
+  trainer on `TrainerBase` has the first two on by default, and its `needs()` may turn either off; the rl trainer
+  keeps both off, as before. A step that sends training work by hand, outside `run.learner`, says so
+  (`run.clock.step_open = True`), and `run.learner` is built once the run's clock started (`ready()`).
+- **Side inference and warm starts.** `Policy.snapshot()` (`platoon.experimental.PolicySnapshot`) samples a policy's
+  published sampler and refuses a sample once the policy has published again (`PolicyMoved`); `Policy.renderer` and
+  `.tokenizer` are its model's. `checkpoint.load_optimizer_state: true` starts a new run from `load_checkpoint_path`'s
+  weights and its optimizer state. `platoon.testing.check_trainer` runs a step hook of its own at each step's end
+  (`runs step hooks`) and stops a run as the hooks drain a step (`keeps steps whole`). Nothing a run without hooks does
+  changes.
+- **Per-datum stale masks (experimental).** `train.stale_filter: datum` drops only the datums of a group that are more
+  policy versions old than its bound, where `group`, the default, drops the whole group by its oldest datum: a rollout
+  that spans a published policy keeps the datums it sampled since, and the others keep the advantages their group's
+  credit gave them. Each model call records the policy version it sampled (`TinkerLLMInteraction.version` and
+  `ChatResponse.version`, defaulted; a rollout worker's `FollowingSamplingClient` pins the client and version of each
+  call together), each datum is judged by the oldest among its own calls, and a group none of whose datums is within
+  the bound is dropped whole, as before. `train/batch/stale_datums` counts the datums dropped. A workflow takes the
+  setting through the new `takes_stale_filter` capability and its `stale_filter`, as `GroupRolloutWorkflow` does
+  (RFC 0020's P5; [Per-datum stale masks](docs/how-to/train-and-eval.md#per-datum-stale-masks-experimental)). Under
+  `group` nothing a run does changes, but the staleness warning's last advice, which named the masks as planned, now
+  names `train.stale_filter: datum`.
+- **Credit estimators, chosen per environment entry (experimental).** `environments[].credit` (with `credit_options`)
+  chooses how an entry's training groups turn rewards into advantages, in place of the workflow's own credit:
+  `group` (that credit, as an estimator, value for value), `keyed` (each agent's rows centered on the mean reward of
+  the group's agents that share its key, any of `task`, `policy`, `role` and `depth`, optionally leave-one-out: under
+  `[task, role]` a subagent is centered on the group's subagents, not on its rollout's root baseline), a name an entry's
+  `package` registers with `@credit_estimator`, or `module:Class`. The training workflow awaits the entry's estimator
+  once per group, in the trainer, after every member has settled; evaluation never runs one. An estimator that reads
+  agents (`needs_agents`) has the rollout workers tag each row with the agent that produced it (worker protocol 3,
+  `PolicyRolloutWorkerRequest`, sent only then), and sees every agent of every member with its role, policy, depth,
+  parent, own reward and rows; the group's output is then `PolicyGroupOutput`, its rows with their tags, which a full
+  checkpoint keeps whole. An estimator with state changes it in `settle(group)` as the run files each group, and each
+  full checkpoint saves it (`loop_state.credit`) with the groups it keeps. An estimator that raises, or whose `assign`
+  does not return within its `assign_timeout_seconds` (600 by default), stops the run with a `CreditEstimatorError`
+  that names it and its entry. Loading resolves each estimator, checks its
+  options and runs its `check` (exit 78), refuses one beside a workflow that does not apply it (the new capability
+  `applies_credit`; a `GroupRolloutWorkflow` subclass that overrides `compute_baselines` or `assign_advantages` keeps
+  crediting with them), and `lock.json` records it (`kind: credit`). `platoon.experimental` exports the credit API
+  (`CreditEstimator`, `CreditEstimatorBase`, `CreditSetup`, `CreditCheckContext`, `CreditGroup`, `MemberRollout`,
+  `AgentRun`, `TrainingSample`, `PolicyView`, `credit_estimator`), and `platoon.testing.check_credit_estimator` checks
+  an estimator: advantages on action tokens only, and a resume that credits as the run would have
+  ([Credit each environment's groups](docs/how-to/train-and-eval.md#credit-each-environments-groups-experimental),
+  [Write a credit estimator](docs/extending/credit-estimators.md);
+  [`examples/credit-by-role`](examples/credit-by-role/README.md) gives each role of a delegating rollout a baseline of
+  its own). A run whose entries set no `credit` runs as before, request for request.
+- **Several policies in one run: frozen policies that agents sample or a credit estimator scores with
+  (experimental).** `policies:` declares the run's other policies under `train:`'s names (`model_name`,
+  `renderer_name`, `renderer_kwargs`, `context_window_length`, `sample_timeout_seconds`, `tinker_base_url`,
+  `load_checkpoint_path`) and `trainable`; `train:` still declares `main`, the policy the run trains, as before. A
+  frozen policy (`trainable: false`) is sampled or scoring and never stepped, saved or pruned; it opens only the
+  sampling client it needs, of its base model or of the `tinker://` sampler its `load_checkpoint_path` names (a
+  policy the run trains beside `main`: below). A policy without `tinker_base_url` uses the run's service; each policy
+  opens a Tinker session of its own, also on a shared service, so that a fatal error on one policy's session never
+  ends another's, and an error opening a policy other than `main` names it and its service. `agents:` binds agent
+  roles to policies (`agents.roles.<role>.policy`): the root agent samples `agents.policy`, `main` without it, and
+  an agent opened with a role (`ctx.agents.spawn(role=...)`, `POST /v1/platoon/agents`, a program's judge) samples its
+  role's policy for its whole life, through the gateway's runtime of that policy, with its own renderer and tokenizer
+  (`ModelGateway.serve_policies`); each of its interactions names that policy (`TinkerLLMInteraction.policy`). A
+  frozen policy's agents make no rows, but their rewards and tags reach the credit, each row is stamped with its own
+  policy's version, and rollout workers follow one binding file per sampled policy (`model_binding.<id>.pkl`, worker
+  protocol 3), which the trainer publishes before the first rollout and each evaluation (the workflow capability
+  `binds_policies`, which `GroupRolloutWorkflow` declares). `identity.json` records each policy's model, renderer and
+  training, a frozen one's sampler, and each role's policy, never a URL, and a resume that changes them stops with
+  exit code 78, naming each change. Loading, and `platoon config validate`, refuse an id that is no lowercase name,
+  `policies.main`, a policy's `sample_timeout_seconds` that is not a positive number (as `train:`'s), a role bound to
+  an undeclared policy, roles bound to several policies beside a workflow that binds one, and either key under
+  `trainer: sft`, which rolls nothing out, and warn of a frozen policy nothing uses ([Sample several
+  policies](docs/how-to/train-and-eval.md#sample-several-policies-experimental)). `platoon.experimental` exports
+  `AgentBindings`, and `TrainerSetup` takes `agents`. A run without `policies:` or `agents:` runs as before, request
+  for request.
+- **On-policy distillation from a frozen teacher (experimental): `credit: reverse_kl`.** For each training group, a
+  frozen teacher (`credit_options.teacher`, a policy of `policies:`) scores every token the student sampled
+  (`compute_logprobs`), and each action token's advantage is `-kl_coef * (student logprob - teacher logprob)`, plus
+  `reward_coef` times the row's reward centered on its member's baseline (0 by default); with `reward_coef: 1` this is
+  tinker-cookbook's on-policy distillation advantage, without its discounted KL. The teacher's calls run in the
+  trainer after the group's rollouts returned their permits, at most 32 in flight, each bounded by the teacher's
+  `sample_timeout_seconds`; one that fails or runs out of time, or a response of the wrong length or without a
+  target token's logprob, fails its group alone (verdict `failed`, counted under `credit/failures`), which trains
+  nothing, and the run goes on. An evaluation never calls the teacher, and the step logs `credit/reverse_kl/avg`.
+  Loading, and `platoon config validate`, refuse a teacher that is no frozen policy of `policies:`, and one whose
+  tokenizer differs from the student's (exit 78, before any Tinker session opens; when a tokenizer cannot be loaded
+  then, `platoon train` compares the ones it loaded for the two policies as it builds the estimator). A credit
+  estimator reads the run's policies from `CreditSetup.policy_views` and `CreditGroup.policies` (`PolicyView.score`:
+  a policy's logprobs of each datum's target tokens, which raises `ScoringFailed` to fail the group; its `tokenizer`
+  and `version`) ([Distill a frozen
+  teacher](docs/how-to/train-and-eval.md#distill-a-frozen-teacher-experimental);
+  [`examples/on-policy-distillation`](examples/on-policy-distillation/README.md) distills Qwen3-32B into the
+  quickstart's Qwen3-4B, the teacher on the student's service and on its own).
+- **A tool allowlist per agent role (experimental): `agents.roles.<role>.tools`.** A role's list of tool names or
+  `fnmatch` patterns (`read_*`; a Harbor task's MCP tools by the names agents see, `<server>__<tool>`) limits the agents
+  of that role, and every agent under them, to those tools: a child spawned or minted with the role, a program's `judge`
+  or `verifier` (which its spawner's lists limit, not those of the child it judges), and the root agent when the list is
+  under its role, `policy`. Their listings of env tools (`ctx.list_tools()`, MCP `tools/list`) hold only those, and the
+  gateway refuses a call to any other where it runs the call, for inline and MCP harnesses alike: the agent gets an
+  error result that says why, the environment never sees the call, the run goes on, and the agent's trajectory counts
+  the refusals in its misc (`tools_refused: {count, first}`). A role without `tools` keeps every tool, and `tools: []`
+  allows none; a role may give `tools` without a `policy` (`agents.roles.<role>.policy` is optional: its agents then
+  sample `agents.policy`'s). Rollout workers get the lists in their requests (worker protocol 3's `role_tools`), and
+  in-process rollouts from the trainer's gateway (`ModelGateway.limit_tools`). Loading, and `platoon config validate`,
+  refuse `tools` that is no list of non-empty names (exit 78), warn of a role that looks like a misspelling of one of
+  platoon's own (`subagents` for `subagent`), and of a pattern that matches no tool of the run's environments when each
+  declares its tools up front: an ORS environment run in process whose class lists them all, a task table, or a service
+  class with `declared_tools` ([Limit the tools each role may
+  call](docs/how-to/train-and-eval.md#limit-the-tools-each-role-may-call-experimental);
+  [`examples/subagents/read-only-subagents.yaml`](examples/subagents/read-only-subagents.yaml) trains the subagents
+  example with subagents that may only read). A run without `tools:` runs as before, request for request.
+- **Several policies trained in lockstep (experimental).** A policy of `policies:` trains unless it says
+  `trainable: false`, with `train:`'s names, and `train:`'s values when unset, for its own `lora_rank`, `optimizer`,
+  `loss_fn`, `loss_fn_config` (when unset, `train:`'s only if its loss is `train:`'s, else none) and `max_staleness`
+  (when unset, its entry's bound first), and `load_optimizer_state` to start from its checkpoint's Adam state too, as
+  `checkpoint.load_optimizer_state` does `main`'s; `agents.policy`, the root agent's, may be any trained policy. Every
+  step trains every policy (RFC 0021's lockstep, RFC 0003's milestone M2): each group is credited once, over every
+  agent, then its rows split by the policy that sampled them; each policy's rows are judged stale against its own
+  version and bound (`StaleFilter.for_policy`, also per datum under `train.stale_filter: datum`) and dropped alone;
+  each microbatch sends each policy's rows to its own training client, under its own loss, and each minibatch submits
+  every optimizer step before awaiting any; each policy that stepped publishes its own sampler (`Policy.publish`, whose
+  subscribers, `Policy.subscribe`, write each sampled policy's binding for the rollout workers), and one with no rows
+  in a step does not step and keeps its version. The dispatcher's horizon counts the smallest bound of the trained
+  policies the agents sample. An entry without `credit:` credits with `keyed` on `[task, policy, role]` (RFC 0021's
+  D5), and every row is tagged with its agent whatever the estimator. Each checkpoint saves every trained policy: the
+  others first, at the same time, each into `<run>/policies/<id>/checkpoints.jsonl` on its own service, then `main`,
+  whose row names each other policy's by its `state_path` (`loop_state.policies`, a key the run claims on resume) and
+  commits the checkpoint; a resume takes the newest `main` row whose named rows every policy still has, skipping newer
+  ones with a warning that `lock.json` records (`policies_restore`), and stopping with exit code 78 when none holds.
+  Each policy's recovery checkpoints are pruned on its own service, keeping the rows that the newest `main` row and
+  the newest `keep_recovery` `main` recovery rows name; a checkpoint's save of a policy that did not step holds weights
+  no rollout samples, and is pruned as any older checkpoint is. `main`'s metrics keep their names, each other policy's
+  go under `policies/<id>/`, and evaluations record each sampled policy's version (`versions`); `run.clocks` maps
+  every trained policy to the run's one clock. An error of one policy's service fails the step, with a note that names
+  the policy and its service. Step hooks compose with lockstep: a hook updates any trained policy, `end.train` and
+  `end.learner` taking its id, through that policy's own learner, its metrics under that policy's prefix; each policy
+  that the step or a hook updated publishes once, the hooks hear every trained policy's publication, and each other
+  policy's row counts its hooks' updates (`policies/<id>/batch/hook_optimizer_updates`); a trainer of its own that
+  trains several policies (`run.learner`, `run.end_step()`) saves one checkpoint of them all on the cadence.
+  Loading, and `platoon config validate`, refuse a trained policy that no agent samples, a frozen `agents.policy`, a
+  frozen policy with a trained policy's keys, `load_optimizer_state` without `load_checkpoint_path`, an out-of-range
+  key, naming its policy (`policies.<id>: ...`), and, in lockstep, a policy's `batch_size` or `checkpoint`, which
+  are for policies that step on their own clocks (below); `identity.json` records each policy's training, and a resume
+  that changes it stops with exit code 78 ([Train several policies in
+  lockstep](docs/how-to/train-and-eval.md#train-several-policies-in-lockstep-experimental);
+  [`examples/two-agent-lockstep`](examples/two-agent-lockstep/README.md) trains the subagents example's delegator
+  and its workers as two policies, on one service and on two). A run of one trained policy runs as before, request
+  for request.
+- **Each trained policy may step on its own clock (experimental).** `train.stepping: independent` (default: `lockstep`)
+  lets each trained policy step, publish and save on its own clock (RFC 0021, section 2.11; RFC 0003's milestone M2),
+  with its own batch (`policies.<id>.batch_size`, else `train.batch_size`), staleness bound and checkpoint cadence in
+  its own steps (`policies.<id>.checkpoint: {every, recovery_every}`, else `checkpoint.*`), and no policy waits for
+  another's training or saves; with one trained policy it is lockstep, and a trainer's needs say which clocks the run
+  builds (`TrainerNeeds.stepping`, the rl trainer's `train.stepping`). Each group is credited once and then splits into
+  a share per trained policy, its rows of the group, and always one of `main`'s, so that the plan counts every group,
+  `train.batch_size` per `main` step; each policy's steps take its shares in the order they settled from the run's share
+  ledger (`source.ledger`; a trainer of its own takes them through `platoon.experimental.ShareLedger`'s `take`,
+  `judge_version`, `consumed` and `lock`); the dispatcher keeps a horizon per policy, `(k + 1) x batch` of its shares,
+  and starts a group only when every one has room (`train/dispatch/blocked_share/horizon:<id>` names the one that held
+  it back). Each policy judges its own shares against its own version and bound, and publishes after each of its steps.
+  Every full save of any policy is a commit: it captures the run's draws, the groups not yet retired with what each
+  policy did with its share (its step and its age then) and every other policy's newest row and published version under
+  a commit lock, which each group's settling and each step's consumption take too, once no step's end runs its step
+  hooks; then writes them and the policy's weights; then appends the policy's row to its own `checkpoints.jsonl`
+  (another policy's named with its id, `recovery-<id>-<step>`), with `commit_seq` and every policy's row
+  (`loop_state.policies`, with `published_version` and `step`). A group stays kept until each policy that consumed its
+  share has saved after that step (`run/retained_groups`), and pruners keep the rows a commit in flight, or the newest
+  commit of some policy's file, names. A resume takes the commit with the highest `commit_seq` whose named rows hold,
+  each policy going on from the row it names, at one version more than the commit records it published when that is past
+  the row's, and each share it consumed after its row trains again at the age it had (`policies/<id>/retrained_shares`);
+  numbers go on after the highest in any file. Each step logs a row of its own without a W&B step of its own
+  (`StatsLogger.log_row`): `main`'s with its names and `run/step`, every other policy's under `policies/<id>/` with
+  `policies/<id>/step`, and `policies/<id>/share_wait_s` and `policies/<id>/peer_lag/<q>` for each; evaluations count
+  `main`'s steps and record `versions_end` when a policy published while they ran. Step hooks run at the end of each
+  policy's own step (`StepEnd.policy`) and may update that policy only, through their end (`run.learner` sends nothing
+  from them); a commit saves a hook's state as it is then, while every other policy resumes from the older row the
+  commit names, so a hook keeps what moves at a policy's step ends by that policy's step and takes it up at
+  `start.policies[<id>].step`. A stop request ends each policy's loop at its step's end; a step that waits for shares
+  once a stopped policy's horizon is full closes short. Loading refuses, besides lockstep's, a policy's batch that its
+  steps' minibatches and microbatches do not divide, a group admission rule other than `all`, a
+  `checkpoint.keep_recovery` that a policy's own `recovery_every` (else the run's) does not span past its bound, and
+  `train.stepping` under `trainer: sft`, which trains one policy, and warns of a trained policy that saves no full
+  checkpoint before the run's end; a start checks the same against its trainer's needs. `identity.json` records
+  `stepping: independent`, and a resume that changes the stepping stops with exit code 78 ([Step each policy on its own
+  clock](docs/how-to/train-and-eval.md#step-each-policy-on-its-own-clock-experimental);
+  [`examples/two-agent-independent`](examples/two-agent-independent/README.md) steps the subagents example's worker
+  about four times for each of its delegator's steps). With `train.stepping` unset, every run is as before.
 
 ### Changes
 
@@ -344,11 +627,12 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   start of training: the trainer, the training loop, signals and the watchdog), `policy` (the model training samples
   and steps: its spec, its state, its training client, its own saves and its learner, through which a step updates
   it), `objectives` (what its rows train under: the loss, the loss inputs only the trainer reads and the training
-  metrics), `step` (one training step: its metrics, the staleness warning, the batch transforms), `dispatch` (what
-  starts the training groups: the dispatcher, the rollout permits, running and settling a group), `workflow` (one group
-  of rollouts: `GroupRolloutWorkflow` and its parts), `credit` (a group's baselines and error-token filter), `workers`
-  (process-per-rollout), `checkpoints` (what a full checkpoint saves, and resuming) and `evaluation` (evaluation during
-  training); the config schema is `platoon.train.config_defs`, and `platoon train`'s start `platoon.train.launch`.
+  metrics), `step` (one training step: the step itself, its metrics, the staleness warning, the batch transforms),
+  `dispatch` (what starts the training groups: the dispatcher, the rollout permits, running and settling a group),
+  `workflow` (one group of rollouts: `GroupRolloutWorkflow` and its parts), `credit` (a group's baselines and
+  error-token filter), `workers` (process-per-rollout), `checkpoints` (what a full checkpoint saves, and resuming) and
+  `evaluation` (evaluation during training); the config schema is `platoon.train.config_defs`, and `platoon train`'s
+  start `platoon.train.launch`. `docs/training-code.md` maps them.
   Nothing a run does changes: the same datums train in the same order, and the metrics, config keys, messages,
   checkpoints and the files a resume reads are as before. `platoon.train.tinker` keeps the policy client (`proxy`), its
   renderers, `key_refusal` and `rollout_metrics`, until a later release moves them, and the shims of the old paths
@@ -358,30 +642,65 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   `train.loss_fn_config` and `checkpoint.load_checkpoint_path` from the config when `PlatoonTinkerRLTrainer` is made,
   where it registered its model gateway before: setting one of them in the config after that and before `train()` no
   longer reaches its training client, its updates and their `optim/lr` metric, or its recovery pruner.
-  `TrainLoopSharedState` holds the run's policies (`policies`), and `model_info`, `service_client`, `training_client`,
-  `sampling_client`, `optimizer_params` and `optimizer_steps` are properties of the policy it trains, so
-  `dataclasses.fields()` lists `policies` in their place. It is made with keyword arguments only, and still takes
-  those six instead of `policies`, but not beside it: given both, it raises `TypeError`, and so does
-  `dataclasses.replace()` of it. A `copy.copy()` of it shares the original's policies.
-- `TrainLoopSharedState` holds the run's step clock (`clock`), and `train_step` and `sampling_client_updated_event`
-  are properties of it, so `dataclasses.fields()` lists `clock` in their place; it still takes those two instead of
-  `clock`, but not beside it. `PlatoonTinkerRLTrainer` saves its launch, interrupted and final checkpoints through the
-  run's checkpoints, whose lines (`Saving recovery checkpoint ... at launch`, `Saving permanent checkpoint ...`,
-  `Training complete successfully!`) come from `platoon.train.trainer.run`, and its `run_log_path`, `async with` and
-  `_await_with_heartbeat` are `TrainerBase`'s, whose lines (`This run labels its sandboxes ...`) come from
-  `platoon.train.trainer.api`.
-- The rl trainer's draws are a rollout source too, which the run opens, starts and closes as it does any trainer's:
-  `PlatoonTinkerRLTrainer` keeps `_recorder`, `_dispatcher` and `_admissions` as properties of its source, its steps
-  commit their groups and move the horizon on through the source, and the source's steps of opening, saving and taking
-  up the draws go through the trainer's methods of their names (`_begin_task_records`, `_training_tasks`,
-  `_new_dispatcher`, `_task_records_started`, `_checkpoint_state`, `_restore_dispatch`; `_dispatch` starts them).
-  Those call the source's parts, in `platoon.train.dispatch.source`, `.setup`, `.runner` and
-  `platoon.train.checkpoints.saving`, `.resume`, which take the source in place of the trainer, and call what they need
-  as module functions, no longer through the trainer: replacing its `_samplers`, `_run_group` or
-  `_await_rollout_with_heartbeat` changes no training group (`_run_group` still runs an evaluation's groups), and the
-  trainer has no `_run_training_group`, `_settle_under_rule`, `_read_kept_groups`, `_saved_samplings` or
-  `_resume_position` any more. The lines of the per-task statistics' start (`This start keeps no per-task statistics
-  ...`) come from `platoon.train.dispatch.source`.
+  `TrainLoopSharedState` holds the run's policies (`policies`), and `model_info`, `training_client`,
+  `sampling_client`, `optimizer_params` and `optimizer_steps` are properties of the policy it trains (the first two
+  read-only), so `dataclasses.fields()` lists `policies` in their place. It is made with keyword arguments only, with
+  the policies in place of those fields. It no longer has `service_client` (the policy's own) or
+  `sampling_client_step`, which nothing read. A `copy.copy()` of it shares the original's policies.
+- `TrainLoopSharedState` holds the run's step clock (`clock`), and `train_step` and `step_ended` are read-only
+  properties of it, so `dataclasses.fields()` lists `clock` in their place; it is made with the clock in place of those
+  two. `step_ended` is platoon 0.4.0's `sampling_client_updated_event`, renamed for what it is: the event each step's
+  end sets, a step's that published no policy too, and the loops' stop. `PlatoonTinkerRLTrainer` saves its launch,
+  interrupted and final checkpoints through the run's checkpoints, whose lines (`Saving recovery checkpoint ... at
+  launch`, `Saving permanent checkpoint ...`, `Training complete successfully!`) come from `platoon.train.trainer.run`,
+  and its `run_log_path`, `async with` and `_await_with_heartbeat` are `TrainerBase`'s, whose lines (`This run labels
+  its sandboxes ...`) come from `platoon.train.trainer.api`. The stats logger a start opens is made of that module's
+  `StatsLogger` (`TrainerBase._new_stats_logger`), so a patch of `platoon.train.trainer.api.StatsLogger` reaches it.
+- The rl trainer's draws are the run's rollout source (`TrainerRun.rollouts`, over the trainer's tasks, with
+  `bind_workers=False`: its loop and step give the rollout workers each sampler themselves), the trainer's
+  `_rollouts`, which the run opens, starts and closes as it does any trainer's: the per-task statistics, the dispatcher
+  and the group admission rules are the source's `recorder`, `dispatcher` and `admissions` (the trainer no longer has
+  `_recorder`, `_dispatcher` and `_admissions`), its steps commit their groups and move the horizon on through the
+  source, and its `_dispatch` starts it. The source's steps of opening, saving and taking up the draws are its own
+  methods (`begin_task_records`, `training_tasks`, `new_dispatcher`, `started`, `checkpoint_state`, `restore`), whose
+  parts are in `platoon.train.dispatch.source`, `.setup`, `.runner` and `platoon.train.checkpoints.saving`, `.resume`.
+  The lines of the per-task statistics' start (`This start keeps no per-task statistics ...`) come from
+  `platoon.train.dispatch.source`.
+- **`PlatoonTinkerRLTrainer` keeps no methods for the code that moved to the stage packages.** Platoon 0.4.0's
+  trainer had them as methods; the code now calls the module functions, so replacing one of these on the trainer's
+  class or an instance changes nothing, and the trainer no longer has them:
+  - its loops and their stop: `_train_loop` and `shutdown_loops` (`platoon.train.trainer.loops`, the latter without a
+    trainer argument), a group's wait, `_await_rollout_with_heartbeat` (`platoon.train.trainer.waiting`), and the
+    step's wait for a group, `_next_rollout`, which is `platoon.train.trainer.waiting._next_group`;
+  - the evaluation: `_eval_loop`, `_eval_completion_monitor`, `_wait_for_starting_policy_evaluation`,
+    `_wait_for_last_step_evaluation` (`platoon.train.evaluation.loop`, all but `_eval_loop` without a trainer
+    argument), `_evaluates_during_training` (`.plan`), and `_rollout_workflow_worker_loop`, which is
+    `platoon.train.evaluation.loop.eval_worker`, without a trainer argument;
+  - a group's run, `_run_group`, which is `platoon.train.dispatch.runner.run_group_guarded`;
+  - the step's save, `_save_checkpoint_and_get_sampling_client` (`platoon.train.checkpoints.saving`, which takes the
+    trainer first), and the publication of each new sampler to the rollout workers, `_publish_worker_binding`
+    (`platoon.train.policy.binding`);
+  - the training client's open, `_open_training_client` and `_create_training_client` (`TrainerBase._open_policies`,
+    which opens each policy's: `Policy.open`, `Policy.create_training_client`), the steps of the draws
+    that only called the rollout source's (`_begin_task_records`, `_training_tasks`, `_new_dispatcher`, `_samplers`,
+    `_task_records_started`, `_checkpoint_state`, `_restore_dispatch`) and `_model_info` (`model_info` is the
+    trained policy's).
+
+  Its steps save only through the start that `train()` or `run()` runs: a trainer outside one refuses to save.
+- The rl trainer's training step is `platoon.train.step.step.TrainStep`, beside what its steps share (`StepContext`);
+  `platoon.train.trainer.loops` keeps the training loop.
+- Names that misled are renamed, and the old module paths read the old names (below):
+  - a settled group, `_Settled`, is a `SettledGroup` (`platoon.train.dispatch.settled`), made by `as_settled_group`
+    (`_settled`), and its field `rollout` is `output`: an object that stands in for one has an `output`;
+  - a group's output and a member's outcome, `_TaskRolloutOutput` and `_SingleRolloutOutcome`, are `GroupOutput` and
+    `MemberOutcome` (`platoon.train.workflow.output`); what a step reads of a group's workload,
+    `_TaskWorkloadPayload` and `_get_task_workload_payload`, is `_GroupWorkload` and `_group_workload`
+    (`platoon.train.step.collect`);
+  - `GroupRolloutWorkflow`'s startup gate: `_admit_group` is `_enter_startup_gate` and `_admission_semaphore` is
+    `_startup_semaphore`, and the `_GroupAdmission` the gate gives is a `StartupPass`, which `_run_group_member` takes
+    as `startup_pass` (was `admission`). The workflow no longer calls a subclass's `_admit_group` or
+    `_admission_semaphore`: defining one warns (`PlatoonDeprecationWarning`), until platoon 0.6.0; override the new
+    name.
 - `platoon.train.components` no longer defines `DatasetLoader`, `TaskLoader`, `RolloutFn`, `RewardProcessor`,
   `WorkflowFactory`, `TrainerConfigClass` and `LossFn`, which nothing used. `ClientThroughputMonitor` no longer has
   `record_dequeue_to_first_model_call`, which nothing called.
@@ -390,9 +709,15 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   the constructor. A group reads the settings that a partial workflow config may lack through
   `platoon.train.workflow.settings.GroupSettings`: a missing one reads as `WorkflowConfig`'s default, which is the
   default each reader had.
+- The rl trainer's step ends through the step hooks' sequence (`platoon.train.trainer.hooks.finish_step`), which
+  publishes and advances its clock as before when no hook is registered (`TrainStep.publish` takes the step's end and
+  returns who published). The barrier of the starting policy's evaluation before the first update is the learner's
+  (`Learner(before_update=...)`, awaited by `PolicyUpdate.apply`, whose step tally is optional). The rl trainer's
+  `close` stops its recovery pruning after steps that ended (`run.ended`), as before, and does nothing after a
+  failure.
 - **Logger names follow the modules.** A log line names the module that logs it (the `%(name)s` of platoon's log
   format), so the trainer's lines no longer come from `platoon.train.tinker.rl` or
-  `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.trainer.loops` (a step's line),
+  `platoon.train.tinker.workflows.group_rollout_workflow` but from, say, `platoon.train.step.step` (a step's line),
   `platoon.train.trainer.rl` (a start's), `platoon.train.workflow.members` (a group's stragglers) or
   `platoon.train.workflow.telemetry` (a rollout worker's). A filter or a level set on `platoon.train.tinker` no longer
   reaches them: set it on `platoon.train`.
@@ -409,6 +734,11 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
 ### Fixes
 
+- `platoon eval` that gets SIGTERM, such as a scheduler's at the end of a job's time, stops as at Ctrl+C: it starts
+  no further rollout, cancels those in flight, stops its node services, reaps the sandboxes labelled with its output
+  directory and exits 143. It died at once, leaving its sandboxes until `platoon sandbox reap`. It also reaps them
+  before its first rollout, as `platoon train` does, so that a start on an output directory reaps what an earlier one
+  that was killed left there.
 - The `process` sandbox provider's `reap(labels)`, which a run calls before it starts and as it exits, and
   `platoon sandbox reap` with it, returns only once the processes it killed have exited, or after 10 seconds, with a
   warning that names those still running. It returned once it had sent them SIGKILL, while they could still be giving
@@ -416,22 +746,27 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
 
 ### Deprecations
 
-- **The module paths under `platoon.train.tinker` that moved.** Each still imports, and each name read through it
-  warns once with a `PlatoonDeprecationWarning` that names its new module, until platoon 0.6.0 removes them. A name
-  read through an old path is the moved object itself, so `isinstance` checks, pickles and the `module:Class` a config
-  names keep working. Importing an old module imports the trainer, as it did before (`platoon.train.tinker` itself no
-  longer does: above), so that no module of the trainer is first imported while a patch made through an old path is
-  active. A module that was split still has the names it imported, `from <old path> import *` binds what the new
-  module exports (a split module's public names that moved), the submodules that an old package's init imported are
-  its attributes, and a name set or deleted through an old path, as `monkeypatch` and `mock.patch` do, is set or
-  deleted where the moved code reads it, and undoing the patch puts back what was there, also for a `mock.patch` made
-  with `create=True` or nested in another patch, by unittest.mock or by the `mock` package. A method of
-  `PlatoonTinkerRLTrainer` or `GroupRolloutWorkflow` that moved is a module function that its class keeps under its
-  name: patch the class or an instance, as before, not the module function. What stays different through an old
-  path: a patch through `platoon.train.tinker.rl` also reaches the moved code of `.permits` and `.censoring`, and one
-  through either of them reaches rl's, as they share new modules. Patching an old module's namespace
-  (`mock.patch.dict(vars(module))`, `monkeypatch.setitem(vars(module), ...)`) does not reach the moved code: patch the
-  attribute instead. An old module's `__all__` is computed when it is read, not held in the module. Where each went:
+- **The module paths under `platoon.train.tinker` that moved.** Each still imports, and each name read through it warns
+  once with a `PlatoonDeprecationWarning` that names its new module, until platoon 0.6.0 removes them. A name read
+  through an old path is the moved object itself, so `isinstance` checks, pickles and the `module:Class` a config names
+  keep working. Importing an old module imports the trainer, as it did before (`platoon.train.tinker` itself no longer
+  does: above), so that no module of the trainer is first imported while a patch made through an old path is active. A
+  module that was split still has the names it imported, `from <old path> import *` binds what the new module exports (a
+  split module's public names that moved), the submodules that an old package's init imported are its attributes, and a
+  name set or deleted through an old path, as `monkeypatch` and `mock.patch` do, is set or deleted where the moved code
+  reads it, and undoing the patch puts back what was there, also for a `mock.patch` made with `create=True` or nested in
+  another patch, by unittest.mock or by the `mock` package. A name that platoon 0.5.0 also renamed reads as the renamed
+  object, and its warning names its new name: `platoon.train.tinker.rl`'s `_Settled`, `_settled`, `_TaskWorkloadPayload`
+  and `_get_task_workload_payload` (`SettledGroup`, `as_settled_group`, `_GroupWorkload`, `_group_workload`), and
+  `.workflows.group_rollout_workflow`'s `_SingleRolloutOutcome`, `_TaskRolloutOutput` and `_GroupAdmission`
+  (`MemberOutcome`, `GroupOutput`, `StartupPass`). A method of `GroupRolloutWorkflow` that moved is a module function
+  that its class keeps under its name, but for the startup gate's two that platoon 0.5.0 renamed (above): patch the
+  class or an instance, as before, not the module function (`PlatoonTinkerRLTrainer` keeps none: above). What stays
+  different through an old path: a patch through `platoon.train.tinker.rl` also reaches the moved code of `.permits` and
+  `.censoring`, and one through either of them reaches rl's, as they share new modules. Patching an old module's
+  namespace (`mock.patch.dict(vars(module))`, `monkeypatch.setitem(vars(module), ...)`) does not reach the moved code:
+  patch the attribute instead. An old module's `__all__` is computed when it is read, not held in the module. Where each
+  went:
   - `platoon.train.tinker`'s names (`PlatoonTinkerRLTrainer`, `Watchdog`, the config classes, the batch transforms):
     `platoon.train`;
   - `platoon.train.tinker.rl`: by stage, `PlatoonTinkerRLTrainer` and `Watchdog` to `platoon.train` (they live in
@@ -458,7 +793,43 @@ release, require a range such as `platoon[tinker,ors]>=0.4,<0.5`.
   - `python -m platoon.train.tinker.workers.entrypoint` and `python -m platoon.train.tinker.train` still run, with the
     warning: run `python -m platoon.train.workers.entrypoint` and `python -m platoon.train.launch`.
 
-  After upgrading under a run that is training, restart it, so that its rollout workers run the code it does.
+### Install and upgrade
+
+```bash
+pip install -U 'platoon[tinker,ors]>=0.5,<0.6'
+# with the TextCraft extension, name it too:
+pip install -U 'platoon[tinker,ors]>=0.5,<0.6' 'platoon-textcraft[platoon]'
+# with hpc-sandbox, for Singularity, Apptainer and enroot:
+pip install -U 'platoon[tinker,ors,hpc]>=0.5,<0.6'
+```
+
+- **To upgrade a project that pins one minor release**, move its range to 0.5, such as `platoon[tinker,ors]>=0.5,<0.6`.
+  Platoon 0.5 refuses the components of an installed extension whose requirement on platoon excludes it, such as
+  `platoon>=0.4,<0.5`, with an error that names both versions, until a release of the extension admits 0.5;
+  meanwhile, `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` loads them anyway
+  ([Compatibility and provenance](docs/extending/index.md#compatibility-and-provenance)).
+- **The `hpc` extra requires hpc-sandbox 0.5.1** (`hpc-sandbox>=0.5.1,<0.6`), which an upgrade with the extra installs.
+  An environment that installs platoon without the extra may keep an older hpc-sandbox: there, stacks, and the tasks
+  whose sandboxes need an owner manifest, are refused when the tasks are listed, naming 0.5
+  ([The hpc extra](docs/getting-started/install.md#the-hpc-extra)).
+- **A fetch locks multi-container Harbor tasks as runnable stacks** (`refuse.sidecars` defaults to `false`). A pinned
+  dataset whose lock refused its stacks, for an entry that sets no `refuse.sidecars`, is fetched again by
+  `platoon prepare`, `platoon train` and `platoon eval`, its cached tasks reused. Where the provider runs no stacks, the
+  run then stops when it lists its tasks, naming them: leave them out (`exclude_tasks`), or set
+  `refuse: {sidecars: true}`, which refuses them as 0.4 did
+  ([Multi-container tasks](docs/how-to/sandboxes-and-harbor.md#multi-container-tasks)).
+- **The training code moved out of `platoon.train.tinker`** into packages of `platoon.train`
+  ([docs/training-code.md](docs/training-code.md) maps them). Code that imports an old module path keeps working, with
+  a `PlatoonDeprecationWarning` that names the new one, until 0.6.0 (Deprecations): import from the new paths. Set a
+  log filter or level on `platoon.train`, not `platoon.train.tinker`, and patch the module functions that replaced the
+  trainer's methods (Changes).
+- **After upgrading under a run that is training, restart it**, so that its rollout workers run the code it does.
+- **The TextCraft extension's release for platoon 0.5 is `platoon-textcraft` 0.4.0**, whose `platoon` extra requires
+  `platoon[ors]>=0.5,<0.6`. Its code and data are those of 0.3.0. The release for platoon 0.4 stays 0.3.0: there, keep
+  the extension within 0.3 (`platoon-textcraft>=0.3,<0.4`), since platoon 0.4 refuses the components of 0.4.0, also
+  when it is installed without its extra. An upgrade of platoon alone leaves 0.3.0 installed, which pip does not flag
+  and platoon 0.5 refuses: upgrade the two together, as above
+  ([The TextCraft extension](docs/getting-started/install.md#the-textcraft-extension)).
 
 ## 0.4.0 (2026-10-25)
 

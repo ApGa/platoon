@@ -23,8 +23,8 @@ from platoon.envs.service import EnvSetupError
 from platoon.sandbox.process import ProcessProvider
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN
-from platoon.train.dispatch.settled import _Settled
-from platoon.train.workflow.output import _TaskRolloutOutput
+from platoon.train.dispatch.settled import SettledGroup
+from platoon.train.workflow.output import GroupOutput
 from platoon.utils.rollout_stats import (
     OUTCOME_STATUSES,
     REWARD_KEY_MISMATCH,
@@ -58,7 +58,7 @@ def _group(rewards, *, empty=False, checkpoint_version=0, label=None, statuses=(
             for _ in rewards
         ]
     )
-    return _TaskRolloutOutput(
+    return GroupOutput(
         datums,
         workload=RolloutWorkload(
             postmerge_datums=len(rewards),
@@ -362,17 +362,17 @@ def _members_output(members, data):
 
     from platoon.train.config_defs import WorkflowConfig
     from platoon.train.workflow.group import GroupRolloutWorkflow
-    from platoon.train.workflow.output import _SingleRolloutOutcome
+    from platoon.train.workflow.output import MemberOutcome
     from platoon.utils.tinker_data_processing import TrajectoryCollectionResult, TrajectoryStats
 
     def member(reward, status):
         if reward is None:
-            return _SingleRolloutOutcome(result=None, workload=RolloutWorkload(), observed=False, outcome_status=status)
+            return MemberOutcome(result=None, workload=RolloutWorkload(), observed=False, outcome_status=status)
         stats = TrajectoryStats("root", reward, num_steps=1, num_input_tokens=1, num_output_tokens=2, num_datums=0)
         result = TrajectoryCollectionResult(
             datums=[], task_reward=reward, trajectory_stats=[stats], root_rewards_dict={}, task_reward_valid=True
         )
-        return _SingleRolloutOutcome(result=result, workload=RolloutWorkload(), observed=True, outcome_status=status)
+        return MemberOutcome(result=result, workload=RolloutWorkload(), observed=True, outcome_status=status)
 
     async def rollout(task, rollout_config):
         raise AssertionError("not run")
@@ -622,7 +622,7 @@ def test_a_group_counts_under_its_row_s_label_and_not_its_output_s():
 
     output = _group([1.0], label="amphora/MCO", statuses=["scored"])
     (metrics,) = _run_batches(
-        [_Settled(None, "Fine/Smol", output)], label_by="source_dataset", labels=["Fine/Smol", "amphora/MCO"]
+        [SettledGroup(None, "Fine/Smol", output)], label_by="source_dataset", labels=["Fine/Smol", "amphora/MCO"]
     )
 
     smol, mco = "train/batch/source_dataset/Fine--Smol", "train/batch/source_dataset/amphora--MCO"
@@ -694,7 +694,7 @@ def test_a_step_that_submits_more_datums_than_its_groups_report_stops_the_run():
             }.items()
         },
     )
-    claims = _TaskRolloutOutput(
+    claims = GroupOutput(
         [datum],
         workload=RolloutWorkload(postmerge_datums=0, policy_eligible_datums=0, post_sampling_datums=0),
         requested_rollouts=1,

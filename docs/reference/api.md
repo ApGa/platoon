@@ -134,7 +134,7 @@ What a function harness gets for one agent.
 | `depth` | `int` | Depth in the agent tree; the root is 0. |
 | `role` | `str` | The agent's role: `policy` for the root, the `role` its spawn named for a child (default `subagent`). |
 | `task` | `Task` | The task the agent works on. |
-| `session` | `EnvSession` | The environment session the agent acts on. |
+| `session` | `EnvSession` | The environment session the agent acts on. A call made on it directly bypasses the agent's tool access and its role's tool allowlist; `call_tool` applies both. |
 | `instruction` | `str` | The goal the agent works on. |
 | `max_steps` | `int \| None` | The agent's step limit (None: only the budget limits it). |
 | `access` | `ToolAccess` | The agent's tool access. |
@@ -164,7 +164,7 @@ One model call, recorded on this agent; `sampling` takes Chat Completions parame
 async def list_tools() -> list[ToolSpec]
 ```
 
-The env's tools, filtered by this agent's access.
+The env's tools, filtered by this agent's access and its role's allowlist (`agents.roles.<role>.tools`).
 
 #### `AgentContext.call_tool`
 
@@ -172,7 +172,7 @@ The env's tools, filtered by this agent's access.
 async def call_tool(name: str, arguments: Mapping[str, Any]) -> ToolResult
 ```
 
-Call an env tool; a tool outside this agent's access returns an error result.
+Call an env tool; a tool outside this agent's access or its role's allowlist returns an error result.
 
 #### `AgentContext.annotate`
 
@@ -458,6 +458,7 @@ agent's record (`platoon.gateway.AgentSession`: its misc, result and calls), e.g
 | `behavior_judge` | `SubagentBehaviorJudge \| None` | Judges children for verifier grading; set it before `run`. |
 | `tool_transform` | `Callable[..., Any] \| None` | Rewrites the MCP tool listing of every agent; set it before `run`. |
 | `judges` | `bool` | Whether this rollout's judges run (the rollout config's `judges`, which `platoon eval` sets from `inference.judges`). While they are off, `judge_endpoint` and `judge` calls are refused (`platoon.gateway.JudgesOffError`) and verifiers do not run: a program that judges reads it and does without. |
+| `draw` | `DrawInfo \| None` | The run and the training draw this episode belongs to, when its trainer asks for them (experimental); None in an evaluation and otherwise. |
 
 #### `EpisodeContext.run`
 
@@ -552,6 +553,10 @@ deadlines add (`platoon.train.components.rollout_overhead_s`); and
 `agent_timeout_s(task_id) -> float | None`, the task's own time limit for its agent (its sessions'
 `agent_timeout_s`), which they count when the rollout sets no `timeout`
 (`platoon.train.components.harness_time_limit_s`), as long as the service has `rollout_overhead_s`.
+
+Its class may also name the tools its sessions serve, when it knows them all before any session opens
+(experimental): `declared_tools`, a tuple of names, against which a run's loading checks the tool patterns of
+its agent roles (`agents.roles.<role>.tools`, `service_declared_tools`).
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -818,11 +823,12 @@ A named environment: `name@version` and the partial `environments` entry it stan
 keys of an `environments` entry (`service`, `service_kwargs`, `harness`, `program`,
 `reward_processor`, `agents`, `dataset_kwargs`, ...), checked against the config schema when the entry
 is built.  A run chooses the rest (`FORBIDDEN_KEYS`): `env`, `name`, `weight`, `task_sampler` and
-`task_sampler_options`, `group_admission` and `group_admission_options`, `max_staleness`, the run-level
-settings, the tasks it leaves out (`exclude_tasks`; an environment that should not offer a task leaves it out of
-its own task lists, in a new version), `harness_options`, for which `harness_defaults` maps a harness name to
-the options the environment needs from that harness, of `workflow_config` all but the rollout settings
-(`rollout_config`) its tasks were measured with, and `eval_overrides.workflow_config`.
+`task_sampler_options`, `group_admission` and `group_admission_options`, `credit` and `credit_options`,
+`max_staleness`, the run-level settings, the tasks it leaves out (`exclude_tasks`; an environment that should
+not offer a task leaves it out of its own task lists, in a new version), `harness_options`, for which
+`harness_defaults` maps a harness name to the options the environment needs from that harness, of
+`workflow_config` all but the rollout settings (`rollout_config`) its tasks were measured with, and
+`eval_overrides.workflow_config`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

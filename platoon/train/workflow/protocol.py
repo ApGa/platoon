@@ -22,10 +22,16 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 if TYPE_CHECKING:
     import tinker
 
+    from platoon.train.policy.spec import AgentBindings
     from platoon.train.task_stats import MemberResult
     from platoon.utils.rollout_stats import RolloutStats
     from platoon.utils.rollout_workload import RolloutWorkload
     from platoon.utils.stats_tracker import DeferredStats
+
+# How the run's stale filter judges a group against its bound (``train.stale_filter``), which the trainer tells a
+# workflow that takes it (``takes_stale_filter``) as its ``stale_filter``: by its oldest datum (``group``), or by each
+# datum (``datum``), each stamped with its own policy version.
+StaleFilterSetting = Literal["group", "datum"]
 
 
 class RolloutWorkflow(Protocol):
@@ -36,13 +42,21 @@ class RolloutWorkflow(Protocol):
     The optional members, which the trainer uses when a workflow has them:
 
     - ``publish_model_binding(sampling_client, version)``: hand the sampling client of a new policy version to the
-      workflow's rollout workers (training does after each version it publishes, an evaluation before it starts);
+      workflow's rollout workers (training does after each version it publishes, an evaluation before it starts); a
+      workflow that binds several policies (``binds_policies``) also takes ``policy=``, another policy its agents
+      sample, whose binding is a file of its own;
     - ``warm_up()``: start, as training starts, what its rollouts need before the first one (awaited);
     - ``rollout_isolation``: ``"process"`` when its rollouts run in rollout workers, which read the published client;
     - ``start_limit``: the run's limit on rollouts starting at once, which the trainer sets on a workflow that takes it
       (``takes_start_limit``), and whose metrics an evaluation reports while it is set;
+    - ``stale_filter``: how the run's stale filter judges its groups (``train.stale_filter``), which the trainer sets on
+      a training workflow that takes it (``takes_stale_filter``): under ``datum`` the workflow stamps each datum with
+      the oldest policy version its own model calls sampled;
     - ``entry_configs``: each environment entry's settings, which ``platoon train`` sets on a workflow that applies
       them (``applies_entry_settings``);
+    - ``entry_credit``: each environment entry's credit estimator, for the entries that set one, which a workflow that
+      applies them (``applies_credit``) gets from its setup and keeps, so that the rollout source settles and saves
+      them (:mod:`platoon.train.credit.runtime`);
     - its capabilities: a ``capabilities`` class attribute, or the class flags of :class:`WorkflowCapabilities`;
     - ``from_setup(setup)``, a class method: ``platoon train`` builds the run's workflow class with it, from a
       :class:`WorkflowSetup`, and builds a class without one with ``GroupRolloutWorkflow``'s keyword arguments.
@@ -55,7 +69,7 @@ class RolloutWorkflow(Protocol):
 class WorkflowCapabilities:
     """What a workflow class can do beyond ``arun_episode``, which the trainer reads (:func:`capabilities_of`) instead
     of testing whether the class is a ``GroupRolloutWorkflow``.  A class declares them in a ``capabilities`` class
-    attribute, or as class flags of the same names; ``GroupRolloutWorkflow`` sets five of them as flags."""
+    attribute, or as class flags of the same names; ``GroupRolloutWorkflow`` sets all eight as flags."""
 
     # It applies an environment entry's own settings to the entry's groups (``entry_configs``): loading refuses an
     # entry's settings beside a workflow that does not (platoon.train.entry_settings).
@@ -68,11 +82,18 @@ class WorkflowCapabilities:
     runs_rollouts_on_lease: bool = False
     # It takes the run's limit on rollouts starting at once as its ``start_limit`` (``train.max_starting_rollouts``).
     takes_start_limit: bool = False
+    # It takes how the run's stale filter judges its groups as its ``stale_filter`` (``train.stale_filter``), and under
+    # ``datum`` stamps each datum with the oldest policy version its own model calls sampled.
+    takes_stale_filter: bool = False
     # Its rollouts can run in rollout workers: ``platoon train`` gives it the environments' ``packages`` and the run's
     # ``label_by`` as arguments, and the ``worker_preload`` of its workers' fork server (platoon.train.launch).
     runs_rollout_workers: bool = False
     # Its ``publish_model_binding`` takes ``policy=``, which a run that samples more than one policy needs.
     binds_policies: bool = False
+    # It credits each environment entry's groups with the entry's credit estimator (``entry_credit``, which
+    # ``from_setup`` gets as ``WorkflowSetup.entry_credit``): loading refuses an entry's ``credit`` beside a workflow
+    # that does not (platoon.train.credit.registry).
+    applies_credit: bool = False
 
 
 def capabilities_of(workflow: object) -> WorkflowCapabilities:
@@ -80,9 +101,10 @@ def capabilities_of(workflow: object) -> WorkflowCapabilities:
     flags, a flag it does not set False.  Each flag is read as the trainer read it before the contract was written down:
     ``applies_entry_settings`` and ``runs_rollouts_on_lease`` by their truth, the others only when they are True.
 
-    Declared capabilities, a class's own or inherited, are all six, and win over every flag: over a subclass's own
-    flags, and over ``GroupRolloutWorkflow``'s rule that a subclass overriding how a member runs does not run its
-    rollouts on the lease (``runs_rollouts_on_lease``), which sets the flag only."""
+    Declared capabilities, a class's own or inherited, are all eight, and win over every flag: over a subclass's own
+    flags, and over ``GroupRolloutWorkflow``'s rules that a subclass overriding how a member runs does not run its
+    rollouts on the lease (``runs_rollouts_on_lease``), and one overriding how its groups are credited does not apply
+    an entry's estimator (``applies_credit``), which set the flags only."""
 
     declared = getattr(workflow, "capabilities", None)
     if isinstance(declared, WorkflowCapabilities):
@@ -92,8 +114,10 @@ def capabilities_of(workflow: object) -> WorkflowCapabilities:
         gives_verdicts=getattr(workflow, "gives_verdicts", False) is True,
         runs_rollouts_on_lease=bool(getattr(workflow, "runs_rollouts_on_lease", False)),
         takes_start_limit=getattr(workflow, "takes_start_limit", False) is True,
+        takes_stale_filter=getattr(workflow, "takes_stale_filter", False) is True,
         runs_rollout_workers=getattr(workflow, "runs_rollout_workers", False) is True,
         binds_policies=getattr(workflow, "binds_policies", False) is True,
+        applies_credit=getattr(workflow, "applies_credit", False) is True,
     )
 
 
@@ -149,17 +173,46 @@ class WorkflowSetup:
     label_by: str | None = None
     # The environment's other arguments of the phase's workflow (workflow_kwargs, eval_workflow_kwargs), as given.
     options: Mapping[str, Any] = field(default_factory=dict)
+    # Each environment entry's credit estimator, by entry, for the entries that set one (environments[].credit,
+    # platoon.train.credit.api); always empty for the eval phase, whose groups train nothing.
+    entry_credit: Mapping[str, Any] = field(default_factory=dict)
+    # The run's policies as the estimators read them, by id (platoon.train.credit.api.PolicyView), beside entry_credit;
+    # empty for the eval phase.
+    policy_views: Mapping[str, Any] = field(default_factory=dict)
+    # With more than one sampled policy: which policy each agent samples, whose default is the first of ``policies``,
+    # and the policies the run trains, whose agents alone make datums.  None and empty with one.
+    agents: "AgentBindings | None" = None
+    trained: frozenset[str] = frozenset()
+    # The tool name patterns of each agent role whose tools are limited (agents.roles.<role>.tools), by role; empty:
+    # every agent may call every tool.  Rollouts in the trainer's process get them from its gateway; a workflow that
+    # starts rollout workers sends them in their requests (PolicyRolloutWorkerRequest.role_tools), as
+    # GroupRolloutWorkflow does.
+    role_tools: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def _built_by_keywords(workflow_cls: Any, setup: WorkflowSetup) -> Any:
     """A workflow of ``workflow_cls`` built as ``platoon train`` always built one: with the keyword arguments of
-    ``GroupRolloutWorkflow``'s constructor that ``setup`` stands for (:func:`_keywords`), and each environment entry's
-    own settings as its ``entry_configs`` when an entry sets any.  ``GroupRolloutWorkflow.from_setup`` builds it so, as
-    ``platoon train`` builds a class without ``from_setup``."""
+    ``GroupRolloutWorkflow``'s constructor that ``setup`` stands for (:func:`_keywords`), each environment entry's
+    own settings as its ``entry_configs`` when an entry sets any, the entries' credit estimators as its
+    ``entry_credit`` and the policies' views as its ``policy_views`` when an entry sets one, and, when its rollouts
+    sample more than one policy (``agents``), the model infos of those but the agents' default as its
+    ``sampled_policies``, with its ``agents`` and ``trained_policies``; and the agent roles' limited tools as its
+    ``role_tools`` when a role lists some.  ``GroupRolloutWorkflow.from_setup`` builds it so, as ``platoon train``
+    builds a class without ``from_setup``."""
 
     workflow = workflow_cls(**_keywords(setup))
     if setup.entry_configs is not None:
         workflow.entry_configs = dict(setup.entry_configs)
+    if setup.entry_credit:
+        workflow.entry_credit = dict(setup.entry_credit)
+        workflow.policy_views = dict(setup.policy_views)
+    if setup.agents is not None:
+        default = setup.agents.default  # the workflow's model_info
+        workflow.sampled_policies = {policy: info for policy, info in setup.policies.items() if policy != default}
+        workflow.agents = setup.agents
+        workflow.trained_policies = frozenset(setup.trained)
+    if setup.role_tools:
+        workflow.role_tools = dict(setup.role_tools)
     return workflow
 
 

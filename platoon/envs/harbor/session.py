@@ -41,7 +41,10 @@ the artifacts are collected for a separate verifier, which also receives the art
 names (``artifacts[].service``): a sidecar that is down makes the outcome ``invalid`` (``sidecar_unhealthy``), unless
 the service grades anyway (``on_sidecar_down: grade``).  What a sidecar writes in its own log directories reaches the
 sandbox the tests run in once grading made its log directories afresh.  While the tests run in ``main``, the stack has
-the verifier's network.
+the verifier's network.  A stack that reaches node services holds a scope of each
+(:mod:`platoon.envs.harbor.node_services`), which the same probes check: one that a start of its node service that
+failed may have answered wrongly, or whose request the node service could not answer, makes the outcome ``invalid``
+(``node_service_down``), whatever ``on_sidecar_down`` says.
 
 **Task MCP servers.**  The MCP servers a stack's task offers its agents (``[[environment.mcp_servers]]``) reach the
 agents two ways.  The tool plane serves each ``sse`` or ``streamable-http`` server whose ``http://`` URL names a
@@ -88,6 +91,7 @@ from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, EnvBusy, GateClosed, Tool
 from platoon.envs.harbor import sidecars
 from platoon.envs.harbor.artifacts import ArtifactError, CollectedArtifact, collect_artifacts, materialize_artifacts
 from platoon.envs.harbor.mcp_client import McpClient, McpError
+from platoon.envs.harbor.node_services import NodeScope
 from platoon.envs.harbor.sidecars import SidecarLogs
 from platoon.envs.harbor.task import CollectHook, HarborTask, McpServer, resolve_env
 from platoon.envs.harbor.tools import DEFAULT_MAX_OUTPUT_CHARS, TOOL_SPECS, SandboxTools, truncate_output
@@ -228,7 +232,8 @@ class SandboxLease:
 class StackLease(SandboxLease):
     """A multi-container stack shared by a session and its shared forks: ``sandbox`` is its ``main``, and the last
     release stops the whole stack.  ``logs`` are the session's log directories that its sidecars bind, each a volume
-    of the stack; ``task_tools`` the tools of the task's MCP servers in the stack, which the plane serves."""
+    of the stack; ``task_tools`` the tools of the task's MCP servers in the stack, which the plane serves; ``scopes``
+    the stack's scopes of node services, by the service each serves, which close once the stack stopped."""
 
     def __init__(
         self,
@@ -237,19 +242,24 @@ class StackLease(SandboxLease):
         *,
         logs: list[SidecarLogs] | None = None,
         task_tools: TaskTools | None = None,
+        scopes: Mapping[str, NodeScope] | None = None,
         **options: Any,
     ) -> None:
         super().__init__(stack.main, spec, **options)
         self.stack = stack
         self.logs = list(logs or ())
         self.task_tools = task_tools
+        self.scopes = dict(scopes or {})
 
     async def _stop(self) -> None:
         try:
             if self.task_tools is not None:
                 await self.task_tools.close()
         finally:
-            await self.stack.stop()
+            try:
+                await self.stack.stop()
+            finally:
+                await asyncio.gather(*(scope.close() for scope in self.scopes.values()), return_exceptions=True)
 
 
 class TaskTools:
@@ -549,6 +559,11 @@ class HarborSession:
             outcome.metadata["stack"] = self.harbor_task.compose.kind
         if self.stack is not None:
             outcome.metadata["services"] = sidecars.services_metadata(self.stack, self._states)
+        if isinstance(self._lease, StackLease) and self._lease.scopes:  # which starts of each node service answered it
+            outcome.metadata["node_services"] = {
+                name: {"node_service": scope.spec.name, "generation": scope.generation, "served_by": list(scope.served)}
+                for name, scope in self._lease.scopes.items()
+            }
         if self.harbor_task.ignored_users:
             outcome.metadata["ignored_users"] = dict(self.harbor_task.ignored_users)  # ran as the sandbox's uid
         if self.harbor_task.verifier_root:
@@ -807,13 +822,16 @@ class HarborSession:
             self._notes.setdefault("collect_failed", []).extend(failed)
 
     async def _probe(self, when: str) -> Outcome | None:
-        """Probe the stack's sidecars (:func:`~platoon.envs.harbor.sidecars.probe`): the ``invalid`` outcome when one
-        is down, unless the service grades anyway (``on_sidecar_down: grade``), which notes it (``sidecars_down``).
-        None for a single sandbox."""
+        """Probe the stack's node services (:meth:`_probe_node_services`), then its sidecars
+        (:func:`~platoon.envs.harbor.sidecars.probe`): the ``invalid`` outcome when one is down, unless a sidecar is and
+        the service grades anyway (``on_sidecar_down: grade``), which notes it (``sidecars_down``).  None for a single
+        sandbox."""
 
         stack = self.stack
         if stack is None or not isinstance(self._lease, StackLease):
             return None
+        if (down := await self._probe_node_services(self._lease, when)) is not None:
+            return down
         try:
             down, states = await sidecars.probe(stack, when=when)
         except Exception as exc:
@@ -825,6 +843,25 @@ class HarborSession:
             self._notes.setdefault("sidecars_down", []).append(down.reason)
             return None
         return down
+
+    async def _probe_node_services(self, lease: StackLease, when: str) -> Outcome | None:
+        """The ``invalid`` outcome (``node_service_down``) when the stack's rollout may not trust what a node service
+        it reaches answered it, checked now (:meth:`NodeScope.status
+        <platoon.envs.harbor.node_services.client.NodeScope.status>`); None while it may trust each one."""
+
+        for name, scope in lease.scopes.items():
+            up, detail = await scope.status()
+            if up:
+                continue
+            reason = f"the node service {scope.spec.name}, which serves {name}, is down {when}: {detail}"
+            logger.info("Harbor stack %s: %s", lease.stack.id, reason)
+            return Outcome.infra(
+                "node_service_down",
+                status="invalid",
+                reason=reason,
+                metadata={"node_service": scope.spec.name, "service": name, "node_service_detail": detail},
+            )
+        return None
 
     async def _put_sidecar_logs(self, sandbox: Sandbox) -> Outcome | None:
         """Put what the sidecars wrote in their log directories into those of ``sandbox``, made afresh by now; an

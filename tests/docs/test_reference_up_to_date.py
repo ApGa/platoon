@@ -73,3 +73,18 @@ def test_cli_reference_covers_every_command(pages: dict[str, str]) -> None:
         assert f"platoon {command}" in pages["cli.md"]
     for command in ("env list", "viz tail", "viz replay", "viz show-dump"):
         assert f"platoon {command}" in pages["cli.md"]
+
+
+def test_config_reference_documents_the_options_of_each_core_trainer_that_takes_some(monkeypatch) -> None:
+    from platoon.train.trainer import registry
+
+    generator = _generator()
+    toy = registry.CoreTrainer("x:Toy", options="platoon.train.supervised.options:SupervisedOptions", rolls_out=False)
+    monkeypatch.setitem(registry.CORE_TRAINERS, "toy", toy)
+    monkeypatch.setitem(generator.TRAINER_TEXT, "toy", "A toy trainer.")
+
+    lines = generator._trainers({})
+
+    for name in ("sft", "toy"):
+        assert f"| `{name}` |" in "\n".join(lines) and f'<a id="{name}-options"></a>' in lines
+        assert f"### `{name}`'s options" in lines

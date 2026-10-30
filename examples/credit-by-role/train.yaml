@@ -1,0 +1,24 @@
+# The subagents example's Vault training, with each role of a rollout credited on its own (by_role.py): the root agents
+# centered on the group's roots, the subagents on the group's subagents. From the repository root:
+#
+#   export PYTHONPATH=$PWD/examples/subagents:$PWD/examples/credit-by-role
+#   uv run platoon train examples/credit-by-role/train.yaml         # needs TINKER_API_KEY
+
+extends: ../subagents/subagents.yaml
+
+environments:
+  - name: vault
+    service: python://vault_env:VaultEnvironment
+    harness: example-delegator
+    package: delegator
+    agents:
+      max_depth: 1
+      child_max_steps: 6
+      child_grading: env          # each subagent's reward is its own answer's grade
+      fork: shared
+    credit: by_role:ByRole        # the estimator, as module:Class; PYTHONPATH names its directory
+    credit_options:
+      leave_one_out: true         # each agent centered on the other agents of its role
+
+stats:
+  trial_name: delegator-by-role

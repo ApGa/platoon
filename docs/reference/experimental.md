@@ -25,19 +25,41 @@ under `train.permit_release: rollout` each permit comes back as its rollout ends
 `docs/extending/rollout-leases.md` is the guide.
 
 And trainers (RFC 0021): what `platoon train` runs (`Trainer`), built from what it prepared
-(`TrainerSetup`: the config, each policy's `PolicySpec` by its id, `MAIN` for `train:`'s, the
-run's `TaskSources` and how its `Workflows` are built), saying what it asks of the run
+(`TrainerSetup`: the config, each policy's `PolicySpec` by its id, `MAIN` for `train:`'s, which
+policy each agent samples (`AgentBindings`), the run's `TaskSources` and how its `Workflows` are
+built), saying what it asks of the run
 (`TrainerNeeds`) and where its steps end (`StepPlan`).  `TrainerBase` takes a trainer through the
 lifecycle every trainer shares, calling its hooks in order, and `platoon.testing.check_trainer` checks one.  What
 every full checkpoint of the run holds besides its counters comes from its participants
 (`CheckpointParticipant`), and a policy's rows train under an `Objective`.  `trainer:` selects the
-trainer; this release has one, `rl`.
+trainer; this release has two, `rl` and `sft`.
+And step hooks (RFC 0021): work at the end of each step of any trainer (`StepHook`, `StepHookBase`),
+which hears what the step did (`StepEnd`): it drains side work, adds optimizer updates of the step's policy
+(`end.train`, `end.learner`), and hears what the step published; the rl trainer attaches those its config names
+(`trainer_options.hooks`).  A hook's interruptible wait raises `TrainInterrupted` on a stop request when
+the trainer's steps are atomic (`TrainerNeeds.atomic_steps`); when they are not, it runs to its end.  Side inference
+samples a policy's published sampler through a `PolicySnapshot`, which refuses a sample once the policy has
+published again (`PolicyMoved`); and a training episode sees its draw (`ctx.draw`, a `DrawInfo`) when
+its trainer asks for it.  `docs/extending/step-hooks.md` is the guide.
 And the workflow contract (RFC 0021): what the trainer needs of a rollout workflow (`RolloutWorkflow`), what a
 workflow class can do beyond it (`WorkflowCapabilities`, read through `capabilities_of`), what
 `platoon train` builds a workflow class with (`WorkflowSetup`, which its `from_setup` takes), and how a
 group's output is read: its report (`OutputReport`, `report_of`) and its rows by policy
 (`RolloutOutput`, `rows_by_policy`).  A trainer that rolls out draws the run's groups through
 `run.rollouts()`.
+And credit estimators (RFC 0021): how an environment entry's training groups turn rewards into advantages
+(`CreditEstimator`, or a subclass of `CreditEstimatorBase`), built per entry with a `CreditSetup`
+and checked at load (`CreditCheckContext`); its `assign` sees a `CreditGroup` of
+`MemberRollout` members, each agent an `AgentRun` (role, policy, own reward, rows), each row a
+`TrainingSample`, and the run's policies as `PolicyView` views, whose failed scoring
+(`ScoringFailed`) fails the group.  It is registered with
+`credit_estimator` or named as `module:Class`, and `platoon.testing.check_credit_estimator` checks it.
+`docs/extending/credit-estimators.md` is the guide.
+And independent stepping (RFC 0021): when a run's trained policies step each on its own clock
+(`TrainerNeeds.stepping`, `train.stepping: independent`), each settled group splits into one share per trained
+policy, its rows of the group, which a trainer's steps of that policy take from the run's `ShareLedger`
+(`source.ledger`: `take`, judged stale or not at `judge_version`, then `consumed` under its `lock` once the
+step trained them), each step ending with `run.end_step(policy=...)` on the policy's own clock (`run.clocks`).
 
 This module imports neither `tinker` nor `datasets`.
 
@@ -75,24 +97,44 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`RolloutLease`](#platoon-experimental-rolloutlease) | The rollout permits of the training draw whose workflow runs in this asyncio context (`rollout_lease`). |
 | [`rollout_lease`](#platoon-experimental-rollout-lease) | The lease of the training draw whose workflow runs in this asyncio context (`RolloutLease`). |
 | [`Trainer`](#platoon-experimental-trainer) | What `platoon train` runs: a trainer is resolved from the config's `trainer:` (`platoon.train.trainer.registry`), built from its setup, entered with `async with`, and run once per start. Supervising the run, its restarts, the reaping of what a dead start left, the run's lock, its config snapshot and its identity check stay `platoon train`'s. |
-| [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. |
-| [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens the start's draws when the trainer asks for them, `run.rollouts()`). |
+| [`TrainerBase`](#platoon-experimental-trainerbase) | An optional base of trainers. `run()` takes the trainer through the lifecycle every trainer shares (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every hook has a default but `prepare` and `run_steps`, which a subclass writes. `async with` opens what every start logs to, the stats logger (`stats_logger`, which resumes the W&B run of the checkpoint the start resumes from) and the train tracker (`train_tracker`), and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it. The policies' training clients open before `prepare`, each trainable one with its optimizer's parameters. |
+| [`TrainerNeeds`](#platoon-experimental-trainerneeds) | What a trainer asks of the run, which `platoon train` reads before it lists any task (RFC 0021, rule 10 for the second and third). |
 | [`TrainerSetup`](#platoon-experimental-trainersetup) | What `platoon train` prepared for the trainer it builds (`Trainer.from_setup`). Building the setup does no I/O. |
 | [`TaskSources`](#platoon-experimental-tasksources) | The run's tasks as `platoon train` lists them: the training tasks (`train_dataset`, a weighted order's first epoch or the listing a dataloader shuffles), the order they are drawn in epoch by epoch and the task samplers that draw them (None: the dataset as it is), and the evaluation's (None when the run evaluates nothing). |
 | [`Workflows`](#platoon-experimental-workflows) | A start's rollout workflows: training's, and the evaluation's (None when the start evaluates nothing). |
-| [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it). |
+| [`StepPlan`](#platoon-experimental-stepplan) | Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it); and `steps_per_epoch`, the steps of one pass over what the trainer trains on, by which `checkpoint.strategy: epoch` counts (None: a pass is a step). |
 | [`PolicySpec`](#platoon-experimental-policyspec) | One policy, as the config declares it: the model, how its prompts are rendered and sampled, its Tinker service, how a new run trains it (its adapter's rank, the weights it starts from), and how each step updates it (its optimizer, and the loss its rows train under). |
 | [`MAIN`](#platoon-experimental-main) | The policy that `train:` declares. The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format. |
+| [`AgentBindings`](#platoon-experimental-agentbindings) | Which policy each agent samples, for its whole life (`agents:`): the root agent samples `default`; an agent opened with a role samples that role's policy (`roles`), else `default`. A request never picks a policy. |
 | [`CheckpointParticipant`](#platoon-experimental-checkpointparticipant) | Part of the run's state that every full checkpoint saves, and that a start which resumes from one takes up. |
 | [`Objective`](#platoon-experimental-objective) | What a policy's rows train under: one of the Tinker service's built-in losses (`loss_fn`, such as `cispo`) with its keyword arguments, the loss inputs the datums carry for the trainer only, and the training metrics of each microbatch. |
+| [`StepHook`](#platoon-experimental-stephook) | Work at the end of each step of any trainer, after the step's own updates and its commit, before it publishes. A class of this protocol defines all four methods; subclass `StepHookBase`, whose methods are empty, to leave some out. `critical` is optional (True when left out). A hook with state to resume is also a `CheckpointParticipant`. Register it in the trainer's `check()` or `prepare()`. |
+| [`StepHookBase`](#platoon-experimental-stephookbase) | An optional base of step hooks: every method empty, critical, and `from_run`, which builds a hook that the config names. |
+| [`StepEnd`](#platoon-experimental-stepend) | What the end of a step tells its hooks. `hook_updates` is platoon's own count of the hooks' updates: the optimizer steps each policy took since the step's end began, whatever a hook counts. `train`, `learner` and `wait` are the run's; a test builds a step's end with `for_test`. |
+| [`TrainInterrupted`](#platoon-experimental-traininterrupted) | A shutdown signal stopped the train loop where the last completed step is a consistent checkpoint. |
+| [`PolicySnapshot`](#platoon-experimental-policysnapshot) | A policy's published sampler at `version`, with what renders and parses its calls. On a fully fine-tuned service a sampling client samples the newest weights whatever its path, so `sample` checks the version around each call; a trainer that samples during a step stops that work in its hook's `drain()`, before the step publishes. The check reads the version, not the weights: there, the step's own optimizer steps change what the sampler samples before the step publishes, so a sample is its version's only up to the step's first update. |
+| [`PolicyMoved`](#platoon-experimental-policymoved) | A snapshot refused a sample: its policy published a newer sampler before the call, or while it ran, so the sample would not be its version's. |
+| [`DrawInfo`](#platoon-experimental-drawinfo) | The run and the training draw an episode belongs to (`ctx.draw`), when its trainer asks for them (RFC 0021's draw provenance, `TrainerNeeds.draw_provenance`); never in an evaluation. A draw's key `(start, seq)` is never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by it (`StepEnd.consumed`). |
 | [`RolloutWorkflow`](#platoon-experimental-rolloutworkflow) | What the trainer needs of a rollout workflow: one draw's task row in, its group's output out (None: the group failed, and trains nothing). The output is a `RolloutOutput`, or a sequence of datums, all of the run's one trained policy (a `GroupOutput`, or a plain list). |
-| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five of them as flags. |
+| [`WorkflowCapabilities`](#platoon-experimental-workflowcapabilities) | What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead of testing whether the class is a `GroupRolloutWorkflow`. A class declares them in a `capabilities` class attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets all eight as flags. |
 | [`capabilities_of`](#platoon-experimental-capabilities-of) | What `workflow` (an instance or a class) can do: its `capabilities` when it declares them, else its class flags, a flag it does not set False. Each flag is read as the trainer read it before the contract was written down: `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True. |
 | [`WorkflowSetup`](#platoon-experimental-workflowsetup) | What `platoon train` builds one phase's workflow with (a workflow class's `from_setup`), in place of `GroupRolloutWorkflow`'s keyword arguments, whose `model_info` cannot carry several policies: the phase's settings and the run's components, and the policies its rollouts sample. |
 | [`RolloutOutput`](#platoon-experimental-rolloutoutput) | A group's output written to the contract: its rows, by the policy each trains, and its report. The other output a workflow may return is a sequence of datums (`GroupOutput`, a plain list). |
 | [`OutputReport`](#platoon-experimental-outputreport) | What the trainer reads of a group's output besides its rows, in one place: the per-task statistics and the group admission rules read its members and verdict, the step that consumes the group its statistics and its workload, and the label metrics its label. What an output does not give is None (`members` empty, `verdict` unknown). `workload` and its four counts come together: all set, or all None. |
 | [`report_of`](#platoon-experimental-report-of) | The report of a group's output: its `report` when it gives one (a `RolloutOutput`, a `GroupOutput`), else the one its attributes give (`carried_report`: an output written before the contract was, such as a workflow's own list subclass), which for a plain list of datums, or None for a group that failed, is empty. |
 | [`rows_by_policy`](#platoon-experimental-rows-by-policy) | A group's rows by the policy each trains. A list of datums (a `GroupOutput`, or a workflow's plain list), or any other output without `rows()` (a tuple of datums, say), is all `trained`'s, the run's one trained policy: `{trained: output}`, the output itself. Any other output answers `rows()`. The step reads every output's rows through this one function. |
+| [`CreditEstimator`](#platoon-experimental-creditestimator) | What the trainer calls of a credit estimator: `assign(group)`, once per training group, awaited. |
+| [`CreditEstimatorBase`](#platoon-experimental-creditestimatorbase) | An optional base class of credit estimators: the protocol's shape, typed options and a load-time check. |
+| [`CreditSetup`](#platoon-experimental-creditsetup) | What an estimator is built with, once per start of the process and environment entry: `Class(setup, options)`. |
+| [`CreditCheckContext`](#platoon-experimental-creditcheckcontext) | What an estimator's load-time `check` sees, beside its options. |
+| [`CreditGroup`](#platoon-experimental-creditgroup) | One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's order, the run's policies (`policies`, each as an estimator may read it), each policy's version when `assign` began (`versions`; it does not move during the call, although the policies may publish meanwhile), and where the group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker; an estimator's metrics belong under `credit/`). |
+| [`MemberRollout`](#platoon-experimental-memberrollout) | One member of the group that returned a result: its place among them (`index`), every row of its rollout (`samples`), its agents (filled when the estimator asked for them, else empty), its root's processed reward and whether that is a completed root's scored outcome (`task_reward_valid`: an interrupted root's is not, and enters no baseline), and what the converter returned (`result`), to read: its trajectories' statistics and its root's reward components. Its `datums` are the member's rows; an estimator sets their advantages through `samples`. |
+| [`AgentRun`](#platoon-experimental-agentrun) | One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role (`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it samples, its depth in the tree, its reward and its rows. `reward` is its trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never trains an unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent did not use, whose reward still counts. |
+| [`TrainingSample`](#platoon-experimental-trainingsample) | One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree. It lives in the trainer process only: what reaches the training service is the datum. |
+| [`PolicyView`](#platoon-experimental-policyview) | What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into text, its version now, and its scores of other rows (`score`), for a policy that scores: a frozen teacher. |
+| [`ScoringFailed`](#platoon-experimental-scoringfailed) | A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token. An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under `credit/failures`) and trains nothing, and the run goes on. |
+| [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
+| [`ShareLedger`](#platoon-experimental-shareledger) | The shares of a run's groups, as a trainer of its own whose policies step independently takes them (`run.rollouts().ledger`; `TrainerNeeds.stepping`): each step of policy `p` takes `p`'s shares (`take`), trains them (a trainer that drops stale ones judges each at `judge_version`), records them consumed under the commit lock (`async with ledger.lock:` `consumed`), then ends with `await run.end_step(policy=p)` on `p`'s own clock (`run.clocks[p]`). The run keeps the rest: which shares a checkpoint holds, which a resume puts back, and when a group retires. |
 
 ## Task samplers
 
@@ -1092,8 +1134,10 @@ class TrainerBase
 An optional base of trainers.  `run()` takes the trainer through the lifecycle every trainer shares
 (`platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every
 hook has a default but `prepare` and `run_steps`, which a subclass writes.  `async with` opens what every
-start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train
-tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it.
+start logs to, the stats logger (`stats_logger`, which resumes the W&B run of the checkpoint the start
+resumes from) and the train tracker (`train_tracker`), and labels every sandbox the run starts with the run,
+so that the run's sandboxes can be reaped by it.  The policies' training clients open before `prepare`, each
+trainable one with its optimizer's parameters.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -1101,6 +1145,8 @@ tracker, and labels every sandbox the run starts with the run, so that the run's
 | `config` | `Any` |  |
 | `options` | `Any` |  |
 | `policies` | `PolicySet` | The run's policies, registered as the trainer is built. |
+| `stats_logger` | `StatsLogger` | The run's stats logger, which `async with` opens: each step's metrics go to it (`log(step=, stats=)`). Read-only. |
+| `train_tracker` | `StatsTracker` | The run's train tracker, which `async with` opens: what a step records (a learner's metrics among it), until the step exports it. Read-only. |
 | `run_log_path` | `str` | The run directory, `log_path/<stats.experiment_name>/<stats.trial_name>`, where the run writes everything: its checkpoints, its rollouts and its logs. Read-only. |
 
 #### `TrainerBase.needs`
@@ -1134,7 +1180,8 @@ def check(run: TrainerRun) -> None
 ```
 
 1. Before any service opens: raise `ConfigError` for what the trainer cannot run.  Participants of the
-run's checkpoints registered here take up the start point before any training client opens.
+run's checkpoints registered here (`run.checkpoints.register`) take up the start point before any training
+client opens; step hooks may register here too (`run.hooks.register`), or in `prepare`.
 
 #### `TrainerBase.prepare`
 
@@ -1170,9 +1217,11 @@ async def run_steps(run: TrainerRun) -> None
 ```
 
 8. The steps, from `run.clock.step` to `run.clock.end`, stopping at a step boundary once a stop is asked
-for (`run.shutdown`).  Steps that the stop request stopped short of the end were interrupted: the run then
-saves `<step>_interrupted`, also when they did not set `run.interrupted`, which an interrupt of their own
-sets.
+for (`run.shutdown`); a step awaits the service with `run.wait`.  Each step ends with `run.end_step`: the
+step hooks, the publication of the policies it updated, and the clock's advance.  Steps that the stop request
+stopped short of the end were interrupted: the run then saves `<step>_interrupted`, also when they did not set
+`run.interrupted`, which an interrupt of their own sets, and so does a `TrainInterrupted` they raise.  The
+run stops the clock's watchdog after them.
 
 #### `TrainerBase.close`
 
@@ -1180,7 +1229,8 @@ sets.
 async def close(run: TrainerRun) -> None
 ```
 
-10. After the save at exit: close what the trainer opened.
+10. After the save at exit, and after a failure too (`run.ended` says which): close what the trainer
+opened.  The run's step hooks and participants close after it.
 
 <a id="platoon-experimental-trainerneeds"></a>
 
@@ -1190,13 +1240,16 @@ async def close(run: TrainerRun) -> None
 class TrainerNeeds
 ```
 
-What a trainer asks of the run, which `platoon train` reads before it lists any task: `rollouts`, whether it
-trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens
-the start's draws when the trainer asks for them, `run.rollouts()`).
+What a trainer asks of the run, which `platoon train` reads before it lists any task (RFC 0021, rule 10 for
+the second and third).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `rollouts` | `bool` | `False` |  |
+| `rollouts` | `bool` | `False` | Whether it trains on rollouts of the run's training tasks: then the run lists them, builds the training workflow, and opens the start's draws when the trainer asks for them (run.rollouts()). |
+| `atomic_steps` | `bool` | `True` | Whether its steps reach a checkpoint whole or not at all: once a step sent training work, an interrupt saves no <step>_interrupted checkpoint of it, and the resume starts from the last full one. The rl trainer's are not. |
+| `fail_closed_updates` | `bool` | `True` | Whether an optimizer step that the service skipped, or whose metrics are not finite, raises (UpdateRejected) before anything publishes, for every update, the step hooks' too. The rl trainer only logs such metrics. |
+| `draw_provenance` | `bool` | `False` | Whether each training episode sees its draw (ctx.draw: platoon.programs.DrawInfo), the key that a step's end names it by (StepEnd.consumed). Off, the rollouts' requests are as they always were. |
+| `stepping` | `Literal['lockstep', 'independent']` | `"lockstep"` | The clocks the run builds for its trained policies: one for them all (lockstep), or one each (independent: each policy steps, publishes and saves on its own; a run of one trained policy has one clock either way). |
 
 <a id="platoon-experimental-trainersetup"></a>
 
@@ -1215,6 +1268,7 @@ does no I/O.
   trainer's constructor registers.
 - `options`: the trainer's options (None: it takes none).
 - `tasks`: the run's tasks, when the trainer rolls them out.
+- `agents`: which policy each agent samples (`platoon.train.policy.spec.agent_bindings`).
 - `workflow_builder`: how the start's workflows are built on the trainer's policies, for a trainer that rolls
   out.  `build_workflows` calls it as the run begins.
 
@@ -1224,6 +1278,7 @@ does no I/O.
 | `policy_specs` | `Mapping[str, platoon.train.policy.spec.PolicySpec]` | required |  |
 | `options` | `Any` | `None` |  |
 | `tasks` | `platoon.train.trainer.api.TaskSources \| None` | `None` |  |
+| `agents` | `platoon.train.policy.spec.AgentBindings \| None` | `None` | Which policy each agent samples (agents:); None: every agent samples the first policy. |
 | `workflow_builder` | `Callable[[PolicySet], Workflows] \| None` | `None` | Launch's builder of the start's workflows, on the trainer's policies; None: the setup builds none. |
 
 #### `TrainerSetup.build_workflows`
@@ -1276,11 +1331,14 @@ A start's rollout workflows: training's, and the evaluation's (None when the sta
 class StepPlan
 ```
 
-Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it).
+Where a start's steps end: `end_step`, the step after the run's last one (the start trains up to it); and
+`steps_per_epoch`, the steps of one pass over what the trainer trains on, by which `checkpoint.strategy: epoch`
+counts (None: a pass is a step).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `end_step` | `int` | required |  |
+| `steps_per_epoch` | `int \| None` | `None` |  |
 
 <a id="platoon-experimental-policyspec"></a>
 
@@ -1303,11 +1361,16 @@ optimizer, and the loss its rows train under).
 | `context_window_length` | `int \| None` | `None` |  |
 | `sample_timeout_seconds` | `float \| None` | `None` |  |
 | `tinker_base_url` | `str \| None` | `None` | Its Tinker service; None: TINKER_BASE_URL, else hosted Tinker. |
+| `trainable` | `bool` | `True` | Whether the run trains it. A frozen policy is sampled or scores, and is never stepped, saved or pruned. |
 | `lora_rank` | `int` | `32` |  |
-| `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from (not its optimizer's state); None: the base model's. |
-| `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments; each None: the run's train.optimizer, train.loss_fn or train.loss_fn_config, which policy_specs puts in its place, so that the trainer reads them from the spec alone. |
+| `load_checkpoint_path` | `str \| None` | `None` | The weights a new run starts from; None: the base model's. A frozen policy's: the sampler it serves. |
+| `load_optimizer_state` | `bool` | `False` | With load_checkpoint_path: whether the new run takes that checkpoint's optimizer state too (Adam's moments), a new trial that goes on from it; else its optimizer starts fresh. |
+| `optimizer` | `AdamParams \| None` | `None` | Its optimizer's settings, the loss its rows train under (its objective's, platoon.train.objectives) and the loss's keyword arguments, for a policy the run trains (each unset one train.optimizer, train.loss_fn and train.loss_fn_config, which policy_specs puts here, so that the trainer reads them from the spec alone). |
 | `loss_fn` | `str \| None` | `None` |  |
 | `loss_fn_config` | `dict[str, Any] \| None` | `None` |  |
+| `max_staleness` | `int \| None` | `None` | How many of its own versions old its rows may be and still train; None: their entry's bound, else train.max_staleness (the stale filter's, platoon.train.step.staleness). |
+| `batch_size` | `int \| None` | `None` | Stepping independently (train.stepping: independent), how many of its shares (its rows of a group) each of its steps trains; None: train.batch_size, the leader's. |
+| `checkpoint` | `PolicyCheckpointConfig \| None` | `None` | Stepping independently, when it saves full checkpoints, counted in its own steps; None: the run's checkpoint.every and checkpoint.recovery_every, in its steps. |
 
 <a id="platoon-experimental-main"></a>
 
@@ -1318,6 +1381,30 @@ MAIN: Final[PolicyId] = task_stats.MAIN
 ```
 
 The policy that `train:` declares.  The same object as `task_stats.MAIN`, by whose versions the per-task statistics age their evidence, so that their snapshots keep their format.
+
+<a id="platoon-experimental-agentbindings"></a>
+
+### `platoon.experimental.AgentBindings`
+
+```python
+class AgentBindings
+```
+
+Which policy each agent samples, for its whole life (`agents:`): the root agent samples `default`; an agent
+opened with a role samples that role's policy (`roles`), else `default`.  A request never picks a policy.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `default` | `str` | `"main"` |  |
+| `roles` | `Mapping[str, str]` | `{}` |  |
+
+#### `AgentBindings.sampled`
+
+```python
+def sampled() -> tuple[str, ...]
+```
+
+The policies some agent samples: `default` first, then the roles' others, in their order.
 
 <a id="platoon-experimental-checkpointparticipant"></a>
 
@@ -1381,6 +1468,307 @@ def metrics(
 A microbatch's training metrics, from its datums as they trained (with their side channels) and the result
 of their forward_backward.
 
+<a id="platoon-experimental-stephook"></a>
+
+### `platoon.experimental.StepHook`
+
+```python
+class StepHook(Protocol)
+```
+
+Work at the end of each step of any trainer, after the step's own updates and its commit, before it publishes.
+A class of this protocol defines all four methods; subclass `StepHookBase`, whose methods are empty, to
+leave some out.  `critical` is optional (True when left out).  A hook with state to resume is also a
+`CheckpointParticipant`.  Register it in the trainer's `check()` or `prepare()`.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` | Its log lines, its waits and its metrics' prefix (`<name>/`); no two hooks of a run share one. |
+
+#### `StepHook.drain`
+
+```python
+async def drain(end: StepEnd) -> None
+```
+
+Finish or stop the side work that samples the current sampler, before the step's hooks update the policy
+and it publishes.  Raising fails the start before anything publishes.
+
+#### `StepHook.update`
+
+```python
+async def update(end: StepEnd) -> None
+```
+
+Optimizer updates of the run's policies, through `end.train(...)` or `end.learner(...)` only.  Raising
+fails the start before anything publishes.
+
+#### `StepHook.published`
+
+```python
+async def published(end: StepEnd) -> None
+```
+
+At every step's end, after it published (`end.published`, empty when nothing did); and once after the
+launch's first sampler (`end.kind` `"launch"`).
+
+#### `StepHook.aclose`
+
+```python
+async def aclose() -> None
+```
+
+At the start's end, also after a failure: close what the hook opened.
+
+<a id="platoon-experimental-stephookbase"></a>
+
+### `platoon.experimental.StepHookBase`
+
+```python
+class StepHookBase
+```
+
+An optional base of step hooks: every method empty, critical, and `from_run`, which builds a hook that
+the config names.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `name` | `str` |  |
+| `critical` | `ClassVar[bool]` | False: the hook only hears publications (`published`, `aclose`), and an error it raises there is logged while training goes on; it may not drain or update. |
+
+#### `StepHookBase.from_run`
+
+```python
+@classmethod
+def from_run(run: TrainerRun, options: Mapping[str, Any]) -> Self
+```
+
+The hook that the config attaches (`trainer_options.hooks`), built as the run checks its trainer, before
+any service opens, with the options the config gives it: by default `cls()`, which takes none.
+
+#### `StepHookBase.drain`
+
+```python
+async def drain(end: StepEnd) -> None
+```
+
+Nothing to drain.
+
+#### `StepHookBase.update`
+
+```python
+async def update(end: StepEnd) -> None
+```
+
+No update.
+
+#### `StepHookBase.published`
+
+```python
+async def published(end: StepEnd) -> None
+```
+
+Nothing to hear.
+
+#### `StepHookBase.aclose`
+
+```python
+async def aclose() -> None
+```
+
+Nothing to close.
+
+<a id="platoon-experimental-stepend"></a>
+
+### `platoon.experimental.StepEnd`
+
+```python
+class StepEnd
+```
+
+What the end of a step tells its hooks.  `hook_updates` is platoon's own count of the hooks' updates: the
+optimizer steps each policy took since the step's end began, whatever a hook counts.  `train`, `learner` and
+`wait` are the run's; a test builds a step's end with `for_test`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `kind` | `Literal['launch', 'step']` | required | "step": the end of a step; "launch": the start's first samplers, which the hooks hear once (published()). |
+| `step` | `int` | required | The step that ends (the clock's step before it advances); at launch, the start's first step. |
+| `step_updates` | `Mapping[str, int]` | required | The step's own optimizer updates, by policy, before any hook's (rl: its policy-gradient updates). |
+| `consumed` | `Mapping[tuple[int, int], str]` | required | The draws the step committed, by key, each with its fate (consumed, stale or failed). |
+| `tracker` | `StatsTracker` | required | The step's metrics row: what a hook records here is logged with the step. |
+| `published` | `Mapping[str, int]` | `{}` | Who published at the end of this step, at which new version; set before the hooks hear it. |
+| `policy` | `str \| None` | `None` | Whose step ends, when the run's policies step independently (each on its own clock); None: the run's one step. |
+| `hook_updates` | `dict[str, int]` | | The hooks' optimizer updates so far, by policy, as platoon counts them. Read-only. |
+
+#### `StepEnd.for_test`
+
+```python
+@classmethod
+def for_test(
+    *,
+    kind: Literal['launch', 'step'] = "step",
+    step: int = 0,
+    step_updates: Mapping[str, int] | None = None,
+    consumed: Mapping[tuple[int, int], str] | None = None,
+    tracker: StatsTracker | None = None,
+    published: Mapping[str, int] | None = None,
+    learner: Any = None,
+    policy: str | None = None,
+) -> StepEnd
+```
+
+A step's end built by hand, to test a hook alone: `end.learner(...)`, and so `end.train(...)`, hand
+out `learner` whatever the policy and the objective (a fake of
+`platoon.train.policy.learner.Learner` that records what the hook sends; None: they raise),
+`end.wait` awaits, and `hook_updates` is empty.  `tracker` defaults to a fresh `StatsTracker`;
+`policy` names whose step ends, as when the run's policies step independently.
+
+#### `StepEnd.learner`
+
+```python
+def learner(policy: str, *, objective: Objective) -> Learner
+```
+
+The learner of `policy` under `objective`, for the hook whose `update()` runs, which may use it there
+only (it refuses to send anything after, in a later step too, and so does a learner made from it under another
+objective): the policy's training client and optimizer parameters, the ones the step's own updates used,
+failing closed when the trainer's needs say so, its metrics under `<hook name>/` in the step's row.  When the
+run's policies step independently, only the policy whose step ends (`policy`) may be updated: updating
+another at its end is refused (ValueError).
+
+#### `StepEnd.train`
+
+```python
+async def train(
+    policy: str,
+    datums: Sequence[Any],
+    *,
+    objective: Objective,
+    adam_params: Any = None,
+) -> None
+```
+
+One optimizer update of `policy` on `datums` (`tinker.Datum`, sent as given) under `objective`:
+one forward_backward of them all, then one optimizer step, with `adam_params` (a `tinker.AdamParams`) for
+this update alone (None: the policy's, `train.optimizer`'s).  `end.learner` sends several microbatches
+into one update.
+
+#### `StepEnd.wait`
+
+```python
+async def wait(
+    awaitable: Awaitable[Any],
+    *,
+    name: str,
+    timeout: float | None = None,
+    interruptible: bool = False,
+) -> Any
+```
+
+Await `awaitable` as the run's waits do (`run.wait`): a log line and a watchdog heartbeat every minute,
+for at most `timeout` seconds.  With `interruptible`, `TrainInterrupted` once a stop is asked for, when
+the trainer's steps are atomic (`needs().atomic_steps`: the run then saves nothing of the step).  When they
+are not (the rl trainer's), a stop request does not end the wait, and the hook cannot see it: the wait runs to
+its end, or to `timeout` (`TimeoutError`, which fails the start), so bound what may not end by itself; the
+stop takes effect at the next step's boundary, so that no checkpoint saves half a step.
+
+<a id="platoon-experimental-traininterrupted"></a>
+
+### `platoon.experimental.TrainInterrupted`
+
+```python
+class TrainInterrupted(Exception)
+```
+
+A shutdown signal stopped the train loop where the last completed step is a consistent checkpoint.
+
+<a id="platoon-experimental-policysnapshot"></a>
+
+### `platoon.experimental.PolicySnapshot`
+
+```python
+class PolicySnapshot
+```
+
+A policy's published sampler at `version`, with what renders and parses its calls.  On a fully fine-tuned
+service a sampling client samples the newest weights whatever its path, so `sample` checks the version
+around each call; a trainer that samples during a step stops that work in its hook's `drain()`, before the step
+publishes.  The check reads the version, not the weights: there, the step's own optimizer steps change what the
+sampler samples before the step publishes, so a sample is its version's only up to the step's first update.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `policy` | `str` | required |  |
+| `version` | `int` | required |  |
+| `sampling_client` | `Any` | required | a tinker.SamplingClient |
+| `renderer` | `Any` | required |  |
+| `tokenizer` | `Any` | required |  |
+| `model_name` | `str` | required |  |
+| `context_window_length` | `int \| None` | `None` |  |
+| `sample_timeout_seconds` | `float \| None` | `None` | The bound on each sampling call through the gateway (None: TINKER_SAMPLE_TIMEOUT_SECONDS, else the default). |
+| `version_now` | `Callable[[], int] \| None` | `None` | The policy's version now, read at each check (None: the snapshot never moves, as a test's may not). |
+
+#### `PolicySnapshot.current`
+
+```python
+def current() -> bool
+```
+
+Whether the policy published nothing since: its version is still the snapshot's.
+
+#### `PolicySnapshot.sample`
+
+```python
+async def sample(prompt: Any, params: Any, *, num_samples: int = 1) -> Any
+```
+
+`num_samples` samples of `prompt` (a `tinker.ModelInput`) under `params` (`tinker.SamplingParams`)
+from the snapshot's sampler; `PolicyMoved` when the policy published before the call or by the time it
+returned, so that "this sample came from version v" holds.
+
+#### `PolicySnapshot.gateway`
+
+```python
+def gateway(*, context_window_length: int | None = None) -> ModelGateway
+```
+
+A model gateway (render, prepare, sample and parse calls) on the snapshot's sampler, with no recorder: its
+context window the policy's, or `context_window_length` when that is smaller.
+
+<a id="platoon-experimental-policymoved"></a>
+
+### `platoon.experimental.PolicyMoved`
+
+```python
+class PolicyMoved(RuntimeError)
+```
+
+A snapshot refused a sample: its policy published a newer sampler before the call, or while it ran, so the
+sample would not be its version's.
+
+<a id="platoon-experimental-drawinfo"></a>
+
+### `platoon.experimental.DrawInfo`
+
+```python
+class DrawInfo
+```
+
+The run and the training draw an episode belongs to (`ctx.draw`), when its trainer asks for them (RFC 0021's
+draw provenance, `TrainerNeeds.draw_provenance`); never in an evaluation.  A draw's key `(start, seq)` is
+never reused in its run, not even by a draw a resume makes again, and a step's end names the draws it committed by
+it (`StepEnd.consumed`).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `run_dir` | `str` | required | The run directory, where a program may write the files of its draw that its trainer reads. |
+| `start` | `int` | required | The start of the run that drew it, and its number among that start's draws. |
+| `seq` | `int` | required |  |
+| `position` | `int \| None` | required | Its position in the run's order of training tasks (None: a draw that a task sampler decided by itself). |
+| `step` | `int` | required | The training step that was current when its group started. |
+| `key` | `tuple[int, int]` | | Read-only. |
+
 <a id="platoon-experimental-rolloutworkflow"></a>
 
 ### `platoon.experimental.RolloutWorkflow`
@@ -1396,13 +1784,21 @@ trained policy (a `GroupOutput`, or a plain list).
 The optional members, which the trainer uses when a workflow has them:
 
 - `publish_model_binding(sampling_client, version)`: hand the sampling client of a new policy version to the
-  workflow's rollout workers (training does after each version it publishes, an evaluation before it starts);
+  workflow's rollout workers (training does after each version it publishes, an evaluation before it starts); a
+  workflow that binds several policies (`binds_policies`) also takes `policy=`, another policy its agents
+  sample, whose binding is a file of its own;
 - `warm_up()`: start, as training starts, what its rollouts need before the first one (awaited);
 - `rollout_isolation`: `"process"` when its rollouts run in rollout workers, which read the published client;
 - `start_limit`: the run's limit on rollouts starting at once, which the trainer sets on a workflow that takes it
   (`takes_start_limit`), and whose metrics an evaluation reports while it is set;
+- `stale_filter`: how the run's stale filter judges its groups (`train.stale_filter`), which the trainer sets on
+  a training workflow that takes it (`takes_stale_filter`): under `datum` the workflow stamps each datum with
+  the oldest policy version its own model calls sampled;
 - `entry_configs`: each environment entry's settings, which `platoon train` sets on a workflow that applies
   them (`applies_entry_settings`);
+- `entry_credit`: each environment entry's credit estimator, for the entries that set one, which a workflow that
+  applies them (`applies_credit`) gets from its setup and keeps, so that the rollout source settles and saves
+  them (`platoon.train.credit.runtime`);
 - its capabilities: a `capabilities` class attribute, or the class flags of `WorkflowCapabilities`;
 - `from_setup(setup)`, a class method: `platoon train` builds the run's workflow class with it, from a
   `WorkflowSetup`, and builds a class without one with `GroupRolloutWorkflow`'s keyword arguments.
@@ -1423,7 +1819,7 @@ class WorkflowCapabilities
 
 What a workflow class can do beyond `arun_episode`, which the trainer reads (`capabilities_of`) instead
 of testing whether the class is a `GroupRolloutWorkflow`.  A class declares them in a `capabilities` class
-attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five of them as flags.
+attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets all eight as flags.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -1431,8 +1827,10 @@ attribute, or as class flags of the same names; `GroupRolloutWorkflow` sets five
 | `gives_verdicts` | `bool` | `False` | Its groups' outputs carry a verdict, which the group admission rule `informative` reads: resolution refuses the rule beside a workflow that gives none (platoon.train.admissions). |
 | `runs_rollouts_on_lease` | `bool` | `False` | It runs each rollout in a block of its draw's rollout lease, so that its groups start on their first free permit under `train.permit_release: rollout` (platoon.train.leases). |
 | `takes_start_limit` | `bool` | `False` | It takes the run's limit on rollouts starting at once as its `start_limit` (`train.max_starting_rollouts`). |
+| `takes_stale_filter` | `bool` | `False` | It takes how the run's stale filter judges its groups as its `stale_filter` (`train.stale_filter`), and under `datum` stamps each datum with the oldest policy version its own model calls sampled. |
 | `runs_rollout_workers` | `bool` | `False` | Its rollouts can run in rollout workers: `platoon train` gives it the environments' `packages` and the run's `label_by` as arguments, and the `worker_preload` of its workers' fork server (platoon.train.launch). |
 | `binds_policies` | `bool` | `False` | Its `publish_model_binding` takes `policy=`, which a run that samples more than one policy needs. |
+| `applies_credit` | `bool` | `False` | It credits each environment entry's groups with the entry's credit estimator (`entry_credit`, which `from_setup` gets as `WorkflowSetup.entry_credit`): loading refuses an entry's `credit` beside a workflow that does not (platoon.train.credit.registry). |
 
 <a id="platoon-experimental-capabilities-of"></a>
 
@@ -1446,9 +1844,10 @@ What `workflow` (an instance or a class) can do: its `capabilities` when it decl
 flags, a flag it does not set False.  Each flag is read as the trainer read it before the contract was written down:
 `applies_entry_settings` and `runs_rollouts_on_lease` by their truth, the others only when they are True.
 
-Declared capabilities, a class's own or inherited, are all six, and win over every flag: over a subclass's own
-flags, and over `GroupRolloutWorkflow`'s rule that a subclass overriding how a member runs does not run its
-rollouts on the lease (`runs_rollouts_on_lease`), which sets the flag only.
+Declared capabilities, a class's own or inherited, are all eight, and win over every flag: over a subclass's own
+flags, and over `GroupRolloutWorkflow`'s rules that a subclass overriding how a member runs does not run its
+rollouts on the lease (`runs_rollouts_on_lease`), and one overriding how its groups are credited does not apply
+an entry's estimator (`applies_credit`), which set the flags only.
 
 <a id="platoon-experimental-workflowsetup"></a>
 
@@ -1477,6 +1876,11 @@ settings and the run's components, and the policies its rollouts sample.
 | `packages` | `Sequence[str] \| None` | `None` | The environments' packages and the run's label column, for a workflow that runs rollout workers (WorkflowCapabilities.runs_rollout_workers; None for one that does not). |
 | `label_by` | `str \| None` | `None` |  |
 | `options` | `Mapping[str, Any]` | `{}` | The environment's other arguments of the phase's workflow (workflow_kwargs, eval_workflow_kwargs), as given. |
+| `entry_credit` | `Mapping[str, Any]` | `{}` | Each environment entry's credit estimator, by entry, for the entries that set one (environments[].credit, platoon.train.credit.api); always empty for the eval phase, whose groups train nothing. |
+| `policy_views` | `Mapping[str, Any]` | `{}` | The run's policies as the estimators read them, by id (platoon.train.credit.api.PolicyView), beside entry_credit; empty for the eval phase. |
+| `agents` | `AgentBindings \| None` | `None` | With more than one sampled policy: which policy each agent samples, whose default is the first of `policies`, and the policies the run trains, whose agents alone make datums. None and empty with one. |
+| `trained` | `frozenset[str]` | `frozenset()` |  |
+| `role_tools` | `Mapping[str, tuple[str, ...]]` | `{}` | The tool name patterns of each agent role whose tools are limited (agents.roles.<role>.tools), by role; empty: every agent may call every tool. Rollouts in the trainer's process get them from its gateway; a workflow that starts rollout workers sends them in their requests (PolicyRolloutWorkerRequest.role_tools), as GroupRolloutWorkflow does. |
 
 <a id="platoon-experimental-rolloutoutput"></a>
 
@@ -1550,6 +1954,385 @@ A group's rows by the policy each trains.  A list of datums (a `GroupOutput`, or
 any other output without `rows()` (a tuple of datums, say), is all `trained`'s, the run's one trained policy:
 `{trained: output}`, the output itself.  Any other output answers `rows()`.  The step reads every output's rows
 through this one function.
+
+## Credit estimators
+
+The credit API: what an estimator is and its base class, what it is built with and what its check sees, the group it credits with its members, agents and rows, and the decorator that registers it ([Write a credit estimator](../extending/credit-estimators.md)).
+
+<a id="platoon-experimental-creditestimator"></a>
+
+### `platoon.experimental.CreditEstimator`
+
+```python
+class CreditEstimator(Protocol)
+```
+
+What the trainer calls of a credit estimator: `assign(group)`, once per training group, awaited.
+
+`needs_agents`: True when it reads the group's agents (`MemberRollout.agents`) and the rows' tags; the rollout
+workers then tag each row with its agent (worker protocol 3).  Optional: `settle(group)`, synchronous, the one
+place where an estimator with state changes it; `state()` and `load_state(state)`, which give and take that
+state as JSON data; and `assign_timeout_seconds`, how long `assign` may take on one group
+(`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit).  An estimator that raises in any of them, or
+whose `assign` runs out of time, stops the run with an error that names it, its entry and the group; but a
+policy's failed scoring that its `assign` lets through (`ScoringFailed`) fails only the group.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `needs_agents` | `ClassVar[bool]` |  |
+
+#### `CreditEstimator.assign`
+
+```python
+async def assign(group: CreditGroup) -> None
+```
+
+Set the advantages of the group's rows (`TrainingSample.set_advantage`,
+`TrainingSample.set_advantages`).  A row it leaves alone keeps what the converter loaded: its trajectory's
+processed reward on every action token.  It may await (a service's call, say), and assume that every member
+has settled; a group is credited once, and a resume that trains a group a checkpoint kept trains it with the
+advantages this call set.  Other groups' calls run while it awaits.
+
+<a id="platoon-experimental-creditestimatorbase"></a>
+
+### `platoon.experimental.CreditEstimatorBase`
+
+```python
+class CreditEstimatorBase
+```
+
+An optional base class of credit estimators: the protocol's shape, typed options and a load-time check.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `needs_agents` | `ClassVar[bool]` | Whether it reads the group's agents and the rows' tags (CreditEstimator.needs_agents). |
+| `options_schema` | `ClassVar[Any]` | Its options' schema: a dataclass, a pydantic model, or a function of the options' mapping that returns them parsed and raises ValueError; None: it takes no options. `self.options` holds them parsed. |
+| `assign_timeout_seconds` | `float \| None` | How long `assign` may take on one group, in seconds, before the run stops with an error that names the estimator; None: no limit. An estimator that calls a service may set it, from its options say, in `__init__`. |
+
+#### `CreditEstimatorBase.assign`
+
+```python
+async def assign(group: CreditGroup) -> None
+```
+
+Set the advantages of the group's rows (`CreditEstimator.assign`): a subclass implements it.
+
+#### `CreditEstimatorBase.check`
+
+```python
+@staticmethod
+def check(options: Any, ctx: CreditCheckContext) -> None
+```
+
+Refuse a config it cannot serve, with a `ValueError` that says why: it accepts every config.
+
+<a id="platoon-experimental-creditsetup"></a>
+
+### `platoon.experimental.CreditSetup`
+
+```python
+class CreditSetup
+```
+
+What an estimator is built with, once per start of the process and environment entry: `Class(setup, options)`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | required | Its name as the config gives it ("keyed", "acme.credit:ByRole"). |
+| `entry` | `str` | required | The label of the environment entry whose groups it credits. |
+| `settings` | `WorkflowConfig` | required | The entry's training settings (train.workflow_config with the entry's own laid over it). |
+| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id: main, then each other policy that the config's policies: section declares, trained or frozen. |
+| `policy_views` | `Mapping[PolicyId, PolicyView]` | `{}` | Each policy as the estimator may read it (its renderer, its tokenizer, its scores), by id: what an estimator that scores with another policy (a teacher) reads it from. Empty outside a run (a test's setup). |
+
+<a id="platoon-experimental-creditcheckcontext"></a>
+
+### `platoon.experimental.CreditCheckContext`
+
+```python
+class CreditCheckContext
+```
+
+What an estimator's load-time `check` sees, beside its options.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `entry` | `str` | required | The label of the environment entry that names it. |
+| `policies` | `tuple[PolicyId, ...]` | required | The run's policies, by id. |
+| `config` | `Any` | required | The whole loaded config, read-only, to cross-check the settings the estimator relies on. |
+
+<a id="platoon-experimental-creditgroup"></a>
+
+### `platoon.experimental.CreditGroup`
+
+```python
+class CreditGroup
+```
+
+One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its
+environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's
+order, the run's policies (`policies`, each as an estimator may read it), each policy's version when `assign`
+began (`versions`; it does not move during the call, although the policies may publish meanwhile), and where the
+group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the
+group records, outside one the stats tracker; an estimator's metrics belong under `credit/`).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `task_id` | `str` | required |  |
+| `label` | `str \| None` | required |  |
+| `entry` | `str \| None` | required |  |
+| `settings` | `WorkflowConfig` | required |  |
+| `members` | `list[MemberRollout]` | required |  |
+| `policies` | `Mapping[PolicyId, PolicyView]` | required |  |
+| `versions` | `Mapping[PolicyId, int]` | required |  |
+| `stats` | `DeferredStats \| StatsTracker` | required |  |
+
+#### `CreditGroup.samples`
+
+```python
+def samples() -> list[TrainingSample]
+```
+
+Every row of the group, member by member, each member's in its order.
+
+#### `CreditGroup.agents`
+
+```python
+def agents() -> list[AgentRun]
+```
+
+Every agent of the group, member by member (none when the estimator did not ask for them).
+
+<a id="platoon-experimental-memberrollout"></a>
+
+### `platoon.experimental.MemberRollout`
+
+```python
+class MemberRollout
+```
+
+One member of the group that returned a result: its place among them (`index`), every row of its rollout
+(`samples`), its agents (filled when the estimator asked for them, else empty), its root's processed reward and
+whether that is a completed root's scored outcome (`task_reward_valid`: an interrupted root's is not, and enters
+no baseline), and what the converter returned (`result`), to read: its trajectories' statistics and its root's
+reward components.  Its `datums` are the member's rows; an estimator sets their advantages through `samples`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `index` | `int` | required |  |
+| `samples` | `list[TrainingSample]` | required |  |
+| `agents` | `list[AgentRun]` | required |  |
+| `task_reward` | `float` | required |  |
+| `task_reward_valid` | `bool` | required |  |
+| `result` | `TrajectoryCollectionResult` | required |  |
+
+<a id="platoon-experimental-agentrun"></a>
+
+### `platoon.experimental.AgentRun`
+
+```python
+class AgentRun
+```
+
+One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role
+(`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it
+samples, its depth in the tree, its reward and its rows.  `reward` is its trajectory's processed reward, as the
+converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a
+child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score.  An
+estimator never trains an unscored agent's reward as 0, nor counts it in a baseline.  An agent whose rows the
+converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent
+did not use, whose reward still counts.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `agent_id` | `str` | required |  |
+| `trajectory_id` | `str` | required |  |
+| `parent_id` | `str \| None` | required |  |
+| `role` | `str` | required |  |
+| `policy` | `PolicyId` | required |  |
+| `depth` | `int` | required |  |
+| `reward` | `float \| None` | required |  |
+| `samples` | `list[TrainingSample]` | `[]` |  |
+
+<a id="platoon-experimental-trainingsample"></a>
+
+### `platoon.experimental.TrainingSample`
+
+```python
+class TrainingSample
+```
+
+One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of
+the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked
+for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree.  It lives in
+the trainer process only: what reaches the training service is the datum.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `datum` | `tinker.Datum` | required |  |
+| `policy` | `PolicyId` | required |  |
+| `member` | `int` | required |  |
+| `agent_id` | `str \| None` | `None` |  |
+| `role` | `str \| None` | `None` |  |
+| `trajectory_id` | `str \| None` | `None` |  |
+| `depth` | `int \| None` | `None` |  |
+| `advantages` | `torch.Tensor` | | The row's advantages, one per target token, as they are now: the converter loads every action token with its trajectory's processed reward, and the other positions with 0. Read-only. |
+| `mask` | `torch.Tensor` | | Which of the row's target tokens are actions, which train (`mask > 0`), one per target token. Read-only. |
+
+#### `TrainingSample.set_advantage`
+
+```python
+def set_advantage(value: float) -> None
+```
+
+Set `value` as the advantage of every action token of the row; its other positions keep theirs.
+
+#### `TrainingSample.set_advantages`
+
+```python
+def set_advantages(values: torch.Tensor | Sequence[float]) -> None
+```
+
+Set one advantage per target token (`values`, as many as the row has target tokens) on the row's action
+tokens; its other positions keep theirs.  A `ValueError` for values of another length.
+
+<a id="platoon-experimental-policyview"></a>
+
+### `platoon.experimental.PolicyView`
+
+```python
+class PolicyView
+```
+
+What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into
+text, its version now, and its scores of other rows (`score`), for a policy that scores: a frozen
+teacher.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `id` | `PolicyId` | required |  |
+| `renderer` | `Any` | `None` |  |
+| `tokenizer` | `Any` | `None` |  |
+| `scorer` | `Callable[[Sequence[tinker.Datum]], Awaitable[list[torch.Tensor]]] \| None` | `None` | Its scores of rows (the trainer's Policy.score); None for a view that scores nothing. |
+| `current_version` | `Callable[[], int] \| None` | `None` | Its version now (the trainer's Policy.version); None for a view that knows none, whose version reads 0. |
+| `version` | `int` | | The policy's version now: how many samplers it published over the run (0 for a frozen policy). Read-only. |
+
+#### `PolicyView.score`
+
+```python
+async def score(datums: Sequence[tinker.Datum]) -> list[torch.Tensor]
+```
+
+The policy's logprobs of each datum's target tokens under its current sampler, one per target token,
+aligned as the datum's own sampled logprobs are (`loss_fn_inputs["logprobs"]`).  `ScoringFailed`
+when its scoring fails, which fails the group being credited; a `RuntimeError` for a view that scores
+nothing.
+
+<a id="platoon-experimental-scoringfailed"></a>
+
+### `platoon.experimental.ScoringFailed`
+
+```python
+class ScoringFailed(RuntimeError)
+```
+
+A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within
+the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token.
+An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under
+`credit/failures`) and trains nothing, and the run goes on.
+
+<a id="platoon-experimental-credit-estimator"></a>
+
+### `platoon.experimental.credit_estimator`
+
+```python
+def credit_estimator(
+    name: str,
+    *,
+    options: Any = None,
+    check: Callable[[Any, CreditCheckContext], None] | None = None,
+) -> Callable[[R], R]
+```
+
+Register a credit estimator class under `name`, from a module that an environment entry's `package` names,
+so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its
+load-time check.  Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are
+reserved, whatever their case and their `-` or `_`; a name registered twice is an error.
+
+## Independent stepping
+
+The shares of a run's groups when its trained policies step each on its own clock: what a trainer's steps take each policy's shares from.
+
+<a id="platoon-experimental-shareledger"></a>
+
+### `platoon.experimental.ShareLedger`
+
+```python
+class ShareLedger(Protocol)
+```
+
+The shares of a run's groups, as a trainer of its own whose policies step independently takes them
+(`run.rollouts().ledger`; `TrainerNeeds.stepping`): each step of policy `p` takes `p`'s shares
+(`take`), trains them (a trainer that drops stale ones judges each at `judge_version`), records them
+consumed under the commit lock (`async with ledger.lock:` `consumed`), then ends with
+`await run.end_step(policy=p)` on `p`'s own clock (`run.clocks[p]`).  The run keeps the rest: which shares a
+checkpoint holds, which a resume puts back, and when a group retires.
+
+| Attribute | Type | Description |
+|---|---|---|
+| `lock` | `asyncio.Lock` | The commit lock, which a step holds while it records what it consumed, so that a commit captures all of it or none of it. |
+
+#### `ShareLedger.take`
+
+```python
+async def take(policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[SettledGroup]
+```
+
+`n` of `policy`'s shares, in the order they settled, those a resume put back first: each a settled
+group, as the source's `take` gives one in lockstep, whose output (`output`) holds `policy`'s rows of
+the group only (the leader's share of a group without its rows holds none; that of a group that failed is
+None), and whose `key` names its draw.  Fewer (none at all, perhaps) once no share will come
+(`done`): at the plan's end, or once a stop request ended another policy's loop and no group starts
+again.  Once `stop` is set (the run's shutdown request, `run.shutdown`), `TrainInterrupted` instead:
+the shares it took stay unconsumed, which the checkpoint at exit keeps.  A trainer that drops stale shares
+judges each at `judge_version`.
+
+#### `ShareLedger.judge_version`
+
+```python
+def judge_version(policy: PolicyId, group: SettledGroup) -> int
+```
+
+The version of `policy` that the staleness of its share `group` (one `take` gave, not yet
+consumed) is judged at: the policy's version now, but for a share a resume put back, the version at which it
+has the age it had when the policy first consumed it (the oldest version stamped on its rows plus that age).
+The resume's version rule moves the policy's version past the row it resumes from, so a share put back,
+judged against the version now, could be dropped as stale, though it trained once on the same lineage.
+
+#### `ShareLedger.consumed`
+
+```python
+def consumed(
+    policy: PolicyId,
+    keys: Iterable[DrawKey | None],
+    *,
+    step: int,
+    fates: Mapping[DrawKey, str] | None = None,
+) -> None
+```
+
+`policy`'s step `step` (its clock's) trained or dropped its shares of the groups of `keys`, each with
+its fate (`fates`: `consumed`, `stale` or `failed`; default `consumed`).  Call it under `lock`,
+before the step ends.
+
+#### `ShareLedger.done`
+
+```python
+def done(policy: PolicyId) -> bool
+```
+
+Whether `policy`'s loop may end: no group runs that may still give it a share, it has none left to take,
+and none will start: the plan is drawn, or a stop request ended another policy's loop, whose full horizon holds
+back every group for good.
 
 ## The types these take and return
 

@@ -69,6 +69,8 @@ class TaskTableService:
 
     # The JSONL file a config file names relative to itself (RFC 0018, section 5).
     path_options: ClassVar[tuple[str, ...]] = ("path",)
+    # The tools its sessions serve: none (platoon.envs.service.service_declared_tools).
+    declared_tools: ClassVar[tuple[str, ...]] = ()
 
     def __init__(
         self,

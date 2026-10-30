@@ -505,6 +505,16 @@ class EnvironmentConfig:
     # Options of the entry's own group_admission, which they go with (an entry that sets none inherits the run's rule
     # and options); ``all`` takes none.
     group_admission_options: dict[str, Any] = field(default_factory=dict)
+    # How the entry's training groups turn rewards into advantages (experimental; null: the workflow's own credit, each
+    # rollout's datums centered on the group's completed-root baseline): ``group`` (that credit, as an estimator),
+    # ``keyed`` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), a
+    # name the entry's ``package`` registers with ``@credit_estimator``, or ``module:Class``. Its estimator runs once
+    # per group in the trainer, never in an evaluation. A named environment cannot set it. See
+    # docs/how-to/train-and-eval.md.
+    credit: str | None = None
+    # Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key,
+    # leave_one_out); ``group`` takes none.
+    credit_options: dict[str, Any] = field(default_factory=dict)
     # The entry's own training settings, laid over ``train.workflow_config`` for its training groups: the keys that act
     # on one group or one rollout (EntryWorkflowSettings), such as ``group_size``, ``min_successful_group_size``,
     # ``leave_one_out_baseline`` and ``rollout_config.max_steps``. A key it leaves out keeps the run's; ``null`` unsets
@@ -624,6 +634,13 @@ class EnvironmentConfig:
                 f"{where}: group_admission_options must be a mapping, got {self.group_admission_options!r}"
             )
         self.group_admission_options = copy.deepcopy(dict(self.group_admission_options))
+        if self.credit is not None and (not isinstance(self.credit, str) or not self.credit):
+            raise ValueError(f"{where}: credit must name a credit estimator, got {self.credit!r}")
+        if not isinstance(self.credit_options, Mapping):
+            raise ValueError(f"{where}: credit_options must be a mapping, got {self.credit_options!r}")
+        if self.credit_options and self.credit is None:
+            raise ValueError(f"{where}: credit_options go with the estimator they configure: set credit beside them")
+        self.credit_options = copy.deepcopy(dict(self.credit_options))
         if isinstance(self.exclude_tasks, (str, Mapping)) or not isinstance(self.exclude_tasks, Sequence):
             raise ValueError(f"{where}: exclude_tasks must be a list of task ids or names, got {self.exclude_tasks!r}")
         if bad := [item for item in self.exclude_tasks if not _names_a_task(item)]:

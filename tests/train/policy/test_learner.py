@@ -30,7 +30,7 @@ from platoon.train.policy.set import PolicySet
 from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.train.step.metrics import RunTotals
 from platoon.train.step.microbatch import MicrobatchFill
-from platoon.train.trainer import loops
+from platoon.train.step.step import StepContext, TrainStep
 from platoon.train.trainer.run import StepClock
 from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.utils.stats_tracker import StatsTracker
@@ -63,9 +63,14 @@ class _TrainingClient:
         return _Future(SimpleNamespace(metrics={"grad_norm": 2.0}), self.optim_error)
 
 
-def _learner(events: list[Any], recorded: dict[str, float], optim_error: BaseException | None = None) -> Learner:
-    """A learner of a policy that took 3 optimizer steps, whose calls, waits and metrics go to ``events``, and whose
-    recorded metrics go to ``recorded``."""
+def _learner(
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[Any],
+    recorded: dict[str, float],
+    optim_error: BaseException | None = None,
+) -> Learner:
+    """A learner of a policy that took 3 optimizer steps, whose calls, waits and metrics go to ``events`` (the
+    objective's training metrics patched in its module), and whose recorded metrics go to ``recorded``."""
 
     info: Any = SimpleNamespace()
     client: Any = _TrainingClient(events, optim_error)
@@ -79,6 +84,8 @@ def _learner(events: list[Any], recorded: dict[str, float], optim_error: BaseExc
         events.append(("metrics", inputs))
         return {"optim/kl": 1.0 if inputs["datums"] == ["original 0"] else 3.0}
 
+    monkeypatch.setattr(policy_gradient, "compute_training_metrics", training_metrics)
+
     async def wait(awaitable, *, name, total_timeout):
         events.append(("wait", name, total_timeout))
         return await awaitable
@@ -86,7 +93,7 @@ def _learner(events: list[Any], recorded: dict[str, float], optim_error: BaseExc
     tracker: Any = SimpleNamespace(scalar=lambda **metrics: recorded.update(metrics))
     return Learner(
         policy,
-        objective=PolicyGradient("cispo", loss_fn_config, training_metrics=training_metrics),
+        objective=PolicyGradient("cispo", loss_fn_config),
         timeouts=SimpleNamespace(forward_backward_timeout_seconds=5.0, optim_step_timeout_seconds=1.0),
         wait=wait,
         tracker=tracker,
@@ -103,10 +110,10 @@ async def _send_two_microbatches(learner: Learner) -> PolicyUpdate:
     return update
 
 
-def test_an_update_sends_each_microbatch_under_the_objective_then_steps_the_policy_s_optimizer_once():
+def test_an_update_sends_each_microbatch_under_the_objective_then_steps_the_policy_s_optimizer_once(monkeypatch):
     events: list[Any] = []
     recorded: dict[str, float] = {}
-    learner = _learner(events, recorded)
+    learner = _learner(monkeypatch, events, recorded)
     policy, loss_fn_config = learner.policy, learner.objective.loss_fn_config
     tally = SimpleNamespace(optimizer_steps=0)
 
@@ -137,13 +144,13 @@ def test_an_update_sends_each_microbatch_under_the_objective_then_steps_the_poli
 
 
 @pytest.mark.parametrize("error", [RuntimeError("optim_step failed"), asyncio.CancelledError()])
-def test_an_optimizer_step_whose_result_never_comes_is_not_counted(error):
+def test_an_optimizer_step_whose_result_never_comes_is_not_counted(monkeypatch, error):
     """An optimizer step whose result raises, or is cancelled, is counted neither in the step's tally nor in the
     policy's optimizer steps, and records no optimizer metrics: a checkpoint saved after it records the steps taken."""
 
     events: list[Any] = []
     recorded: dict[str, float] = {}
-    learner = _learner(events, recorded, optim_error=error)
+    learner = _learner(monkeypatch, events, recorded, optim_error=error)
     tally = SimpleNamespace(optimizer_steps=0)
 
     async def run() -> None:
@@ -189,9 +196,10 @@ class _FailingClient(_TrainingClient):
         ("optim result", "optim_step result_async failed after"),
     ],
 )
-def test_a_failed_call_to_the_service_is_logged_where_it_failed_and_raised(caplog, where, line):
+def test_a_failed_call_to_the_service_is_logged_where_it_failed_and_raised(monkeypatch, caplog, where, line):
     events: list[Any] = []
-    learner = _learner(events, {}, optim_error=RuntimeError("the service is gone") if where == "optim result" else None)
+    failure = RuntimeError("the service is gone") if where == "optim result" else None
+    learner = _learner(monkeypatch, events, {}, optim_error=failure)
     if where != "optim result":
         learner.policy.training_client = _FailingClient(events, where)
 
@@ -205,15 +213,53 @@ def test_a_failed_call_to_the_service_is_logged_where_it_failed_and_raised(caplo
     assert [record.getMessage() for record in caplog.records if line in record.getMessage()]
 
 
-def test_training_metrics_that_fail_are_logged_and_the_update_goes_on(caplog):
+@pytest.mark.parametrize(
+    ("where", "doing"),
+    [
+        ("fb submit", "forward_backward"),
+        ("optim submit", "optim_step"),
+        ("fb result", "the update's results"),
+        ("optim result", "the update's results"),
+    ],
+)
+@pytest.mark.parametrize("named", [True, False])
+def test_a_named_learner_s_service_errors_name_its_policy_and_so_do_a_hook_s_learner_s_of_it(
+    monkeypatch, where, doing, named
+):
+    """In a run of several trained policies every learner is named, and a learner made from one under another
+    objective (a step hook's) too; a run's one policy's errors are raised as they are."""
+
+    monkeypatch.delenv("TINKER_BASE_URL", raising=False)
+    events: list[Any] = []
+    error = RuntimeError("the service is gone") if where == "optim result" else None
+    learner = _learner(monkeypatch, events, {}, optim_error=error)
+    learner.named = named
+    if where != "optim result":
+        failing: Any = _FailingClient(events, where)
+        learner.policy.training_client = failing
+    hook_s = learner.for_objective(PolicyGradient("cispo", {}), metric_prefix="hook/")
+
+    async def run() -> None:
+        update = await _send_two_microbatches(hook_s)
+        await update.apply(SimpleNamespace(optimizer_steps=0))
+
+    with pytest.raises(RuntimeError, match="the service is gone") as raised:
+        asyncio.run(run())
+
+    assert hook_s.named is named
+    notes = [f"policy main, on hosted Tinker: {doing} failed"] if named else None
+    assert getattr(raised.value, "__notes__", None) == notes
+
+
+def test_training_metrics_that_fail_are_logged_and_the_update_goes_on(monkeypatch, caplog):
     events: list[Any] = []
     recorded: dict[str, float] = {}
-    learner = _learner(events, recorded)
+    learner = _learner(monkeypatch, events, recorded)
 
     def failing(**inputs: Any) -> dict[str, float]:
         raise ValueError("no logprobs")
 
-    learner.objective = PolicyGradient("cispo", learner.objective.loss_fn_config, training_metrics=failing)
+    monkeypatch.setattr(policy_gradient, "compute_training_metrics", failing)
     tally = SimpleNamespace(optimizer_steps=0)
 
     async def run() -> None:
@@ -252,7 +298,7 @@ def test_the_policy_gradient_objective_leaves_out_the_trainer_s_loss_inputs_and_
     }
 
 
-def _step_context(state: Any, train: dict[str, Any], *, heartbeat: Any = None) -> loops.StepContext:
+def _step_context(state: Any, train: dict[str, Any], *, heartbeat: Any = None) -> StepContext:
     """The context of a start's steps, as the training loop builds it for ``state``, by a trainer under ``train:``
     (``fakes.loop``; no batch transforms), whose waits on the service run under ``heartbeat`` when given (in place of
     the trainer's ``_await_with_heartbeat``)."""
@@ -261,7 +307,7 @@ def _step_context(state: Any, train: dict[str, Any], *, heartbeat: Any = None) -
     if heartbeat is not None:
         trainer._await_with_heartbeat = heartbeat
     workflow: Any = object()
-    return loops.StepContext.build(
+    return StepContext.build(
         trainer,
         state,
         workflow,
@@ -278,13 +324,13 @@ def _step_context(state: Any, train: dict[str, Any], *, heartbeat: Any = None) -
 def _step_learner(state: Any, train: dict[str, Any]) -> Learner:
     """The learner of a start's steps, as the training loop builds it."""
 
-    return _step_context(state, train).learner
+    return _step_context(state, train).lanes[0].learner
 
 
-def _step(state: Any, train: dict[str, Any]) -> loops.TrainStep:
+def _step(state: Any, train: dict[str, Any]) -> TrainStep:
     """A start's first step (of one minibatch of one microbatch of one group), as the training loop makes it."""
 
-    return loops.TrainStep(_step_context(state, train), RunTotals())
+    return TrainStep(_step_context(state, train), RunTotals())
 
 
 def _train(filter_zero_advantage_datums: bool = False, **settings: Any) -> dict[str, Any]:
@@ -306,7 +352,6 @@ def _state(**given: Any) -> TrainLoopSharedState:
     return TrainLoopSharedState(
         shutdown_event=asyncio.Event(),
         eval_dataloader=None,
-        sampling_client_step=0,
         clock=StepClock(step=0, updated=asyncio.Event()),
         **{**parts, **given},
     )
@@ -338,59 +383,22 @@ def _datum(advantage: float, **inputs: torch.Tensor) -> tinker.Datum:
 
 
 def test_the_step_updates_the_leader_policy_under_the_loss_its_spec_took_when_the_trainer_was_built(monkeypatch):
-    """Its objective's metrics are ``compute_training_metrics`` as the training loop's module names it at each call,
-    where tests patch it."""
+    """Its objective is the policy-gradient loss of the leader's spec, with that spec's config, not the config's as it
+    is now; its metrics are ``compute_training_metrics`` as the objective's module names it at each call, where a
+    patch of it, as through platoon 0.4.0's ``platoon.train.tinker.rl``, lands."""
 
     loss_fn_config = {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2}
     policy = _main(loss_fn="ppo", loss_fn_config=loss_fn_config)
     spec = policy.spec
 
     learner = _step_learner(_state(policies=PolicySet([policy])), _train(loss_fn="cispo", loss_fn_config={}))
-    monkeypatch.setattr(loops, "compute_training_metrics", lambda **inputs: {"patched": float(len(inputs))})
+    monkeypatch.setattr(policy_gradient, "compute_training_metrics", lambda **inputs: {"patched": float(len(inputs))})
 
     assert learner.policy is policy and policy.spec is spec
     assert learner.objective.loss_fn == "ppo" and learner.objective.loss_fn_config is loss_fn_config
     originals: Any = []
     result: Any = SimpleNamespace()
     assert learner.objective.metrics(originals, result) == {"patched": 4.0}
-
-
-def test_a_step_on_a_state_a_test_made_as_platoon_0_4_0_did_trains_under_the_run_s_settings():
-    """A shared state made with platoon 0.4.0's fields holds a policy of its own, whose spec has neither a loss nor an
-    optimizer: it takes the run's.  A state made without any policy (a test's) is updated in its place, under the run's
-    loss, ``cispo`` with its default thresholds here, and under ``cispo`` with no config when a test's config names no
-    loss (one that is not a run's config)."""
-
-    loss_fn_config = {"clip_low_threshold": 0.0, "clip_high_threshold": 5.0}
-    state = TrainLoopSharedState(  # platoon 0.4.0's fields: the policy's state and the loops' step and event
-        config=make_config(),
-        shutdown_event=asyncio.Event(),
-        train_step=0,
-        train_dataloader=[],
-        eval_dataloader=None,
-        sampling_client_step=0,
-        sampling_client_updated_event=asyncio.Event(),
-        stats_logger=StepLog(),
-        train_tracker=StatsTracker("train"),
-        model_info=SimpleNamespace(model_name="m", renderer_name="r"),
-        optimizer_steps=2,
-    )
-    train = _train(loss_fn="importance_sampling", loss_fn_config=loss_fn_config, optimizer={"learning_rate": 1e-6})
-    context = _step_context(state, train)
-    learner, run_train = context.learner, context.trainer.config.train
-    assert state.policies is not None and learner.policy is state.policies[MAIN]
-    assert learner.objective.loss_fn == "importance_sampling"
-    assert learner.objective.loss_fn_config is run_train.loss_fn_config
-    assert learner.policy.spec.optimizer is run_train.optimizer
-
-    bare = SimpleNamespace(watchdog=None, train_tracker=SimpleNamespace(), optimizer_steps=0)
-    learner = _step_learner(bare, _train())
-    assert learner.policy is bare
-    assert (learner.objective.loss_fn, learner.objective.loss_fn_config) == ("cispo", loss_fn_config)
-
-    unnamed = SimpleNamespace(watchdog=None, train_tracker=SimpleNamespace(), optimizer_steps=0)
-    policy = loops._test_state_policy(unnamed, SimpleNamespace(train=SimpleNamespace()))
-    assert (policy.spec.loss_fn, policy.spec.loss_fn_config) == ("cispo", {})
 
 
 def test_the_trainer_s_optimizer_steps_with_the_settings_its_policy_s_spec_took(tmp_path):
@@ -404,7 +412,7 @@ def test_the_trainer_s_optimizer_steps_with_the_settings_its_policy_s_spec_took(
     async def ready(*, stop):
         return None
 
-    start: Any = SimpleNamespace(batch=0, policy_version=0, resume_info=None)
+    start: Any = SimpleNamespace(step=0, record=None)
     startup: Any = SimpleNamespace(ready=ready)
     dataloader: Any = []
     state = asyncio.run(trainer._loop_state(start, asyncio.Event(), dataloader, startup))
@@ -433,7 +441,7 @@ def test_the_step_s_learner_awaits_each_result_under_the_trainer_s_heartbeat_fee
     watchdog: Any = SimpleNamespace()
     state = _state(policies=PolicySet([_main()]), watchdog=watchdog)
     context = _step_context(state, _train(), heartbeat=heartbeat)
-    learner = context.learner
+    learner = context.lanes[0].learner
 
     assert asyncio.run(wait()) == "result"
     assert calls == [{"name": "optim_step", "heartbeat_interval": 60.0, "watchdog": watchdog, "total_timeout": 2.0}]
@@ -449,9 +457,10 @@ def test_a_step_filters_and_tests_its_microbatches_under_the_loss_its_policy_tra
     state = _state(policies=PolicySet([_main(loss_fn_config={"kl_coef": 0.1})]), train_tracker=StatsTracker("train"))
     step = _step(state, _train(filter_zero_advantage_datums=True, loss_fn="cispo", loss_fn_config={}))
 
-    prepared = step.prepare(MicrobatchFill([_datum(0.0), _datum(1.0)], places=1), 0, 0)
+    [lane] = step.context.lanes
+    prepared = step.prepare(MicrobatchFill([_datum(0.0), _datum(1.0)], places=1), 0, 0, lane)
     assert prepared is not None and len(prepared.datums) == 2
-    assert step.prepare(MicrobatchFill([_datum(0.0)], places=1), 0, 0) is not None
+    assert step.prepare(MicrobatchFill([_datum(0.0)], places=1), 0, 0, lane) is not None
 
 
 def test_a_step_sends_its_datums_without_the_objective_s_side_channels_and_with_everything_else():
@@ -461,7 +470,7 @@ def test_a_step_sends_its_datums_without_the_objective_s_side_channels_and_with_
     step = _step(_state(policies=PolicySet([_main()])), _train())
     datum = _datum(1.0, routing_handle=torch.tensor([4242], dtype=torch.int64), traj_start=torch.tensor([1.0]))
 
-    prepared = step.prepare(MicrobatchFill([datum], places=1), 0, 0)
+    prepared = step.prepare(MicrobatchFill([datum], places=1), 0, 0, step.context.lanes[0])
 
     assert prepared is not None and prepared.originals[0] is datum
     (sent,) = prepared.datums

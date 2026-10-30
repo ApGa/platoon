@@ -138,6 +138,10 @@ provider_options:
   relative one stays relative to the working directory.
 - **`provider` and `provider_options`** start the sandboxes of every Harbor entry that names no provider, and an entry's
   own `provider_options` are laid over the profile's. An entry that names a provider keeps its own options.
+- **`node_services`** (*since 0.5.0*) declares services that a node runs once for every rollout on it, by name, such
+  as a judge pool whose image and data are this site's files; an entry takes one by naming it with `site`
+  (`node_services: {frontier-cs-judge: site}`) and runs it on its own provider ([Node
+  services](sandboxes-and-harbor.md#node-services)).
 
 **What it may not say.** The profile chooses where files live and which isolating runtime starts sandboxes; it never
 weakens isolation and never changes what trains:
@@ -147,7 +151,8 @@ weakens isolation and never changes what trains:
 - its `provider_options` are the ones that do not weaken isolation: `allow_network_none`, `rootfs_layout`,
   `scratch_root`, `image_cache`, `stage_images` and `gpu`. `binary`, `extra_start_args` and bind mounts (`mounts`)
   belong in a run config;
-- it takes no other key: no dataset, model, reward or recipe setting.
+- it takes no other key: no dataset, model, reward or recipe setting; a node service it declares runs only where an
+  entry names it.
 
 `platoon train`, `eval`, `rollout` and `prepare` print the profile they used and what it gave the config, and refuse
 (exit 78) a provider from it that the node cannot run, quoting the profile. The run's `lock.json` records the file's
@@ -292,6 +297,7 @@ boundary and saves an interrupt checkpoint ([Checkpoints and
 resume](train-and-eval.md#checkpoints-and-resume)). That save is a full one, which for a large model trained in
 full can outlast a short grace. Have the signal come early enough, for example with Slurm's
 `#SBATCH --signal=B:TERM@600` (ten minutes before the limit), or rely on `checkpoint.recovery_every` (step 7).
+`platoon eval` stops on the SIGTERM as at Ctrl+C, reaps its sandboxes and exits 143.
 
 Check the config on the login node before you queue it: `platoon config validate configs/train.yaml` exits 78 on
 a missing file, an unknown key, a badly typed value or a component that does not resolve, which it imports as the

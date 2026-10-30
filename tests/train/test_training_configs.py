@@ -4,6 +4,8 @@ before it lists tasks or opens Tinker; ``platoon train`` reports them in one lin
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
@@ -11,6 +13,9 @@ import yaml
 from platoon import cli
 from platoon.task import Task
 from platoon.train import launch as train_module
+from platoon.train.policy.policy import Policy
+from platoon.train.policy.set import PolicySet
+from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.utils.config import ConfigError
 
 TASKS = {"train": ["a", "b", "c", "d"], "eval": ["e"]}
@@ -142,6 +147,9 @@ class _RecordingWorkflow:
 class _Trainer:
     def __init__(self, **kwargs):
         self.model_info, self.run_log_path = None, "logs"
+        spec = PolicySpec(MAIN, model_name="m", renderer_name="r")
+        info: Any = SimpleNamespace(llm=SimpleNamespace(version=0))
+        self.policies = PolicySet([Policy(spec, info)])
 
     async def __aenter__(self):
         return self

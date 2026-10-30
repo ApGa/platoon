@@ -8,8 +8,9 @@
 * ``config.md``: every config dataclass or pydantic model reachable from the training config
   (``PlatoonTinkerRLTrainerConfig``) and the evaluation config (``PlatoonEvalConfig``): each key's type,
   default and description.
-  It ends with core's task samplers, the levels each serves, and ``pass_rate``'s options, and core's group admission
-  rules, with ``informative``'s options.
+  It ends with core's task samplers, the levels each serves, and ``pass_rate``'s options, core's group admission
+  rules, with ``informative``'s options, core's trainers, with the options of each that takes some, and core's
+  credit estimators, with ``keyed``'s options.
 * ``api.md``: every name ``platoon`` exports (``platoon.__all__``), with its signature and docstring.
 * ``experimental.md``: every name ``platoon.experimental`` exports, the same way.
 
@@ -421,6 +422,8 @@ def _config_type_text(annotation: Any, links: Mapping[type, str]) -> str:
         return "None"
     if annotation is Any:
         return "Any"
+    if annotation is Ellipsis:  # tuple[X, ...]
+        return "..."
     if origin is typing.Annotated:
         return _config_type_text(args[0], links)
     if origin is typing.Literal:
@@ -500,6 +503,8 @@ def render_config() -> str:
             lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
     lines += _task_samplers(links)
     lines += _group_admissions(links)
+    lines += _trainers(links)
+    lines += _credit_estimators(links)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -623,6 +628,135 @@ def _group_admissions(links: Mapping[type, str]) -> list[str]:
     for item in config_fields(InformativeOptions):
         type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
         lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
+    return lines
+
+
+# What each of core's trainers trains on.  config.md's "Trainers" table has a row for each name of
+# platoon.train.trainer.registry.CORE_TRAINERS; a name without its text here stops the generation, so that a new core
+# trainer cannot go missing from the page.
+TRAINER_TEXT: dict[str, str] = {
+    "rl": "The default: GRPO-style training on the rollouts of the run's training tasks, with `train:`'s settings.",
+    "sft": "Supervised fine-tuning on chat datasets in LLaMA-Factory's conventions (a `dataset_info.json` of "
+    "`alpaca` and `sharegpt` datasets), with the loss on the model's turns; `train:` declares the policy it trains.",
+}
+
+
+def _trainers(links: Mapping[type, str]) -> list[str]:
+    """config.md's "Trainers": a row for each of core's trainers, then a section of the options of each that takes
+    some."""
+
+    from platoon.train.config_defs import RL_ONLY_TRAIN_KEYS
+    from platoon.train.trainer.registry import CORE_TRAINERS
+
+    lines = [
+        "",
+        '<a id="trainers"></a>',
+        "",
+        "## Trainers",
+        "",
+        "`trainer:` chooses how a run trains, and `trainer_options` sets the trainer's options. Core's trainers are "
+        "below ([Fine-tune on a dataset](../how-to/train-and-eval.md#fine-tune-on-a-dataset) for `sft`). Under a "
+        "trainer other than `rl`, the `train:` keys that only `rl` reads are refused when set: "
+        + ", ".join(f"`{key}`" for key in RL_ONLY_TRAIN_KEYS)
+        + ".",
+        "",
+        "| Trainer | What it trains on | Options |",
+        "|---|---|---|",
+    ]
+    for name, trainer in CORE_TRAINERS.items():
+        if name not in TRAINER_TEXT:
+            raise ValueError(f"core's trainer {name!r} has no text in scripts/gen_reference.py's TRAINER_TEXT")
+        options = f"[below](#{name}-options)" if trainer.options is not None else "none"
+        lines.append(f"| `{name}` | {cell(TRAINER_TEXT[name])} | {options} |")
+    for name, trainer in CORE_TRAINERS.items():
+        if trainer.options is not None:
+            module, _, attr = trainer.options.partition(":")
+            lines += _trainer_options(name, getattr(importlib.import_module(module), attr), links)
+    return lines
+
+
+def _trainer_options(name: str, options: type, links: Mapping[type, str]) -> list[str]:
+    """The section of trainer ``name``'s options (``options``, its options class), which the trainers' table links."""
+
+    lines = [
+        "",
+        f'<a id="{name}-options"></a>',
+        "",
+        f"### `{name}`'s options",
+        "",
+        f"`{options.__module__}.{options.__qualname__}`: the keys of `trainer_options` under `trainer: {name}`.",
+        "",
+        markdown(inspect.getdoc(options)),
+        "",
+        "| Key | Type | Default | Description |",
+        "|---|---|---|---|",
+    ]
+    for item in config_fields(options):
+        type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
+        lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
+    return lines
+
+
+# What each of core's credit estimators does.  config.md's "Credit estimators" table has a row for each name of
+# platoon.train.credit.registry.BUILTIN_CREDIT_ESTIMATORS; a name without its text here stops the generation, so that a
+# new core estimator cannot go missing from the page.
+CREDIT_ESTIMATOR_TEXT: dict[str, str] = {
+    "group": "The workflow's own credit, as an estimator: each member's datums centered on its baseline from the "
+    "group's completed root rewards (the group mean, or with the entry's `leave_one_out_baseline` the leave-one-out "
+    "mean), value for value. An entry without `credit` gets the same credit from the workflow itself.",
+    "keyed": "Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, "
+    "`policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the "
+    "subagents'. Reads agents: the rollout workers tag each row with its agent.",
+    "reverse_kl": "On-policy distillation: a frozen teacher (a `policies:` entry with `trainable: false`) scores every "
+    "token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher "
+    "logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share "
+    "the student's tokenizer.",
+}
+
+
+def _credit_estimators(links: Mapping[type, str]) -> list[str]:
+    from platoon.train.credit.keyed import KeyedOptions
+    from platoon.train.credit.registry import BUILTIN_CREDIT_ESTIMATORS
+    from platoon.train.credit.reverse_kl import ReverseKLOptions
+
+    schemas: dict[str, type] = {"keyed": KeyedOptions, "reverse_kl": ReverseKLOptions}
+    lines = [
+        "",
+        '<a id="credit-estimators"></a>',
+        "",
+        "## Credit estimators",
+        "",
+        "`environments[].credit` chooses how an entry's training groups turn rewards into advantages (experimental), "
+        "with its options beside it (`credit_options`); an entry that sets none keeps the workflow's own credit. Its "
+        "estimator runs once per group in the trainer, never in an evaluation. Core's estimators are below; a package "
+        "an entry names may register others with `@credit_estimator`, and `module:Class` names one ([Write a credit "
+        "estimator](../extending/credit-estimators.md)).",
+        "",
+        "| Estimator | What it does | Options |",
+        "|---|---|---|",
+    ]
+    for name in BUILTIN_CREDIT_ESTIMATORS:
+        if name not in CREDIT_ESTIMATOR_TEXT:
+            raise ValueError(
+                f"core's credit estimator {name!r} has no text in scripts/gen_reference.py's CREDIT_ESTIMATOR_TEXT"
+            )
+        options = f"[below](#{name.replace('_', '-')}-options)" if name in schemas else "none"
+        lines.append(f"| `{name}` | {cell(CREDIT_ESTIMATOR_TEXT[name])} | {options} |")
+    for name, schema in schemas.items():
+        lines += [
+            "",
+            f'<a id="{name.replace("_", "-")}-options"></a>',
+            "",
+            f"### `{name}`'s options",
+            "",
+            f"`{schema.__module__}.{schema.__qualname__}`: the keys of `credit_options` under `credit: {name}`.",
+            "",
+            "| Key | Type | Default | Description |",
+            "|---|---|---|---|",
+        ]
+        for item in config_fields(schema):
+            type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
+            lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
     return lines
 
 
@@ -834,6 +968,8 @@ def _class_members(cls: type, level: int) -> list[str]:
     if dataclasses.is_dataclass(cls):
         hints = {item.name: item.type for item in dataclasses.fields(cls)}
         for item in dataclasses.fields(cls):
+            if item.name.startswith("_"):  # private: neither a field to set nor one to read
+                continue
             if item.default is not dataclasses.MISSING:
                 default = f"`{_default_repr(item.default)}`"
             elif item.default_factory is not dataclasses.MISSING:
@@ -1002,16 +1138,29 @@ def render_experimental() -> str:
             "calls a trainer's hooks, the policies' specs, the parts of the run's state every full checkpoint holds, "
             "and what a policy's rows train under.",
         ),
+        (
+            "Credit estimators",
+            "The credit API: what an estimator is and its base class, what it is built with and what its check sees, "
+            "the group it credits with its members, agents and rows, and the decorator that registers it "
+            "([Write a credit estimator](../extending/credit-estimators.md)).",
+        ),
+        (
+            "Independent stepping",
+            "The shares of a run's groups when its trained policies step each on its own clock: what a trainer's "
+            "steps take each policy's shares from.",
+        ),
     )
     names = experimental.__all__
     statistics, admission, leases = names.index("EntryInfo"), names.index("Admission"), names.index("RolloutLease")
-    trainers = names.index("Trainer")
+    trainers, credit, shares = names.index("Trainer"), names.index("CreditEstimator"), names.index("ShareLedger")
     groups = (
         names[:statistics],
         names[statistics:admission],
         names[admission:leases],
         names[leases:trainers],
-        names[trainers:],
+        names[trainers:credit],
+        names[credit:shares],
+        names[shares:],
     )
     lines = [
         GENERATED,

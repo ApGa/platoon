@@ -43,7 +43,7 @@ class _Recording(group_module.GroupRolloutWorkflow):
             )
         )
         await asyncio.sleep(0)
-        return output_module._SingleRolloutOutcome(result=None, workload=RolloutWorkload(), observed=False)
+        return output_module.MemberOutcome(result=None, workload=RolloutWorkload(), observed=False)
 
 
 def test_each_group_reads_its_entry_s_settings_and_outside_a_group_the_run_s():

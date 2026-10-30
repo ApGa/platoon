@@ -19,6 +19,11 @@ TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY = "trajectory_forced_zero_reward"
 EXCLUDE_FROM_TRAINING_MISC_KEY = "exclude_from_training"
 EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY = "exclude_from_policy_training"
 SUBAGENT_REWARD_VERIFIER_TASK_MISC_KEY = "subagent_reward_verifier_task"
+# Where a judged child records its verifier's verdict (``platoon.harness.verify``), and the verdict's key that says
+# whether it is one: False for a verifier that gave none (a judge error, an unparseable or a pending verdict), whose
+# score of 0 the child's reward then carries, and whose child's policy datums do not train.
+SUBAGENT_REWARD_JUDGMENT_MISC_KEY = "subagent_reward_judgment"
+SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY = "training_eligible"
 # Where a trajectory whose agent has an outcome of its own records it (``platoon.gateway.trace``): its status,
 # rewards and reason.
 OUTCOME_MISC_KEY = "outcome"
@@ -38,6 +43,15 @@ _STATUS_MARKERS = (
 def trajectory_has_forced_zero_reward(trajectory: Any) -> bool:
     misc = trajectory.get("misc", {}) if isinstance(trajectory, dict) else getattr(trajectory, "misc", {})
     return isinstance(misc, dict) and bool(misc.get(TRAJECTORY_FORCED_ZERO_REWARD_MISC_KEY))
+
+
+def trajectory_lacks_verdict(trajectory: Any) -> bool:
+    """Whether a judged child's verifier gave no verdict (its judgment is not training-eligible), so that its reward of
+    0 is no score; False for a trajectory that no verifier judged."""
+
+    misc = trajectory.get("misc", {}) if isinstance(trajectory, dict) else getattr(trajectory, "misc", {})
+    judgment = misc.get(SUBAGENT_REWARD_JUDGMENT_MISC_KEY) if isinstance(misc, dict) else None
+    return isinstance(judgment, dict) and not judgment.get(SUBAGENT_REWARD_JUDGMENT_TRAINING_ELIGIBLE_KEY)
 
 
 def trajectory_was_cancelled(trajectory: Any) -> bool:

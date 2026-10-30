@@ -22,7 +22,10 @@ So the parent republishes a small binding file on every
 ``update_sampling_client`` and the worker reloads it.  Net semantic change:
 none for model sampling. Staleness is anchored to the oldest binding actually
 used for generation, so waiting for an environment before the first sample
-does not age otherwise fresh training data.
+does not age otherwise fresh training data.  Each model call also records the
+version of the binding it sampled (``FollowingSamplingClient.pinned``), by
+which the per-datum stale filter judges each datum (``train.stale_filter:
+datum``).
 
 The telemetry foot-gun
 ======================
@@ -207,7 +210,10 @@ class FollowingSamplingClient:
         return client
 
     # -- SamplingClient surface -----------------------------------------
-    def _for_sampling(self) -> Any:
+    def pinned(self) -> tuple[Any, int]:
+        """The client the next call samples and the policy version it serves, read together, so that a call records
+        the version it sampled (the model gateway's ``PinningSampler``); counted as sampled."""
+
         self._reload()
         with self._lock:
             if self._client is None:
@@ -215,7 +221,10 @@ class FollowingSamplingClient:
             version = self._version
             if self._oldest_sampled_version is None or version < self._oldest_sampled_version:
                 self._oldest_sampled_version = version
-            return self._client
+            return self._client, version
+
+    def _for_sampling(self) -> Any:
+        return self.pinned()[0]
 
     def sample(self, *args: Any, **kwargs: Any) -> Any:
         return self._for_sampling().sample(*args, **kwargs)

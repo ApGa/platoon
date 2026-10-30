@@ -7,6 +7,8 @@ Each old module still imports, and code written against it keeps working:
   module to import it from.  A read is live: a module global that the moved code rebinds reads as it is now.
 - A module that platoon 0.5.0 split still has the names it only imported: such a name reads from the first of the
   module's new modules that has it (``homes``, the one that holds its main class first).
+- A name that platoon 0.5.0 also renamed (``renamed``: ``_Settled``, now ``SettledGroup``) reads as the object of its
+  new name, and its warning names that.
 - ``from <old module> import *`` binds what the new module exports, for a module that moved whole, and the public names
   of the definitions that moved out of it, for one that was split.
 - A name set or deleted through an old module, as a test's ``monkeypatch.setattr`` or ``mock.patch`` does, is set or
@@ -163,19 +165,29 @@ def moved(
     homes: Iterable[str] = (),
     public: Mapping[str, str] | None = None,
     submodules: Iterable[str] = (),
+    renamed: Mapping[str, str] | None = None,
 ) -> tuple[Callable[[str], Any], Callable[[], list[str]]]:
     """The ``__getattr__`` and ``__dir__`` of a shim module whose globals are ``namespace``: ``targets`` is the module
     the whole old module moved to, or, for a module that was split or a package, each name's new module (for a split
     module, the module that defines the name).  ``homes`` are a split module's new modules, the one that holds its main
     class first: where a name the old module only imported is read, and where a name set through it is set.
     ``public`` names the package that re-exports a split module's name, which the warning says to import it from.
-    ``submodules`` are an old package's modules that its init imported.  ``name`` is the old module's name, for a shim
-    that also runs as ``__main__``.  The old-to-new map is kept in the shim's ``__moved__``."""
+    ``submodules`` are an old package's modules that its init imported.  ``renamed`` gives the new name of each mapped
+    name that 0.5.0 also renamed.  ``name`` is the old module's name, for a shim that also runs as ``__main__``.  The
+    old-to-new maps are kept in the shim's ``__moved__`` and ``__renamed__``."""
 
     old = name or namespace["__name__"]
     if old != __package__:  # platoon.train.tinker itself stays light: the new code imports its policy client
         _import_trainer()
     namespace["__moved__"] = targets
+    renames: dict[str, str] = dict(renamed or {})
+    namespace["__renamed__"] = renames
+
+    def here(attribute: str) -> str:
+        """The name ``attribute`` has in its new module."""
+
+        return renames.get(attribute, attribute)
+
     whole = isinstance(targets, str)
     package = "__path__" in namespace
     places: tuple[str, ...] = (targets,) if isinstance(targets, str) else tuple(homes)
@@ -195,7 +207,7 @@ def moved(
 
         if attribute in written:
             main = written[attribute][0]
-            value = vars(_module(main)).get(attribute, _MISSING)
+            value = vars(_module(main)).get(here(attribute), _MISSING)
             if value is _MISSING:
                 raise AttributeError(attribute)
             return main, value
@@ -203,7 +215,7 @@ def moved(
             return targets, getattr(_module(targets), attribute)
         new = targets.get(attribute)
         if new is not None:
-            return new, getattr(_module(new), attribute)
+            return new, getattr(_module(new), here(attribute))
         for home in places:
             value = vars(_module(home)).get(attribute, _MISSING)
             if value is not _MISSING:
@@ -225,8 +237,10 @@ def moved(
             advice = f"import it from {value.__module__}"  # a class or a function it imported: from its own module
         else:
             advice = f"import it from {new}"
+        if attribute in renames:
+            advice = f"import {here(attribute)} from {new}"
         _warn(
-            f"{old}.{attribute} moved to {new}.{attribute} in platoon {MOVED_IN}: {advice} "
+            f"{old}.{attribute} moved to {new}.{here(attribute)} in platoon {MOVED_IN}: {advice} "
             f"(platoon {REMOVED_IN} removes {old}.{attribute})"
         )
 
@@ -270,7 +284,7 @@ def moved(
             for home in places:
                 names.update(vars(_module(home)))
         names.update(offered)
-        gone = {attribute for attribute, (main, _, _) in written.items() if attribute not in vars(_module(main))}
+        gone = {attribute for attribute, (main, _, _) in written.items() if here(attribute) not in vars(_module(main))}
         return sorted(names - deleted - gone)
 
     def reach(attribute: str, current: Any) -> list[str]:
@@ -281,7 +295,7 @@ def moved(
             return list(places)
         if attribute in _OWN:
             return [home for home in places if attribute in vars(_module(home))]
-        return [home for home in places if vars(_module(home)).get(attribute, _MISSING) is current]
+        return [home for home in places if vars(_module(home)).get(here(attribute), _MISSING) is current]
 
     def write(attribute: str, value: Any) -> bool:
         """Set ``attribute`` to ``value`` (or delete it, for ``_DELETE``) where the moved code reads it; False for a
@@ -303,27 +317,27 @@ def moved(
                 return False
             if current is not _MISSING:
                 note(attribute, main, current)
-            held = {home: vars(_module(home)).get(attribute, _MISSING) for home in holders}
+            held = {home: vars(_module(home)).get(here(attribute), _MISSING) for home in holders}
             written[attribute] = (main, current, held)
         main, before, held = written[attribute]
         if value is _DELETE:
-            if attribute not in vars(_module(main)):
+            if here(attribute) not in vars(_module(main)):
                 return False  # deleted already, as a second delete of a module's name raises AttributeError
             for home in held:
-                vars(_module(home)).pop(attribute, None)
+                vars(_module(home)).pop(here(attribute), None)
             if all(previous is _MISSING for previous in held.values()):
                 del written[attribute]  # none of them had it before: as it was
             return True
         if value is before:  # set back (a patch undone): what each held before the first change
             for home, previous in held.items():
                 if previous is _MISSING:
-                    vars(_module(home)).pop(attribute, None)
+                    vars(_module(home)).pop(here(attribute), None)
                 else:
-                    setattr(_module(home), attribute, previous)
+                    setattr(_module(home), here(attribute), previous)
             del written[attribute]
             return True
         for home in held:
-            setattr(_module(home), attribute, value)
+            setattr(_module(home), here(attribute), value)
         return True
 
     def keep(attribute: str, value: Any) -> bool:

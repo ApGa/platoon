@@ -213,7 +213,8 @@ class AgentContext(Protocol):
     role: str
     # The task the agent works on.
     task: Task
-    # The environment session the agent acts on.
+    # The environment session the agent acts on.  A call made on it directly bypasses the agent's tool access and its
+    # role's tool allowlist; ``call_tool`` applies both.
     session: EnvSession
     # The goal the agent works on.
     instruction: str
@@ -244,11 +245,11 @@ class AgentContext(Protocol):
         ...
 
     async def list_tools(self) -> list[ToolSpec]:
-        """The env's tools, filtered by this agent's access."""
+        """The env's tools, filtered by this agent's access and its role's allowlist (``agents.roles.<role>.tools``)."""
         ...
 
     async def call_tool(self, name: str, arguments: Mapping[str, Any]) -> ToolResult:
-        """Call an env tool; a tool outside this agent's access returns an error result."""
+        """Call an env tool; a tool outside this agent's access or its role's allowlist returns an error result."""
         ...
 
     def annotate(self, **misc: Any) -> None:

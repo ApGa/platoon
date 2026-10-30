@@ -22,16 +22,16 @@ from fakes.config import make_config
 from platoon.train import launch
 from platoon.train.checkpoints import kept_groups
 from platoon.train.checkpoints.kept_groups import decode_group, encode_group, register_codec
-from platoon.train.dispatch.settled import _settled, emptied
+from platoon.train.dispatch.settled import as_settled_group, emptied
 from platoon.train.dispatch.source import RolloutSource
 from platoon.train.entry_settings import workflow_problems
-from platoon.train.step.collect import _get_task_workload_payload
+from platoon.train.step.collect import _group_workload
 from platoon.train.step.datums import trained_rows
 from platoon.train.task_stats import MAIN, MemberResult
 from platoon.train.trainer.api import TaskSources
 from platoon.train.trainer.rl import _limit_starts
 from platoon.train.workflow.group import GroupRolloutWorkflow
-from platoon.train.workflow.output import GroupOutput, _TaskRolloutOutput
+from platoon.train.workflow.output import GroupOutput
 from platoon.train.workflow.protocol import (
     OutputReport,
     WorkflowCapabilities,
@@ -82,7 +82,7 @@ def _member() -> MemberResult:
 
 
 def _group_output() -> GroupOutput:
-    return _TaskRolloutOutput(
+    return GroupOutput(
         [_datum(1), _datum(2)],
         workload=RolloutWorkload(trajectories=2),
         requested_rollouts=4,
@@ -118,7 +118,10 @@ def test_capabilities_are_the_class_flags_a_group_rollout_workflow_sets_and_none
         gives_verdicts=True,
         runs_rollouts_on_lease=True,
         takes_start_limit=True,
+        takes_stale_filter=True,
         runs_rollout_workers=True,
+        binds_policies=True,
+        applies_credit=True,
     )
     assert capabilities_of(GroupRolloutWorkflow) == every
     none = WorkflowCapabilities()
@@ -298,8 +301,8 @@ def test_the_step_warns_of_malformed_counts_once_and_takes_no_workload(caplog):
     output = _Older([_datum(1)])
     vars(output).update(workload=RolloutWorkload(trajectories=2), **counts)
     with caplog.at_level(logging.WARNING, logger="platoon.train.step.collect"):
-        assert _get_task_workload_payload(output) is None
-        assert _get_task_workload_payload(_Older([_datum(1)])) is None  # no workload: nothing to warn of
+        assert _group_workload(output) is None
+        assert _group_workload(_Older([_datum(1)])) is None  # no workload: nothing to warn of
     assert [record.getMessage() for record in caplog.records] == [
         f"Ignoring malformed task workload rollout counts: {counts}"
     ]
@@ -308,8 +311,8 @@ def test_the_step_warns_of_malformed_counts_once_and_takes_no_workload(caplog):
 def test_a_bare_output_settles_with_the_entry_and_label_of_its_report():
     output = _Older([_datum(1)])
     vars(output).update(entry="entry", label="label")
-    settled = _settled(output)
-    assert (settled.entry, settled.label, settled.rollout) == ("entry", "label", output)
+    settled = as_settled_group(output)
+    assert (settled.entry, settled.label, settled.output) == ("entry", "label", output)
 
 
 def test_a_rejected_group_s_marker_keeps_its_output_s_report():
@@ -328,7 +331,7 @@ def test_rows_by_policy_reads_a_sequence_of_datums_as_the_trained_policy_s_and_a
     group, plain, pair = _group_output(), [_datum(1)], (_datum(1), _datum(2))
     for output in (group, plain, pair):
         assert rows_by_policy(output, MAIN)[MAIN] is output
-    assert group.rows() == {MAIN: group} and GroupOutput is _TaskRolloutOutput
+    assert group.rows() == {MAIN: group}
     teacher = [_datum(3)]
     tagged = _Rows({MAIN: plain, "teacher": teacher})
     assert rows_by_policy(tagged, MAIN) == {MAIN: plain, "teacher": teacher}
@@ -434,7 +437,7 @@ def test_a_trainer_process_reads_a_group_output_back():
     )
     done = subprocess.run([sys.executable, "-c", code], input=group, capture_output=True, text=True, timeout=300)
     assert done.returncode == 0, done.stderr
-    assert done.stdout.split() == ["platoon.train.workflow.output", "_TaskRolloutOutput", "2", "trained", "quick"]
+    assert done.stdout.split() == ["platoon.train.workflow.output", "GroupOutput", "2", "trained", "quick"]
 
 
 def test_the_contract_loads_neither_tinker_nor_torch_and_neither_do_its_readers():

@@ -21,23 +21,46 @@ under ``train.permit_release: rollout`` each permit comes back as its rollout en
 ``docs/extending/rollout-leases.md`` is the guide.
 
 And trainers (RFC 0021): what ``platoon train`` runs (:class:`Trainer`), built from what it prepared
-(:class:`TrainerSetup`: the config, each policy's :class:`PolicySpec` by its id, :data:`MAIN` for ``train:``'s, the
-run's :class:`TaskSources` and how its :class:`Workflows` are built), saying what it asks of the run
+(:class:`TrainerSetup`: the config, each policy's :class:`PolicySpec` by its id, :data:`MAIN` for ``train:``'s, which
+policy each agent samples (:class:`AgentBindings`), the run's :class:`TaskSources` and how its :class:`Workflows` are
+built), saying what it asks of the run
 (:class:`TrainerNeeds`) and where its steps end (:class:`StepPlan`).  :class:`TrainerBase` takes a trainer through the
 lifecycle every trainer shares, calling its hooks in order, and ``platoon.testing.check_trainer`` checks one.  What
 every full checkpoint of the run holds besides its counters comes from its participants
 (:class:`CheckpointParticipant`), and a policy's rows train under an :class:`Objective`.  ``trainer:`` selects the
-trainer; this release has one, ``rl``.
+trainer; this release has two, ``rl`` and ``sft``.
+And step hooks (RFC 0021): work at the end of each step of any trainer (:class:`StepHook`, :class:`StepHookBase`),
+which hears what the step did (:class:`StepEnd`): it drains side work, adds optimizer updates of the step's policy
+(``end.train``, ``end.learner``), and hears what the step published; the rl trainer attaches those its config names
+(``trainer_options.hooks``).  A hook's interruptible wait raises :class:`TrainInterrupted` on a stop request when
+the trainer's steps are atomic (``TrainerNeeds.atomic_steps``); when they are not, it runs to its end.  Side inference
+samples a policy's published sampler through a :class:`PolicySnapshot`, which refuses a sample once the policy has
+published again (:class:`PolicyMoved`); and a training episode sees its draw (``ctx.draw``, a :class:`DrawInfo`) when
+its trainer asks for it.  ``docs/extending/step-hooks.md`` is the guide.
 And the workflow contract (RFC 0021): what the trainer needs of a rollout workflow (:class:`RolloutWorkflow`), what a
 workflow class can do beyond it (:class:`WorkflowCapabilities`, read through :func:`capabilities_of`), what
 ``platoon train`` builds a workflow class with (:class:`WorkflowSetup`, which its ``from_setup`` takes), and how a
 group's output is read: its report (:class:`OutputReport`, :func:`report_of`) and its rows by policy
 (:class:`RolloutOutput`, :func:`rows_by_policy`).  A trainer that rolls out draws the run's groups through
 ``run.rollouts()``.
+And credit estimators (RFC 0021): how an environment entry's training groups turn rewards into advantages
+(:class:`CreditEstimator`, or a subclass of :class:`CreditEstimatorBase`), built per entry with a :class:`CreditSetup`
+and checked at load (:class:`CreditCheckContext`); its ``assign`` sees a :class:`CreditGroup` of
+:class:`MemberRollout` members, each agent an :class:`AgentRun` (role, policy, own reward, rows), each row a
+:class:`TrainingSample`, and the run's policies as :class:`PolicyView` views, whose failed scoring
+(:class:`ScoringFailed`) fails the group.  It is registered with
+:func:`credit_estimator` or named as ``module:Class``, and ``platoon.testing.check_credit_estimator`` checks it.
+``docs/extending/credit-estimators.md`` is the guide.
+And independent stepping (RFC 0021): when a run's trained policies step each on its own clock
+(``TrainerNeeds.stepping``, ``train.stepping: independent``), each settled group splits into one share per trained
+policy, its rows of the group, which a trainer's steps of that policy take from the run's :class:`ShareLedger`
+(``source.ledger``: ``take``, judged stale or not at ``judge_version``, then ``consumed`` under its ``lock`` once the
+step trained them), each step ending with ``run.end_step(policy=...)`` on the policy's own clock (``run.clocks``).
 
 This module imports neither ``tinker`` nor ``datasets``.
 """
 
+from platoon.programs import DrawInfo
 from platoon.train.admission_api import (
     Admission,
     AdmissionCheckContext,
@@ -47,9 +70,24 @@ from platoon.train.admission_api import (
     group_admission,
 )
 from platoon.train.checkpoints.participants import CheckpointParticipant
+from platoon.train.credit.api import (
+    AgentRun,
+    CreditCheckContext,
+    CreditEstimator,
+    CreditEstimatorBase,
+    CreditGroup,
+    CreditSetup,
+    MemberRollout,
+    PolicyView,
+    ScoringFailed,
+    TrainingSample,
+)
+from platoon.train.credit.registry import credit_estimator
+from platoon.train.dispatch.shares import ShareLedger
 from platoon.train.leases import RolloutLease, rollout_lease
 from platoon.train.objectives.api import Objective
-from platoon.train.policy.spec import MAIN, PolicySpec
+from platoon.train.policy.snapshot import PolicyMoved, PolicySnapshot
+from platoon.train.policy.spec import MAIN, AgentBindings, PolicySpec
 from platoon.train.sampler_api import (
     Draw,
     Sampler,
@@ -80,6 +118,8 @@ from platoon.train.trainer.api import (
     TrainerSetup,
     Workflows,
 )
+from platoon.train.trainer.hooks import StepEnd, StepHook, StepHookBase
+from platoon.train.trainer.signals import TrainInterrupted
 from platoon.train.workflow.protocol import (
     OutputReport,
     RolloutOutput,
@@ -131,8 +171,17 @@ __all__ = [
     "StepPlan",
     "PolicySpec",
     "MAIN",
+    "AgentBindings",
     "CheckpointParticipant",
     "Objective",
+    # step hooks (RFC 0021)
+    "StepHook",
+    "StepHookBase",
+    "StepEnd",
+    "TrainInterrupted",
+    "PolicySnapshot",
+    "PolicyMoved",
+    "DrawInfo",
     # the workflow contract (RFC 0021)
     "RolloutWorkflow",
     "WorkflowCapabilities",
@@ -142,4 +191,18 @@ __all__ = [
     "OutputReport",
     "report_of",
     "rows_by_policy",
+    # credit estimators (RFC 0021)
+    "CreditEstimator",
+    "CreditEstimatorBase",
+    "CreditSetup",
+    "CreditCheckContext",
+    "CreditGroup",
+    "MemberRollout",
+    "AgentRun",
+    "TrainingSample",
+    "PolicyView",
+    "ScoringFailed",
+    "credit_estimator",
+    # independent stepping (RFC 0021)
+    "ShareLedger",
 ]

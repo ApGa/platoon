@@ -2,13 +2,20 @@
 
 A run directory holds one run: its checkpoints, rollouts and metrics.  A resume that trains another model, or that
 would move tasks between training and evaluation, would mix two runs in one directory and one curve.  So the first
-start of a run writes ``identity.json`` into its directory: the model and the renderer, and for each environment entry
-with a hold-out (``service_kwargs.holdout``) the rule, the dataset and the held-out tasks, refused ones included, as
-the service records them (``split_record``).  A start that resumes (its directory holds a checkpoint to resume from)
-compares its own with it after the tasks are listed, before the training service is opened, and stops with a
-configuration error (exit 78) when:
+start of a run writes ``identity.json`` into its directory: the model and the renderer, in a run that declares
+``policies:`` or ``agents:`` the table of its policies (each one's model, renderer and whether it trains, and a frozen
+one's ``load_checkpoint_path``, the sampler it serves), which policy each agent role samples and, when its trained
+policies step each on its own clock, ``stepping: independent`` (absent: lockstep), and for each
+environment entry with a hold-out (``service_kwargs.holdout``) the rule, the dataset and the held-out tasks, refused
+ones included, as the service records them (``split_record``).  The table records no service URL, so a resume may
+reach its services elsewhere.  A start that resumes (its directory holds a checkpoint to resume from) compares its own
+with it after the tasks are listed, before the training service is opened, and stops with a configuration error (exit
+78) when:
 
 - the model or the renderer is another;
+- a policy was added or removed, or one's model, renderer, training or sampler changed, or a role samples another
+  policy (each named, with the field that changed), or the trained policies step otherwise (``train.stepping``: a
+  lockstep resume would ignore what each policy consumed on its own clock, and train it again);
 - a task the run held out would now train;
 - a task is now held out that was not, a hold-out added to a running run included.
 
@@ -30,6 +37,14 @@ from pathlib import Path
 from typing import Any
 
 from platoon.train.components import split_task_id
+from platoon.train.policy.spec import (
+    MAIN,
+    AgentBindings,
+    PolicySpec,
+    agent_bindings,
+    policy_specs,
+    steps_independently,
+)
 from platoon.utils.config import ConfigError, update_run_lock
 
 logger = logging.getLogger(__name__)
@@ -74,8 +89,41 @@ def run_identity(config: Any, environments: Sequence[Any]) -> dict[str, Any]:
         "version": IDENTITY_VERSION,
         "model": config.train.model_name,
         "renderer": config.train.renderer_name,
+        **policy_table(config),
         "environments": entries,
     }
+
+
+def policy_table(config: Any) -> dict[str, Any]:
+    """What ``identity.json`` records of the run's policies, in a run that declares ``policies:`` or ``agents:``
+    (nothing in any other, whose identity stays as it was): each policy's record by id (``policies``,
+    :func:`_policy_record`), the agents' default policy and each role's (``agents``), and ``stepping: independent``
+    when its trained policies step each on its own clock (:func:`~platoon.train.policy.spec.steps_independently`)."""
+
+    agents = agent_bindings(config)
+    declared = getattr(config, "policies", None) or {}
+    if not declared and agents == AgentBindings():
+        return {}
+    return {
+        "policies": {spec.id: _policy_record(spec) for spec in policy_specs(config).values()},
+        "agents": {"policy": agents.default, "roles": dict(agents.roles)},
+        **({"stepping": "independent"} if steps_independently(config) else {}),
+    }
+
+
+def _policy_record(spec: PolicySpec) -> dict[str, Any]:
+    """A policy as ``identity.json`` records it, under its config keys: its model, its renderer, whether it trains,
+    and for a frozen policy the sampler it serves (``load_checkpoint_path``, a ``tinker://`` path, never a URL; None:
+    its base model).  A trained policy's ``load_checkpoint_path`` only starts a new run, so a resume ignores it."""
+
+    record: dict[str, Any] = {
+        "model_name": spec.model_name,
+        "renderer_name": spec.renderer_name,
+        "trainable": spec.trainable,
+    }
+    if not spec.trainable:
+        record["load_checkpoint_path"] = spec.load_checkpoint_path
+    return record
 
 
 def check_run_identity(
@@ -129,6 +177,7 @@ def identity_changes(
     for key, what in (("model", "model"), ("renderer", "renderer")):
         if previous.get(key) != identity.get(key):
             problems.append(f"the run trains {what} {previous.get(key)!r}, and this start {identity.get(key)!r}")
+    problems.extend(policy_changes(previous, identity))
     before = previous.get("environments") or {}
     now = identity.get("environments") or {}
     for label in sorted(set(before) | set(now)):
@@ -162,6 +211,53 @@ def identity_changes(
                 f"such as {sorted(back)[:_SHOWN]}"
             )
     return problems, notes
+
+
+def policy_changes(previous: Mapping[str, Any], identity: Mapping[str, Any]) -> list[str]:
+    """What a resume with ``identity`` changes of the policy table of a run that recorded ``previous``, one line each: a
+    policy other than ``main`` (whose model and renderer are the run's, compared on their own) added or removed, a
+    field of one's record changed, the agents' default policy or a role's, and how the trained policies step.  A record
+    without the table is a run of ``main`` alone, which every agent samples; one without ``stepping`` steps in
+    lockstep."""
+
+    problems = []
+    if (stepping := previous.get("stepping", "lockstep")) != (now_stepping := identity.get("stepping", "lockstep")):
+        problems.append(
+            f"train.stepping: the run's is {stepping!r}, and this start's {now_stepping!r}: a resume keeps the "
+            "stepping its run began with, whose checkpoints say what each policy trained"
+        )
+    before, now = previous.get("policies") or {}, identity.get("policies") or {}
+    for policy in _in_order(before, now):
+        if policy == MAIN:
+            continue
+        if policy not in now:
+            problems.append(f"policies.{policy}: the run has it, and this start does not declare it")
+        elif policy not in before:
+            problems.append(f"policies.{policy}: this start declares it, and the run does not have it")
+        else:
+            old, new = before[policy], now[policy]
+            problems.extend(
+                f"policies.{policy}.{key}: the run's is {old.get(key)!r}, and this start's {new.get(key)!r}"
+                for key in _in_order(old, new)
+                if old.get(key) != new.get(key)
+            )
+    agents_before, agents_now = previous.get("agents") or {}, identity.get("agents") or {}
+    if (default := agents_before.get("policy", MAIN)) != (now_default := agents_now.get("policy", MAIN)):
+        problems.append(f"agents.policy: the run's is {default!r}, and this start's {now_default!r}")
+    roles_before, roles_now = agents_before.get("roles") or {}, agents_now.get("roles") or {}
+    problems.extend(
+        f"agents.roles.{role}.policy: the run's is {roles_before.get(role)!r}, and this start's {roles_now.get(role)!r}"
+        for role in _in_order(roles_before, roles_now)
+        if roles_before.get(role) != roles_now.get(role)
+    )
+    return problems
+
+
+def _in_order(before: Iterable[str], now: Iterable[str]) -> list[str]:
+    """The keys of ``before``, then those of ``now`` that ``before`` lacks, each once, in their order: the run's
+    record's, then this start's new ones."""
+
+    return list(dict.fromkeys([*before, *now]))
 
 
 def _ids(record: Mapping[str, Any] | None, key: str) -> set[str]:

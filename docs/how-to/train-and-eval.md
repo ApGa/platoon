@@ -92,6 +92,7 @@ The settings you will change most:
 | `train.optimizer.learning_rate` | 3e-5 | Adam learning rate (`beta1`, `beta2`, `eps`, `weight_decay`, `grad_clip_norm` sit beside it) |
 | `train.loss_fn`, `train.loss_fn_config` | `cispo`, clip thresholds 0.0 and 5.0 | The loss the service computes in `forward_backward`; a `loss_fn_config` replaces the default whole, so it names every key its loss takes |
 | `train.max_staleness` | none | How many steps rollouts may run ahead of training, and how many policy versions old their data may be before it is dropped; none sets no limit. An environment may raise its own groups' bound ([Settings per environment](#settings-per-environment)) |
+| `train.stale_filter` | `group` | What a too-old group loses: `group`, the whole group, judged by its oldest datum; `datum` (experimental), only its datums beyond the bound, each judged by the oldest version its own model calls sampled ([Per-datum stale masks](#per-datum-stale-masks-experimental)) |
 | `train.max_concurrent_rollouts` | `batch_size × group_size` | Rollouts in flight at once, the permits the groups share: each rollout holds one until it ends, or under `permit_release: group` a group holds its size of them until it ends (`eval.max_concurrent_rollouts`, 256 by default, for an evaluation) |
 | `train.permit_release` | `rollout` | When permits come back: `rollout`, each as its rollout ends, so the next group starts on them; `group`, the default before 0.4.0, a group's all at once when its workflow returns ([Rollout permits](#rollout-permits)) |
 | `train.workflow_config.rollout_config.max_steps`, `.timeout` | none | Step budget per agent, and time limit of each rollout's root agent in seconds; without one, a harness stops at its own limits (its spec's `timeout_s`, a Harbor task's `[agent] timeout_sec`), which also set a Harbor rollout's deadline ([Harness timeouts](sandboxes-and-harbor.md#harness-timeouts-and-crashes)) |
@@ -759,6 +760,423 @@ environments[slow-tasks], evaluation during training:
   ...
 ```
 
+## Credit each environment's groups (experimental)
+
+A group's rewards become its advantages through its credit. Without a setting, every rollout's datums, the root's and
+each subagent's alike, are centered on the group's mean completed-root reward (or the leave-one-out mean with
+`leave_one_out_baseline`), as [Credit assignment](../tutorials/credit-assignment.md) describes. An environment entry may
+choose a credit estimator instead, with its options beside it:
+
+```yaml
+environments:
+  - name: delegate
+    service: python://vault_env:VaultEnvironment
+    harness: example-delegator
+    credit: keyed                              # null, the default: the workflow's own credit
+    credit_options: {key: [task, role], leave_one_out: true}
+  - name: solo                                 # no credit key: the workflow's own credit
+    service: python://guess:GuessTheNumber
+    harness: platoon-react
+```
+
+| Estimator | What it does | Options |
+|---|---|---|
+| `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards, value for value | none |
+| `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key: under `[task, role]` the roots on the roots' mean and the subagents on the subagents', where `group` centers every agent on its rollout's root baseline | `key`: one or more of `task`, `policy`, `role` and `depth` (default `[task, policy, role]`); `leave_one_out` (default false): the mean of the other agents of its key, an agent alone in its key getting 0 |
+| `reverse_kl` | On-policy distillation: a frozen teacher scores every token the student sampled, and each action token's advantage is the negative reverse KL between them ([Distill a frozen teacher](#distill-a-frozen-teacher-experimental)) | `teacher` (required): a frozen policy of `policies:`; `kl_coef` (default 1); `reward_coef` (default 0): the weight of the row's reward centered on its member's baseline |
+| a name an entry's `package` registers with `@credit_estimator`, or `module:Class` | yours ([Write a credit estimator](../extending/credit-estimators.md); [`examples/credit-by-role`](../../examples/credit-by-role/README.md) is one of about 40 lines) | its own |
+
+**Where it runs.** The training workflow awaits the entry's estimator once per group, in the trainer process, after
+every member of the group has settled; the error-token filter, the group's verdict and its output come after it, as
+without one. Under `train.permit_release: rollout`, the default, the members have returned their rollout permits by
+then; under `group` the group holds them, and in both modes its label slot, until the estimator returns. Evaluation never runs an
+estimator, so an evaluation's rollouts cost nothing more. An estimator that reads agents (`keyed`, `by_role`) has the
+rollout workers tag each row with the agent that produced it (worker protocol 3), and sees each member's agents: each
+agent's role (the root's is `policy`, a subagent's the role its harness minted it with, `subagent` for
+`ctx.agents.spawn`), its depth and parent, its rows, and its own reward, the processed reward of its trajectory, as
+the converter loaded it onto its action tokens. An agent that was not scored, interrupted or a child whose verifier
+gave no verdict (a judge error, an unparseable or a pending one), has no reward: it enters no baseline, and it has no
+rows. A row that reaches such an estimator without its tags (a workflow subclass that runs its members another way)
+fails its group, with an error that says why. An estimator that raises, or whose `assign` does not return within its
+`assign_timeout_seconds` (600 by default), stops the run with an error that names it and its entry; but a policy's
+scoring that fails (a teacher's service that raised or did not answer within its `sample_timeout_seconds`) fails only
+the group it was crediting, whose verdict is then `failed` and which trains nothing, counted under `credit/failures`.
+
+**What loads.** The estimator resolves when the config loads (core's names, then names the entries' packages register,
+then `module:Class`), its options are checked against its schema and its `check` runs: an unknown name, an option it
+does not take or a refused check stops `platoon train` and `platoon config validate` with exit code 78. So does an
+estimator beside a workflow class that does not apply it (one that is no `GroupRolloutWorkflow` and does not declare
+`applies_credit = True`, or a subclass that overrides `compute_baselines` or `assign_advantages`, which keeps
+crediting with them), and options without an estimator. A named environment (`env:`) cannot choose one. `lock.json`
+records each estimator with the entries that use it and their options, defaults included (`kind: credit`); a run whose
+entries set none records nothing new, and runs as before, request for request.
+
+**What a resume does.** A group's credit is final when the group settles: a checkpoint that keeps a settled group
+keeps its advantages, and the resume trains it with them. An estimator with state (a running baseline, say) changes it
+as each group is filed, and each full checkpoint saves it with the groups it keeps (`loop_state.credit`), so a resume
+takes up both; a resume whose entry names another estimator than the one that saved the state starts it afresh, with a
+warning. Credit metrics go with the group, recorded in the step that trains it: `keyed` logs
+`credit/keyed/baselines` (the keys a group's agents fell into) and `credit/agent_advantage/abs_avg`, beside the
+`credit/baseline/*` of the workflow's own credit.
+
+## Distill a frozen teacher (experimental)
+
+On-policy distillation trains the policy on its own rollouts with a larger model's judgement of every token it sampled.
+Declare the teacher as a frozen policy beside `train:`, whose model is the student, `main`, and credit the entry's
+groups with `reverse_kl`:
+
+```yaml
+train:
+  model_name: Qwen/Qwen3-4B-Instruct-2507      # the student, main
+  renderer_name: qwen3_instruct
+  loss_fn: importance_sampling
+  loss_fn_config: {}
+policies:
+  teacher:
+    model_name: Qwen/Qwen3-32B
+    renderer_name: qwen3
+    trainable: false                            # frozen: it scores, and is never stepped, saved or pruned
+    # tinker_base_url: http://<host>:<port>     # its own service; without it, the run's (the student's)
+environments:
+  - name: guess
+    # ...
+    credit: reverse_kl
+    credit_options: {teacher: teacher}          # kl_coef: 1 and reward_coef: 0 by default
+```
+
+For each training group, once its rollouts are done, the teacher scores the tokens the student sampled
+(`compute_logprobs` on its sampling client), and each action token's advantage becomes
+`-kl_coef * (student logprob - teacher logprob)`, plus `reward_coef` times the row's reward centered on its member's
+baseline when `reward_coef` is above 0. With `reward_coef: 1` this is tinker-cookbook's on-policy distillation
+advantage (the cookbook's discounted KL, `kl_discount_factor`, is not built); the default, 0, distills alone. The
+scoring runs in the trainer after the group's rollouts returned their permits, so it holds no rollout slot; an
+evaluation runs no estimator, so it never calls the teacher. The step's metrics add `credit/reverse_kl/avg`, the mean
+reverse KL per action token.
+
+- **The teacher's service.** Without `tinker_base_url` the teacher uses the run's service, the student's, in a Tinker
+  session of its own, so that a fatal error on the teacher's session never ends the student's. Give it a URL of its
+  own when the backend cannot serve it beside the student (a self-hosted service of one base model); a job script
+  passes it as `policies.teacher.tinker_base_url=http://<host>:<port>`. A service that cannot be reached stops
+  `platoon train` as the trainer is built, with an error that names the policy and its URL.
+- **When scoring fails.** At most 32 of the teacher's calls are in flight at once, over every group, and each is
+  bounded by the teacher's `sample_timeout_seconds` (`policies.teacher.sample_timeout_seconds`). A call that fails or
+  runs out of time, a response of the wrong length (not one logprob per token scored), or a token the service gives
+  no logprob for, fails that group alone: its verdict is `failed`, it trains nothing, the step counts it under
+  `credit/failures`, and the run goes on. The first call of a group that fails cancels the group's other calls.
+- **The sampler it serves.** A frozen policy samples its base model, or the `tinker://` sampler its
+  `load_checkpoint_path` names, such as a teacher trained earlier.
+- **What loading refuses** (exit 78, `platoon config validate` too): a `teacher` that names no frozen policy of
+  `policies:`, or names `main`; a teacher whose tokenizer differs from the student's (cross-tokenizer distillation is
+  not built), compared by model name before any Tinker session opens. A tokenizer that cannot be loaded there (no
+  network) leaves that comparison undone, with a warning; `platoon train` then compares the tokenizers it loaded for
+  the two policies as it builds the estimator, after their sessions opened, and stops with exit code 78 when they
+  differ.
+
+[`examples/on-policy-distillation`](../../examples/on-policy-distillation/README.md) distills Qwen3-32B into the
+quickstart's Qwen3-4B, with the teacher on the student's service and on its own.
+
+## Sample several policies (experimental)
+
+A run's agents may sample other policies than `main`: a frozen judge, a frozen helper that a harness mints as a
+subagent, or a second policy the run trains ([Train several policies in
+lockstep](#train-several-policies-in-lockstep-experimental)). Declare each under `policies:`, with `train:`'s names
+for the same settings, and bind agent roles to them under `agents:`:
+
+```yaml
+policies:
+  judge:
+    model_name: Qwen/Qwen3-32B
+    renderer_name: qwen3
+    trainable: false
+    tinker_base_url: http://<host>:<port>       # optional: without it, the run's tinker_base_url
+agents:
+  roles:
+    judge: {policy: judge}                      # agents opened with role judge sample the judge, for life
+```
+
+- **Which agent samples which policy.** The root agent samples `agents.policy`, `main` without it (a policy the run
+  trains). An agent its harness or program opens with a role (`ctx.agents.spawn(..., role=...)`, `POST
+  /v1/platoon/agents {"role": ...}`, an episode program's judge) samples that role's policy for its whole life, and
+  `agents.policy` when `agents.roles` names none for its role. A request never
+  picks a policy, and only text crosses between policies: each agent renders, samples and parses with its own policy's
+  renderer and tokenizer.
+- **What trains.** `main`, and each policy of `policies:` that does not say `trainable: false` ([Train several policies
+  in lockstep](#train-several-policies-in-lockstep-experimental)). A frozen policy's agents make no rows: their rewards
+  still reach the credit (an estimator that reads agents sees them, with their policy), and each row is stamped with
+  the version of its own policy, which that policy's staleness bound measures.
+- **Rollout workers.** Under `rollout_isolation: process`, each worker follows one binding file per sampled policy
+  (`model_binding.pkl` for `agents.policy`'s, `model_binding.<id>.pkl` for each other), which the trainer publishes
+  before the first rollout and before each evaluation, and again for each trained policy each time it publishes a new
+  sampler.
+- **What loading refuses** (exit 78, `platoon config validate` too): an id that is not a lowercase name
+  (`[a-z][a-z0-9_-]`, at most 32 characters); `policies.main`, which `train:` declares; a `sample_timeout_seconds`
+  that is not a positive number, as `train:`'s; a role bound to a policy the run does not declare; a frozen
+  `agents.policy`; roles bound to several policies beside a workflow that cannot bind them (`binds_policies`, which
+  `GroupRolloutWorkflow` declares); and either key under `trainer: sft`, which rolls nothing out. A frozen policy that
+  no agent samples and no entry's `credit_options` names is only warned of, and so is a policy bound to the role
+  `policy`, the root agent's, which the root never samples.
+- **What a resume checks.** A run with `policies:` or `agents:` records each policy's model, renderer and whether it
+  trains, a frozen one's `load_checkpoint_path`, and each role's policy, in its `identity.json`, never a URL: a resume
+  that adds or removes a policy, changes one of those, or binds a role elsewhere stops with exit code 78, naming each
+  change; one that reaches the services at new URLs resumes. A run without either key writes and checks what it always
+  did.
+- **What a program reads.** Each `TinkerLLMInteraction` of an agent tree names the policy that sampled it (`policy`,
+  None in a run of one policy), so a program that trains on its agents' interactions keeps the frozen policies' apart.
+
+## Train several policies in lockstep (experimental)
+
+A run may train several policies, one per agent role: a delegator and the workers it spawns, a writer and a critic.
+Declare each under `policies:` (a policy trains unless it says `trainable: false`) and bind the roles to them:
+
+```yaml
+train:                                          # main: the root agent's policy, and the run's training settings
+  model_name: Qwen/Qwen3-4B-Instruct-2507
+  renderer_name: qwen3_instruct
+  max_staleness: 1
+policies:
+  worker:
+    model_name: Qwen/Qwen3-4B-Instruct-2507
+    renderer_name: qwen3_instruct
+    lora_rank: 16                               # its own adapter (default: train.lora_rank)
+    optimizer: {learning_rate: 1.0e-5}          # its own optimizer (default: train.optimizer)
+    loss_fn: importance_sampling                # its own loss (default: train.loss_fn)
+    max_staleness: 2                            # its own bound (default: its entry's, else train.max_staleness)
+    # tinker_base_url: http://<host>:<port>     # its own service; without it, the run's
+agents:
+  roles:
+    subagent: {policy: worker}                  # the agents ctx.agents.spawn opens train the worker
+```
+
+Every step trains every policy, in lockstep (RFC 0021; each policy may step on its own clock instead: [Step each
+policy on its own clock](#step-each-policy-on-its-own-clock-experimental)):
+
+- **Each policy's keys.** A trained policy takes `train:`'s names, each unset one `train:`'s: `lora_rank`,
+  `optimizer`, `loss_fn`, `loss_fn_config` (when unset, `train.loss_fn_config` if its loss is `train:`'s, else none:
+  the loss's own defaults), `max_staleness` (when unset, its entry's bound, else `train.max_staleness`), and
+  `load_checkpoint_path` with `load_optimizer_state: true` to start a new run from a checkpoint's weights and its Adam
+  state. `batch_size` and `checkpoint` per policy are refused in lockstep, where every policy trains on the step's
+  `train.batch_size` groups and saves at `checkpoint.every` and `checkpoint.recovery_every`: they are for policies that
+  step on their own clocks.
+- **Credit, then rows by policy.** A group is credited once, over every agent of every rollout; then its rows split by
+  the policy that sampled them, each to its own policy's learner. An entry without `credit:` credits with `keyed` on
+  `[task, policy, role]` in a run of several trained policies: each agent is centered on the mean reward of the
+  group's agents of its policy and role. Any estimator works: the rollout workers tag every row with its agent, and
+  the group's output keeps the tags.
+- **Staleness.** Each policy's rows of a group are judged against that policy's version and its bound (its own
+  `max_staleness`, else its entry's, else `train.max_staleness`), per group or per datum as `train.stale_filter` says.
+  A policy's stale rows are dropped together, logged with its name, and the group's other rows still train; the group
+  counts as stale only when all its rows are. The dispatcher's horizon counts the smallest bound of the trained
+  policies that agents sample, so rollouts run no further ahead than the strictest policy allows.
+- **Updates.** Each microbatch sends each policy's rows, prepared under that policy's objective, to its own training
+  client; at each minibatch's end every policy's optimizer step is submitted before any result is awaited, so that
+  their services work at the same time, and a step takes as long as the slowest. A policy with no rows in a step (no
+  agent of its role ran) does not step and keeps its sampler and version, and the step's metrics record it
+  (`train/policies/<id>/batch/skipped_optimizer`).
+- **Publishing.** Each policy that stepped publishes its new sampler and counts one more version of its own; the
+  rollout workers get it through that policy's binding file. The root agents' policy (`agents.policy`) may be any
+  trained policy; its binding is the workers' default.
+- **Step hooks.** A [step hook](../extending/step-hooks.md) may update any trained policy: `end.train(policy, ...)`
+  and `end.learner(policy, ...)` go through that policy's own learner, its metrics under its prefix
+  (`train/policies/worker/<hook>/...`). Each policy that the step or a hook updated publishes once, and the hooks hear
+  every trained policy's publication; `train/policies/<id>/batch/hook_optimizer_updates` counts the hooks' updates of
+  each policy besides `main`, and `train/batch/hook_optimizer_updates` those of every policy.
+- **Metrics.** `main`'s keep their names. Each other policy's go under `policies/<id>/` in front of the name a run of
+  one policy gives them: `policies/worker/optim/lr`, `train/policies/worker/stale_rollouts`,
+  `train/policies/worker/optim/...`, `policies/worker/checkpoint/deleted`. Run-level metrics (`workload/*`,
+  `batch/*` of the groups, `dispatch/*`, `timing/*`) stay as they are. An evaluation's row of `evaluations.jsonl`
+  adds `versions`, each sampled policy's version when it started.
+- **Failures.** An error of a policy's service, opening its training client, in `forward_backward`, `optim_step` or a
+  save, fails the step, as it does for one policy, with a note that names the policy and its service (`policy worker,
+  on http://<host>:<port>: optim_step failed`), in the step's own updates, a step hook's and a trainer's own
+  (`run.learner`) alike; supervision restarts the start, which resumes every policy from the last checkpoint.
+
+**Checkpoints.** Each checkpoint saves every trained policy. The policies other than `main` save first, at the same
+time, each on its own service into `<run>/policies/<id>/checkpoints.jsonl`; then `main` saves into the run's
+`checkpoints.jsonl`, and its row names each other policy's row of the checkpoint by its `state_path`
+(`loop_state.policies`). `main`'s row, written last, commits the checkpoint. A resume starts from the newest `main` row
+whose named rows every policy still has; a newer one that does not hold (a crash between the saves, a row a pruner
+deleted) is skipped with a warning, which `lock.json` records (`policies_restore`); when no `main` row holds, the start
+stops with exit code 78, since no restart can mend it. With `checkpoint.keep_recovery` each policy's recovery
+checkpoints are pruned on its own service, within its own staleness bound: a pruner never deletes a row that the newest
+`main` row, or one of the newest `keep_recovery` `main` recovery rows, names. Each checkpoint saves every trained
+policy, one that did not step since the last too; those saves hold weights no rollout samples, and its pruner deletes
+them as it does any older checkpoint, so a policy that seldom steps keeps no more recovery checkpoints than one that
+steps each time. `keep_recovery × recovery_every` must exceed each policy's own bound too.
+
+**What loading refuses** (exit 78, `platoon config validate` too): a trained policy that no agent samples (no row would
+ever train it), `main` included when `agents.policy` names another; a frozen `agents.policy`; a frozen policy with a
+trained policy's keys (`lora_rank`, `optimizer`, `loss_fn`, `loss_fn_config`, `max_staleness`,
+`load_optimizer_state`); `load_optimizer_state` without `load_checkpoint_path`; a `lora_rank` below 1, a negative
+`max_staleness` and an empty `loss_fn`, each named by its policy (`policies.worker: lora_rank must be ...`); a policy's
+`batch_size` or `checkpoint` in lockstep; a reverse-KL teacher whose tokenizer differs from any trained policy's; and an entry
+whose workflow credits with hooks of its own (`applies_credit` false). A resume that trains a policy that was frozen,
+or freezes one that trained, stops with exit code 78, as any change of the policy table does.
+
+[`examples/two-agent-lockstep`](../../examples/two-agent-lockstep/README.md) trains the subagents example's delegator
+and its workers as two policies, on one service and on two.
+
+## Step each policy on its own clock (experimental)
+
+`train.stepping: independent` lets each trained policy step, publish and save on its own clock, with its own batch,
+staleness bound and checkpoint cadence, and no policy waits for another's training or saves (RFC 0021, section 2.11).
+`lockstep` stays the default, and with one trained policy both are the same.
+
+```yaml
+train:
+  stepping: independent                         # default: lockstep
+  batch_size: 8                                 # main's batch, and the plan's groups per step
+  max_staleness: 1                              # main's bound: a horizon of (1 + 1) x 8 = 16 groups
+policies:
+  worker:
+    model_name: Qwen/Qwen3-4B-Instruct-2507
+    renderer_name: qwen3_instruct
+    batch_size: 2                               # its own batch (default: train.batch_size)
+    max_staleness: 7                            # its own bound: a horizon of (7 + 1) x 2 = 16
+    checkpoint: {recovery_every: 4}             # its own cadence, in its own steps (default: checkpoint.*)
+agents:
+  roles:
+    subagent: {policy: worker}
+checkpoint:
+  recovery_every: 1                             # main's cadence, in its steps
+```
+
+- **Shares.** Each group is credited once, over every agent, as in lockstep. Then it splits into one share per trained
+  policy with rows in it: that policy's rows of the group. A policy's steps take its shares in the order they settled,
+  `policies.<id>.batch_size` of them (`train.batch_size` for `main`), each trained by its own learner; then the policy
+  publishes its new sampler, and only it. Every group is a share of `main`'s too, one that holds none of its rows when
+  it has none, so that `main`'s steps take every group, as a lockstep step does; a group that failed is `main`'s share
+  alone.
+- **Rates stay coupled.** The plan is `train.batch_size` groups per `main` step, as in lockstep: each of `main`'s shares
+  is one group of the plan. Each policy has a horizon of its own, `(max_staleness + 1) x batch_size` of its shares, and
+  a group starts only when every policy's horizon has room, since which policies a rollout samples is known only once it
+  settles. Every group feeds every policy whose agents run in it, so the slowest learner still bounds how many groups
+  start; what changes is that no policy waits for another, and a policy with a smaller batch steps more often. A
+  policy's rows then age faster in its own versions, so its bound grows by the same factor, `(k + 1) x batch >= main's
+  (k + 1) x batch`, or its horizon holds dispatch back. `train/dispatch/blocked_share/horizon:<id>` says which horizon
+  did.
+- **Staleness.** Each policy judges its own shares, against its version and bound. A stale share is dropped for that
+  policy alone; the group's other shares are untouched. `policies/<id>/peer_lag/<q>` reports how many versions each
+  other policy moved between the sampling of the shares' rows and their training.
+- **Commits.** Every full save of any policy is a commit: a point a resume starts from. It captures, at once, the run's
+  draws, every group that has not retired with what each policy did with its share (the step that consumed it and
+  its age then), and every other policy's newest saved row and published version; it then writes them and the
+  policy's weights, and appends the policy's row to its own `checkpoints.jsonl` (`main`'s the run's, another policy's
+  `<run>/policies/<id>/checkpoints.jsonl`), with `loop_state.commit_seq` and `loop_state.policies`, every policy's row
+  by its `state_path`. A group stays kept until each policy that consumed its share has saved a row after that step
+  (`run/retained_groups`), so keep `recovery_every` small. A pruner never deletes a row that a commit in flight, or
+  the newest commit in some policy's file, names.
+- **Resume.** A start resumes from the commit with the highest `commit_seq` in any policy's file whose named rows its
+  policies still have; a newer one that does not hold is skipped and recorded in `lock.json` (`policies_restore`). Each
+  policy goes on from the row the commit names, at its own step. A policy whose samplers published after that row were
+  lost resumes at one version more than the commit records it published, so that no new sampler reuses a lost number.
+  Each share a policy consumed after its row goes back to the front of its queue and trains again, judged at the age it
+  had then (`policies/<id>/retrained_shares`; a trainer of your own judges it at `ledger.judge_version(policy, group)`),
+  so no share trains twice in a policy's weights. A share the commit records as not yet consumed is judged afresh when
+  it is taken, and may be dropped as stale then: the version rule and the shares trained again before it age it, so keep
+  `recovery_every` small. A policy other than `main` names its own commits with its id (`recovery-<id>-<step>`,
+  `<id>-<step>`), apart from the rows the start's launch and exit saves write into its file.
+- **Evaluation** counts `main`'s steps (`eval.every`); an evaluation's row in `evaluations.jsonl` adds `versions_end`
+  when some policy published while it ran.
+- **Metrics.** Each step logs a row of its own: `main`'s with the names a run of one policy gives them, the run's
+  metrics (`train/dispatch/*`, `train/workload/*`, `timing/*`, `run/retained_groups`) and `run/step`; every other
+  policy's under `policies/<id>/`, with `policies/<id>/step`. The rows carry no W&B step of their own: W&B numbers them,
+  and each metric plots against its row's axis. Every policy's rows add `policies/<id>/share_wait_s` (how long its step
+  waited for shares), `policies/<id>/retrained_shares` and `policies/<id>/peer_lag/<q>`.
+- **Step hooks** run at the end of each policy's own step, with `end.policy` naming it, and may update that policy only:
+  `end.learner(other, ...)` is refused, and `run.learner` sends nothing from a hook, whichever policy's learner it is.
+  The ends of different policies' steps run at the same time, so a hook's methods may too; a commit waits until no
+  step's end runs its hooks, and so saves no hook's state part-way. It saves the state as it is then, while every other
+  policy resumes from the older row the commit names and runs its step ends since then again: a hook whose state moves
+  at a policy's step ends keeps it by that policy's own step, and takes it up at `start.policies[<id>].step` ([Keep its
+  state across restarts](../extending/step-hooks.md#keep-its-state-across-restarts)).
+- **Interrupts and exit.** A stop request stops each policy's loop at its step's end; a step that applied an update
+  finishes first. A loop that stopped takes no more shares, so once its horizon is full no group starts again: a step
+  that still waits for shares then closes short with those it has, as at the plan's end (it counts as a step of the
+  plan, so the run draws that many fewer groups), rather than wait for groups that never start or give the stopped
+  policy shares beyond its bound. The save at exit (`<step>_interrupted`, or `final`) saves every policy and names them
+  all. A start that resumes with `main` at the plan's end, after a stop or a crash that came after `main`'s last step,
+  trains the shares the other policies have left and saves `final`. A trainer of your own passes the stop to
+  `ledger.take(policy, n, stop=run.shutdown)`, which raises `TrainInterrupted` once it is set.
+- **Failures.** A policy's service that fails, in an update or a save, stops the start, as in lockstep: the other
+  policy's loop is cancelled, nothing saves at exit, and a commit whose save had not appended its row is not one. The
+  next start resumes from the newest commit, each policy from the row it names. A policy that is slow, or whose save
+  hangs, holds the others back once its horizon fills: rates stay coupled.
+
+**What loading refuses** (exit 78), besides lockstep's: a policy's `batch_size` that `train.num_minibatches x
+train.num_microbatches` does not divide, `checkpoint.recovery_every` below 1 or `checkpoint.every` below 0, and a group
+admission rule other than `all` (`train.group_admission` or an entry's), whose steps count their groups toward a cap
+that this release keeps for steps of every policy at once. With `checkpoint.keep_recovery`, each policy's own pruner
+keeps its promise only when `keep_recovery` times the policy's own `checkpoint.recovery_every` (else the run's), counted
+in its own steps, exceeds its own `max_staleness` (else the run's largest bound): loading refuses a policy whose cadence
+does not. Loading warns of a trained policy that saves no full checkpoint before the run's end (no `recovery_every` and
+`checkpoint.every: 0`): every group it consumed stays kept, and every commit writes them all. A resume that changes the
+stepping stops with exit code 78: `identity.json` records `stepping: independent`, a start checks that its run's rows
+are commits (or are not), and a lockstep resume would train consumed shares again. Loading reads `train.stepping`; a
+trainer of your own whose `needs()` choose the stepping is held to the same rules as its start begins, and sets
+`train.stepping: independent` to give a policy its own `batch_size` or `checkpoint`. `trainer: sft` trains one policy,
+on the run's one clock, and refuses `train.stepping` as it does the other `train:` keys only the rl trainer reads
+([Fine-tune on a dataset](#fine-tune-on-a-dataset)).
+
+[`examples/two-agent-independent`](../../examples/two-agent-independent/README.md) trains the subagents example's
+delegator and its workers, the worker stepping about four times for each of the delegator's steps.
+
+## Limit the tools each role may call (experimental)
+
+The agents of a role may be limited to some of their environment's tools: subagents that may only read, a reviewer
+that may not submit. List the tools under `agents.roles.<role>.tools`:
+
+```yaml
+agents:
+  roles:
+    subagent: {tools: [read]}                   # the children ctx.agents.spawn opens: read, and nothing else
+    reviewer: {tools: [view, "read_*"]}         # agents minted with POST /v1/platoon/agents {"role": "reviewer"}
+    judge: {policy: judge, tools: []}           # beside a policy (Sample several policies): no tool at all
+```
+
+- **What a list names.** Each item is a tool's name or an `fnmatch` pattern (`read_*`), matched case-sensitively
+  against the names the agents see: the environment's tools, and the tools of a Harbor task's MCP servers as the
+  gateway serves them, `<server>__<tool>` (`mcp_server__get_secret`, or `mcp_server__*` for all of one server's). A
+  role without `tools` keeps every tool, as before, and `tools: []` allows none.
+- **Which agents it limits.** Every agent opened with the role: a child its harness spawns
+  (`ctx.agents.spawn(..., role=...)`, whose role is `subagent` unless it says otherwise), mints (`POST
+  /v1/platoon/agents {"role": ...}`) or its program opens (a `judge`, a `verifier`), and the root agent when the list
+  is under its role, `policy`. An agent under a limited one keeps that limit, besides its own role's: a child never
+  sees more tools than its parent, as with tool access (`agents.child_access`). A verifier (`child_grading:
+  verifier`) is the exception, as for its access (`agents.verifier.access`): it runs under the child it judges, but
+  is limited by the lists of the agent that spawned that child and its own role's, `verifier`, not by the child's. A
+  role may give `tools` alone: its agents sample `agents.policy` (`main` without it), as a role `agents.roles`
+  leaves out does.
+- **Where it holds.** In every listing of tools an agent gets (`ctx.list_tools()`, MCP `tools/list`), after its tool
+  access level, and where the gateway runs a call (`ctx.call_tool()`, MCP `tools/call`), so that a harness that calls
+  a tool its listing does not hold is refused too. A call to another tool comes back to the agent as an error result
+  that says why (`Tool 'answer' is not allowed: agents of role 'subagent' may call only read. The call was not run.`),
+  the environment never sees it, and the run goes on; the agent's trajectory counts the refusals in its misc
+  (`tools_refused: {count, first}`). `platoon train` applies the lists to its training and evaluation rollouts, in
+  process and in the rollout workers of its group workflow; a workflow class of your own whose rollouts run in
+  workers it starts itself passes them on as that workflow does (`WorkflowSetup.role_tools`, the workers' requests'
+  `role_tools`).
+- **What it does not reach.** A harness's own tools (the shell and editor an OpenHands or Codex harness runs in the
+  task's sandbox, the subagents example's `delegate`) and the MCP servers a harness reaches by itself
+  (`{task_mcp_servers}` in its spec) never pass through the gateway's tool plane: limit those in the harness. A
+  function harness that calls its environment session itself (`ctx.session.call_tool(...)`) passes the tool plane by
+  as well, its tool access included. An ORS bridge's `get_task` tool (`bridge_tools: true`), when a role allows it,
+  shows the environment's whole tool list, the tools the role does not allow included, though a call to one is still
+  refused. A task MCP tool is matched by the name the gateway serves, in which every character of its server's name
+  and its own but an ASCII letter, a digit and `_` is replaced by `_`: `mcp_server__*` matches the tools of a server
+  `mcp-server`, and `mcp-server__*` matches none, which loading does not warn of, as it does not check patterns
+  against a Harbor task's tools.
+- **What loading refuses** (exit 78, `platoon config validate` too): `tools` that is not a list (write `tools: [read]`,
+  not `tools: read`), an item that is not a non-empty string, a key of a role other than `policy` and `tools`, and a
+  role that is no name. A role that looks like a misspelling of one of platoon's own (`subagents` for `subagent`) is
+  only warned of, since a harness may mint agents of any role. A pattern that matches none of the tools of the run's
+  environments is only warned of, and only when every environment names its tools before a session opens: an ORS
+  environment run in process (`python://`) whose class declares them all, a task table (none), or a service class with
+  `declared_tools`. Harbor tasks, whose MCP servers list their tools once a session opens, and ORS env servers are not
+  checked.
+
+[`examples/subagents/read-only-subagents.yaml`](../../examples/subagents/read-only-subagents.yaml) trains the
+subagents example with subagents that may only read, so that only the root answers.
+
 ## Label tasks by a column
 
 Each task of a run is a dataset row: its `task_id` and the columns its environment gives it. A mixture gives each
@@ -887,6 +1305,145 @@ of them. An evaluation that a failure cut short runs again only in a start that 
 goes on while an evaluation runs, so a later step's checkpoint can be saved before the evaluation ends, such as one
 of `checkpoint.recovery_every`: a failure after it resumes the run past the evaluation's step, from a later policy, and
 that evaluation does not run again. The held-out curve then has no point at its step.
+
+## Fine-tune on a dataset
+
+`trainer: sft` fine-tunes the policy on chat datasets instead of rollouts: supervised fine-tuning, with the loss on the
+model's turns. The datasets follow [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)'s conventions
+([`data/README.md`](https://github.com/hiyouga/LLaMA-Factory/blob/main/data/README.md)), so a dataset prepared for
+LLaMA-Factory trains here as it is, but for the few differences [listed below](#where-it-differs-from-llama-factory):
+a `dataset_info.json` names each dataset and says where its rows are and how to read them, in the `alpaca` or the
+`sharegpt` format. [`examples/sft`](../../examples/sft/README.md) trains on one of each.
+
+```yaml
+trainer: sft
+trainer_options:
+  dataset: alpaca_demo, sharegpt_demo     # names in dataset_dir/dataset_info.json; a list works too
+  dataset_dir: data                        # relative to this file (left out: data, beside it)
+  batch_size: 32                           # conversations per step, one optimizer step over them
+  num_epochs: 3                            # or max_training_steps; with both, the shorter
+  max_length: 4096                         # LLaMA-Factory's cutoff_len: tokens a conversation is cut to
+train:                                     # the policy: model, renderer, adapter and optimizer
+  model_name: Qwen/Qwen3-8B
+  renderer_name: qwen3
+  lora_rank: 32
+  optimizer: {learning_rate: 1.0e-4}
+checkpoint: {every: 200, recovery_every: 20, keep_recovery: 2}
+```
+
+`trainer_options` (the [config reference](../reference/config.md#trainers) lists every key):
+
+| Key | Default | What it does |
+|---|---|---|
+| `dataset` | required | The datasets, by name: one, several separated by commas (as LLaMA-Factory's `dataset`), or a list. Their conversations are put together in this order |
+| `dataset_dir` | `data` | The directory of `dataset_info.json` and the files it names (LLaMA-Factory's `dataset_dir`), relative to the config file; left out, `data` beside the config file |
+| `batch_size` | 32 | Conversations per step; an epoch's last step takes what is left |
+| `num_epochs`, `max_training_steps` | unset | How long the run trains: one of them is required, and with both it trains the shorter |
+| `num_microbatches` | 1 | forward_backward calls a step's conversations are sent in, before its one optimizer step |
+| `max_length` | unset | Tokens a rendered conversation is cut to, as LLaMA-Factory's `cutoff_len` cuts it: turn by turn from the first (with `mask_history`, from the last), each turn's prompt and reply sharing what is left, and the turns past it left out; unset, no cut |
+| `mask_history` | false | Train on the last model turn of each conversation only (LLaMA-Factory's `mask_history`) |
+| `seed` | 42 | Each epoch's order of the conversations, and the rows `num_samples` takes |
+
+`train:` declares the policy (`model_name`, `renderer_name`, `renderer_kwargs`, `lora_rank`, `optimizer` and the
+deadlines of its updates). Its keys that only the rl trainer reads (its batch, duration, loss, staleness, stepping and
+rollout settings) are refused under `sft` when set, each with the `trainer_options` key to set instead when there is
+one, as `train.batch_size` names `trainer_options.batch_size`. An sft run rolls nothing out, so it needs no
+`environments`, and it refuses `policies:` and `agents:`, which only the rl trainer samples or scores with
+([Sample several policies](#sample-several-policies-experimental)).
+
+### The datasets
+
+`dataset_info.json` maps each dataset's name to where its rows are and how to read them, with LLaMA-Factory's keys and
+defaults:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `hf_hub_url` | | A dataset on the Hugging Face Hub; it wins over `file_name` |
+| `file_name` | | A file in `dataset_dir`, or a folder of files of one type: `json`, `jsonl`, `csv`, `parquet` or `arrow` |
+| `formatting` | `alpaca` | `alpaca` or `sharegpt` |
+| `split`, `subset`, `folder` | `train`, none, none | Which split, configuration and folder of the dataset to read |
+| `num_samples` | all | Rows to take: each row once, in an order `seed` decides, before any twice (again in that order when it asks for more than there are) |
+| `columns` | | Which column holds what: alpaca's `prompt` (`instruction`), `query` (`input`), `response` (`output`) and `history`; sharegpt's `messages` (`conversations`); either format's `system` and `tools` |
+| `tags` | | How a sharegpt message names its role and text: `role_tag` (`from`), `content_tag` (`value`), and the roles `user_tag` (`human`), `assistant_tag` (`gpt`), `observation_tag` (`observation`), `function_tag` (`function_call`) and `system_tag` (`system`) |
+
+The defaults in parentheses are those of an entry without `columns` (or `tags`). An entry that gives them replaces
+the defaults whole, as LLaMA-Factory does: a key it leaves out names nothing. LLaMA-Factory's own `firefly` entry,
+`{"prompt": "input", "response": "target"}`, reads no query; and a `tags` without `system_tag` reads no system message,
+so a row that opens with one is out of order, and skipped. A key that LLaMA-Factory does not read either, such as
+`file_sha1`, is ignored, with a warning.
+
+How a row becomes a conversation, as LLaMA-Factory's converters do it:
+
+- **alpaca:** the `history`'s prompt and response pairs come first, each a user turn and an assistant turn; then
+  `instruction` and `input` joined by a newline (an empty one left out) as the user's turn, and `output` as the
+  assistant's. A row without a text output is skipped.
+- **sharegpt:** the messages in order. The user's turns and the tools' results (`observation`) go at odd positions,
+  the assistant's turns and its tool calls (`function_call`) at even ones, and a conversation ends with one of the
+  latter. A first message with the system tag is the system prompt, in place of the `system` column. A row out of that
+  order is skipped. The OpenAI format of LLaMA-Factory's README is `sharegpt` with `messages` and the tags `role`,
+  `content`, `user`, `assistant` and `system`.
+- **Tools and tool calls:** `tools` is a JSON list of functions (`name`, `description`, `parameters`; an OpenAI tool
+  `{"type": "function", "function": ...}` too). A `function_call` message is JSON, one call (`name`, `arguments`) or
+  a list of them.
+
+A skipped row is counted in one warning per dataset, which names the first and says why it was skipped. Preference
+datasets (`ranking`, the `chosen`, `rejected` and `kto_tag` columns), multimodal ones (`images`, `videos`, `audios`),
+`formatting: openai` and rows from sources other than the Hub and files (`ms_hub_url`, `om_hub_url`, `script_url`,
+`cloud_file_name`, which LLaMA-Factory reads over `file_name` when there is no `hf_hub_url`) are refused by name.
+`platoon config validate` reads `dataset_info.json`, and refuses a dataset it does not name; `platoon config validate
+--tasks` loads the datasets, and says how many conversations each has.
+
+### What trains
+
+Each conversation is rendered by the policy's renderer, as the policy sees a conversation when it samples: the system
+prompt and the tools first, as the renderer puts them, each tool call as the assistant's `tool_calls` and each result as
+a `tool` message. The tokens of the model's turns, its replies and its tool calls, train (with `mask_history`, the last
+one's only); the system prompt, the tools, the user's turns, the tools' results, the renderer's headers and a system
+message the renderer adds of its own (as `kimi_k2` and `nemotron3` do) do not. The renderer must be a tinker-cookbook
+one, which renders message by message (`chat_template` renders whole conversations), and, for conversations with tools,
+one with tool calling, such as `qwen3`. Before the service opens, the run renders the first conversation, the first with
+tools, the first with a tool call and the first with neither a system prompt nor tools, and refuses a renderer that
+cannot render one or that renders a tool call without it (as `llama3` does), naming the conversation's dataset and row
+(exit 78); so is one that cannot render a later conversation, when a step comes to it. Each step's loss
+is the mean negative log-likelihood over its trained tokens (`train/nll`, over all its microbatches), as LLaMA-Factory's
+is, so a learning rate means the same whatever the batch size. `max_length` shares its tokens among a conversation's
+turns as LLaMA-Factory's `cutoff_len` does, so a reply keeps tokens to train on also behind a long prompt; a conversation
+left with none is left out of its step, the first of each dataset named in a warning, and
+`train/untrained_conversations` counts them. A run in which no conversation has a token to train within `max_length`
+stops (exit 78) once it has walked every conversation.
+
+### Epochs, checkpoints and resume
+
+Each epoch walks every conversation once, in an order that `seed` and the epoch's number decide. Every full
+checkpoint saves where the run is (`loop_state.sft`: the epoch and how far into it), so a resume goes on with the next
+conversation, and each conversation trains once an epoch, also across restarts. A resume may change `batch_size`: the
+run's end is counted on from where the checkpoint left the conversations. A resume with other conversations or another
+`seed` would walk another order, and is refused (exit 78): start a new run from the checkpoint's weights with
+`checkpoint.load_checkpoint_path` instead (and its optimizer's state, with `checkpoint.load_optimizer_state: true`).
+
+Checkpoints come as for any run ([Checkpoints and resume](#checkpoints-and-resume)). `checkpoint.keep_recovery` needs
+no staleness bound here: nothing samples the policy, so no recovery checkpoint is kept for a sampler. Nothing samples
+it during training either: the policy's version stays where the run began, and `optimizer_steps` counts the steps. A
+step hook that a subclass of the sft trainer registers runs at each step's end ([Write a step
+hook](../extending/step-hooks.md)): the policy then publishes once a step, for the hook, and `optimizer_steps` counts
+the hook's updates too.
+
+Evaluation during training is not there yet for `sft` (`eval.every` must be 0): evaluate its checkpoints with
+`platoon eval` ([Evaluate](#3-evaluate)).
+
+### Where it differs from LLaMA-Factory
+
+- The policy's renderer renders each conversation, as the policy sees it when it samples; LLaMA-Factory's templates
+  (its `template` argument) are not used.
+- `max_length` has no default: unset, nothing is cut (LLaMA-Factory's `cutoff_len` is 2048).
+- `dataset_dir` is relative to the config file, as every input path of a config is; LLaMA-Factory's is relative to the
+  working directory.
+- `num_samples` beyond a dataset's rows takes them again in the seeded order; LLaMA-Factory draws the extra ones at
+  random.
+- A `function_call` message that is not JSON skips its row; LLaMA-Factory stops with an error while it preprocesses.
+- Not read: `formatting: openai`, the sources besides the Hub and files, preference and multimodal datasets, and
+  LLaMA-Factory's training arguments `train_on_prompt`, `packing`, the `mix_strategy` other than `concat`,
+  `max_samples` and `streaming`.
 
 ## The training service
 
@@ -1049,7 +1606,8 @@ weights and sampler weights, through the training service's checkpoint deletion 
 - the checkpoint a resume would start from;
 - a recovery checkpoint this start saved within the run's largest staleness bound of the policy (`train.max_staleness`,
   or an environment's `max_staleness` above it), which rollouts may still sample from (one an earlier start saved
-  serves none of this start's rollouts);
+  serves none of this start's rollouts, and under `trainer: sft` none does: [Fine-tune on a
+  dataset](#fine-tune-on-a-dataset));
 - anything the run's own `checkpoints.jsonl` does not list, such as another run's checkpoints or the one
   `load_checkpoint_path` names.
 
@@ -1183,7 +1741,10 @@ from: without a hold-out or a split manifest, every split lists every task, so t
 sees.
 
 **Start from trained weights** with `checkpoint.load_checkpoint_path: tinker://...`: it loads the weights with a
-fresh optimizer, and applies only when the run directory has no checkpoint of its own yet.
+fresh optimizer, and applies only when the run directory has no checkpoint of its own yet. With
+`checkpoint.load_optimizer_state: true` beside it, the new run takes that checkpoint's optimizer state too, Adam's
+moments, as a new trial that goes on from it (the path must be a full checkpoint's `state_path`). Either way the new
+run's counters start at 0, and nothing else of the other run's state is taken up.
 
 **Evaluate a checkpoint** by passing its `sampler_path` as `inference.model_path` (or `--model-path` to
 `platoon rollout`).
@@ -1239,7 +1800,8 @@ trainer that ends at once (the watchdog, a second signal, SIGKILL), leaves its s
 
 - `platoon train` reaps the sandboxes labelled with its run when it starts, before each restart and when it exits,
   and first kills the rollout workers whose trainer is gone;
-- `platoon eval` reaps those labelled with its output directory when it exits;
+- `platoon eval` reaps those labelled with its output directory when it starts and when it exits; a SIGTERM stops
+  it as Ctrl+C does, cancelling its rollouts in flight, and it exits 143 once it has reaped them;
 - `platoon sandbox reap RUN_DIR` reaps those of a run whose process was killed, such as a job that ran out of time.
 
 Each logs how many it found, for example `Reaped 4 sandbox(es) labelled platoon.run=/runs/exp/trial before restart 1
@@ -1292,9 +1854,9 @@ train:
   training and under either setting (from its tenth step on, so a shorter run never does), naming what held the
   dispatcher back and advising `max_staleness + 1`. If the horizon had room (`train/dispatch/blocked_share/horizon`
   near 0), raising `train.max_staleness` by one changes only the stale filter: a group may then be one more policy
-  version old and still train, and recovery pruning keeps one more checkpoint. A per-datum stale filter, which would
-  keep the part of a long rollout within the bound instead, is planned for a later release (RFC 0020). A restart also
-  redoes more rollouts (every open group's), and more finished rollouts wait in the trainer for their siblings.
+  version old and still train, and recovery pruning keeps one more checkpoint. `train.stale_filter: datum` instead keeps
+  the part of a long group within the bound ([Per-datum stale masks](#per-datum-stale-masks-experimental)). A restart
+  also redoes more rollouts (every open group's), and more finished rollouts wait in the trainer for their siblings.
 - **Where it helps.** Where the permits decide when groups start (`blocked_share/permits` near 1). Where the horizon
   does (`blocked_share/horizon` near 1), freed permits have nothing to start: there only a larger `max_staleness` or a
   faster trainer helps, and the run trains as it did before 0.4.0.
@@ -1324,6 +1886,7 @@ shows: then raise `worker_launch_concurrent_groups`.
 |---|---|
 | `rollout_client/permits_held_mean` | The permits granted to groups, time-weighted. Held minus `rollouts_in_flight_mean` (`GroupRolloutWorkflow`'s members) is permit time no rollout used: under `group`, mostly finished rollouts waiting for their siblings; under `rollout`, close to 0 |
 | `train/dispatch/blocked_share/<reason>` | The share of the step in which the dispatcher could not start a group, by reason: `permits` (raise `max_concurrent_rollouts`, or, under `group`, return permits as rollouts end), `horizon` (only `max_staleness` or a faster trainer helps), `labels` (every label it could start was at its `rollout_group_limits`), `plan` (the run's remaining steps need no more groups), `sampler` (an adaptive task sampler found no eligible task) |
+| `train/dispatch/blocked_share/horizon:<id>` | When the trained policies step each on its own clock, in `main`'s rows: the share of the step in which policy `<id>`'s horizon held the dispatcher back, `horizon` being any of them. Near 1 for one policy: its horizon, `(max_staleness + 1) x batch_size` of its shares, is smaller than `main`'s (raise its `max_staleness`), or its learner is too slow for the run's rate ([Step each policy on its own clock](#step-each-policy-on-its-own-clock-experimental)) |
 | `rollout_client/startup_gate_waiting_mean` | The groups waiting for a worker-startup slot, time-weighted (process isolation) |
 | `train/batch/censoring/censored_share`, `.../mixed_groups`, `.../slowest_pass_rate`, `.../others_pass_rate`, and each label's under `train/batch/<column>/<label>/censoring/` | Over every group the step dequeued that a straggler policy applies to (none without one): the share of rollouts the policy cancelled, and over the groups whose valid rollouts both passed and failed, the pass rate of each group's slowest valid rollout against that of the others. A slowest rate well below the others' means a cut drops failures more than successes |
 
@@ -1340,6 +1903,55 @@ Every group then takes its whole size of permits before it starts and returns th
 finished rollouts keep their permits until its slowest one ends. The lease's blocks hold nothing, and the run starts
 and ends groups as earlier releases did, event for event. The default changed in 0.4.0 ahead of a GPU comparison of
 the two settings (RFC 0020); `group` stays as the way back, and as the other arm of such a comparison.
+
+## Per-datum stale masks (experimental)
+
+The stale filter drops a group whose oldest datum is more policy versions old than its bound (`train.max_staleness`,
+or its environment's own), so one early model call of one long rollout drops the work of its whole group.
+`train.stale_filter: datum` judges each datum instead, and drops only those beyond the bound:
+
+```yaml
+train:
+  max_staleness: 3
+  stale_filter: datum   # default: group
+```
+
+- **A datum's version.** Each model call records the policy version it sampled: in process, the version the trainer
+  had published when the call was issued; under process isolation, that of the binding the worker followed for it.
+  A datum, a run of model calls whose prompts extend one another merged into one sequence, carries the oldest version
+  among its own calls, where under `group` every datum of a rollout carries the rollout's oldest (the request's
+  version, in process). A rollout that spans a published policy then keeps the datums it sampled since. In a run that
+  samples several policies ([Sample several policies](#sample-several-policies-experimental)), each call records the
+  version of the policy that sampled it, and only the trained policy's datums are judged: a frozen policy's agents
+  make none.
+- **What it drops.** Each datum more versions old than the bound. The others train with the advantages their group's
+  credit gave them: the credit ran over the whole group as it settled, so each term kept keeps its expectation. A group
+  that keeps any datum is consumed: its statistics, its fate in the per-task statistics and its place in the batch are
+  those of a group that trained. A group none of whose datums is within the bound is dropped whole, as under `group`,
+  and counts as a stale group (`train/batch/stale_groups`, and the warning of [Rollout permits](#rollout-permits)).
+  That warning counts only these groups: one that keeps any datum counts as consumed, however many it lost, which
+  `train/batch/stale_datums` shows (below). Under depth-level weighting a trajectory whose first datum is dropped
+  counts from its first datum kept.
+- **What stays.** Credit, verdicts, group admission, the per-task statistics (each rollout's versions there are still
+  its rollout's) and the horizon. A group a checkpoint kept carries the versions it was stamped with as it settled,
+  so a resume under the other setting judges it by those.
+- **A workflow of your own.** `GroupRolloutWorkflow` stamps each datum with its own version under `datum`: it takes the
+  setting (its `takes_stale_filter` capability), and the trainer sets its `stale_filter` as training starts. The
+  datums of a workflow that does not take it keep the versions they carry, by which the filter judges each of them
+  (their rollout's, as platoon's conversion stamps them), and the run warns once per start. A subclass that drops or
+  adds a member's datums after the conversion keeps the result's `own_versions` in step with them, or those datums
+  keep their rollout's version (warned once per start). One that overrides `arun_episode` or `_run_group` without
+  calling `GroupRolloutWorkflow`'s stamps nothing: it sets `takes_stale_filter = False` in its body, so that the run
+  warns, or stamps its datums itself (`TrajectoryCollectionResult.stamp_own_versions`).
+- **Why it is not the default.** It changes "a stale group is dropped whole" into "per datum, with the group's credit
+  unchanged", and `group` stays the default until a GPU comparison on held-out evaluation (RFC 0020, open question 3).
+  In replays of long agentic runs, the masks removed 90-94% of the stale drops at the same bound.
+
+A step logs each group it kept with datums dropped (`Stale datums masked in batch <n>: ...`), and under `datum`:
+
+| Metric | What it says |
+|---|---|
+| `train/batch/stale_datums` | The datums the step dropped as stale: those beyond the bound in the groups it trained, and every datum of the groups it dropped whole |
 
 ## Rollout start-ups (experimental)
 
@@ -1424,7 +2036,7 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/optim/kl_sample_train_v1`, `train/optim/importance_weight_mean` | KL near 0, weight near 1 | Sampling and training disagree: renderer mismatch, or rollouts too stale (`max_staleness`) |
 | `train/optim/clip_frac_total` | Small | Most tokens clipped: the update is too large for the loss's thresholds |
 | `train/batch/skipped_optimizer` | 0 | 1 means the step took no optimizer update and the policy kept its version: its objective was zero (every advantage exactly zero, say every group's rollouts scored alike) or it had no datums. `filter_zero_advantage_datums` does not change this; it only drops zero-advantage datums from microbatches that also hold nonzero ones |
-| `train/stale_rollouts`, `train/batch/<column>/<label>/stale_groups` | 0 or rare | Rollouts older than `max_staleness` were dropped; by label, which one's groups grow too old: raise its entry's bound ([Settings per environment](#settings-per-environment)) |
+| `train/stale_rollouts`, `train/batch/<column>/<label>/stale_groups` | 0 or rare | Rollouts older than `max_staleness` were dropped; by label, which one's groups grow too old: raise its entry's bound ([Settings per environment](#settings-per-environment)). Under `train.stale_filter: datum`, groups none of whose datums was within the bound; `train/batch/stale_datums` counts the datums dropped ([Per-datum stale masks](#per-datum-stale-masks-experimental)) |
 | `train/batch/skipped_rows`, `train/batch/<column>/<label>/skipped_rows` | 0 | Draws of a label at its `rollout_group_limits` were skipped, four batches of them waiting already: lower its weight or raise its limit |
 | `train/batch/parked_rows`, `train/batch/<column>/<label>/parked_rows` | Small, steady | Draws of a label at its `rollout_group_limits` that wait for a slot: a count that grows, step after step, is a label whose share of the order its limit cannot serve, so it trains less than its weight; those still waiting when the run ends never run |
 | `train/batch/informative_groups`, `.../all_pass_groups`, `.../all_fail_groups`, `.../uniform_mixed_groups`, and each label's under `train/batch/<column>/<label>/` | A large share informative | The step's groups that trained, and those whose advantages were all zero: every rollout passed, none did, or both ([Per-task statistics](#per-task-statistics)). Mostly all-pass or all-fail: the tasks are too easy or too hard for the policy, and their groups train nothing |
@@ -1435,6 +2047,9 @@ Each step prints its metrics and logs them to W&B. Start with these:
 | `train/sampler/decision_ms`, `.../decision_ms_max` | A few ms | The mean and longest time a sampler's decisions took since the last step; long ones hold up the event loop. An adaptive entry's `.../tokens` counts its slots waiting for a group to start, and `train/sampler/skipped_slots` those a full queue skipped. `pass_rate`'s own metrics: [Choose tasks by their pass rates](#choose-tasks-by-their-pass-rates-experimental) |
 | `rollout_client/trainer_queue_wait_seconds_total` | Small next to `timing/batch_total` | The trainer waits on rollouts: raise rollout concurrency or speed up the environment |
 | `train/dispatch/blocked_share/permits`, `.../horizon` | One of them near 1 says what decides when groups start | `permits`: the rollout budget binds; a larger `max_concurrent_rollouts` while the engines have room (under `train.permit_release: group`, first the default, `rollout`), unless `rollout_client/start_limit/waiting_mean` is above 0: then rollouts hold permits while they wait to start up, and the lever is `max_starting_rollouts`. `horizon`: only `max_staleness` or a faster trainer helps ([Rollout permits](#rollout-permits)) |
+| `train/dispatch/blocked_share/horizon:<id>`, `policies/<id>/share_wait_s` | Neither near 1, or long, for one policy alone | When the trained policies step each on its own clock ([Step each policy on its own clock](#step-each-policy-on-its-own-clock-experimental)): the share of `main`'s step in which policy `<id>`'s horizon held the dispatcher back, and how long the policy's step waited for its shares. A horizon near 1 is a policy whose `(max_staleness + 1) x batch_size` is below `main`'s, or whose learner is too slow for the run's rate; the others then wait for shares |
+| `policies/<id>/peer_lag/<q>` | Small | How many versions policy `<q>` moved between the sampling of the rows policy `<id>` trained and their training |
+| `policies/<id>/retrained_shares`, `run/retained_groups` | 0 but after a resume; steady | The shares a resume put back that the step trained again, and the groups kept until each policy that consumed its share has saved after that step, which every commit writes: they grow with a policy's `recovery_every` |
 | `rollout_client/permits_held_mean` against `rollout_client/rollouts_in_flight_mean` | Close under `permit_release: rollout`, the default; under `group` the gap is the straggler idle that `rollout` returns | Permits held while no rollout ran: finished rollouts waiting for their group's slowest (`permit_release: group`), groups waiting at the startup gate, or rollouts waiting for a start slot |
 | `rollout_client/start_limit/waiting_mean`, `.../wait_seconds_p90`, and under process isolation `rollout_client/startup_gate_waiting_mean` | Near 0, or briefly at a run's start | With `train.max_starting_rollouts`: rollouts wait to start up, holding their permits. Raise `max_starting_rollouts`, or turn it off, not `max_concurrent_rollouts` ([Rollout start-ups](#rollout-start-ups-experimental)) |
 | `rollout_client/start_limit/releases/<cause>` | Mostly `first_call` | Many `end` or `timer`: the rollouts make no model call through platoon's gateway, or fail before one, so the limit bounds whole rollouts: turn it off for this workload, or fix the failures |

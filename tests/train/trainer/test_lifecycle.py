@@ -20,6 +20,7 @@ from platoon.testing import check_trainer
 from platoon.testing import trainers as checks
 from platoon.train.checkpoints.participants import COUNTER_KEYS, RunCheckpoints
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train.objectives.cross_entropy import CrossEntropy
 from platoon.train.policy import spec as spec_module
 from platoon.train.policy.spec import MAIN, policy_specs
 from platoon.train.trainer import api, registry
@@ -69,14 +70,16 @@ class _Counting(px.TrainerBase):
 
 
 async def _step(run: TrainerRun) -> None:
-    """One step of the leader policy: an optimizer step on the fake service, published as a new version."""
+    """One step of the leader policy: an optimizer step on the fake service, sent by hand, outside a learner of the
+    run's, so that the step says it is open (rule 10); then the step's end, which publishes it as a new version
+    (``run.end_step``)."""
 
     policy = run.policies[run.policies.leader]
     client: Any = policy.training_client  # the fake service's
+    run.clock.step_open = True
     await (await client.optim_step_async(None)).result_async()
     policy.optimizer_steps += 1
-    policy.info.llm.update_sampling_client(await policy.save_for_sampler())
-    run.clock.advance()
+    await run.end_step()
 
 
 class _AsS4Sketches(_Counting):
@@ -89,11 +92,68 @@ class _AsS4Sketches(_Counting):
 
 
 class _Unstoppable(_Counting):
-    """It never hears a stop request."""
+    """It never hears a stop request, not even inside a step's hooks."""
 
     async def run_steps(self, run: TrainerRun) -> None:
         run.shutdown = asyncio.Event()
         await super().run_steps(run)
+
+
+class _FromTheDocs(px.TrainerBase):
+    """A trainer written from the trainer API's documentation alone: each step one optimizer step through the run's
+    learner under cross-entropy, then the step's end (``run.end_step``), its metrics from the train tracker logged to
+    the stats logger.  It neither sets its policy's optimizer parameters nor stops the watchdog; it records the
+    watchdog it ran under, and reads the optimizer parameters before any learner is built."""
+
+    watchdogs: ClassVar[list[Any]] = []
+
+    async def prepare(self, run: TrainerRun, start: Any) -> px.StepPlan:
+        return px.StepPlan(end_step=run.config.train.max_training_steps)
+
+    async def run_steps(self, run: TrainerRun) -> None:
+        import tinker
+        import torch
+
+        self.watchdogs.append(run.clock.watchdog)
+        policy = run.policies[run.policies.leader]
+        assert policy.optimizer_params.learning_rate == run.config.train.optimizer.learning_rate  # set as it opened
+        learner = run.learner(policy.id, objective=CrossEntropy())
+        datum = tinker.Datum(
+            model_input=tinker.ModelInput.from_ints([1, 2, 3]),
+            loss_fn_inputs={
+                "target_tokens": tinker.TensorData.from_torch(torch.tensor([2, 3, 4])),
+                "weights": tinker.TensorData.from_torch(torch.tensor([0.0, 1.0, 1.0])),
+            },
+        )
+        while run.clock.step < run.plan.end_step and not run.shutdown.is_set():
+            update = learner.update()
+            await update.submit([datum], [datum], minibatch=0, microbatch=0)
+            await update.apply()
+            await run.end_step()
+            self.stats_logger.log(step=run.clock.step, stats=self.train_tracker.export(reset=True))
+
+
+def test_a_trainer_written_from_the_api_alone_keeps_the_lifecycle_and_the_run_stops_its_watchdog(tmp_path, monkeypatch):
+    check_trainer(_FromTheDocs)
+
+    settings = checks._settings
+    monkeypatch.setattr(
+        checks, "_settings", lambda root, steps: {**settings(root, steps), "watchdog": {"enabled": True}}
+    )
+    monkeypatch.setattr(_FromTheDocs, "watchdogs", [])
+    trainer: Any = _FromTheDocs
+    with checks._restored_signals():
+        start = checks._start(trainer, None, tmp_path, steps=2)
+
+    assert start.error is None and [row["name"] for row in start.rows] == ["recovery-000000", "final"]
+    (watchdog,) = _FromTheDocs.watchdogs
+    assert watchdog is not None and not watchdog.running
+
+
+def test_each_core_trainer_s_needs_say_what_the_registry_says_of_its_rollouts():
+    for name, core in registry.CORE_TRAINERS.items():
+        trainer = registry.trainer_class(SimpleNamespace(trainer=name))
+        assert trainer.needs(None, None).rollouts is core.rolls_out, name
 
 
 class _Cursor:
@@ -170,10 +230,16 @@ def test_participants_take_up_the_row_a_start_resumes_from_by_its_step_and_its_r
 
 def test_the_conformance_check_passes_a_trainer_that_keeps_the_lifecycle_and_names_what_one_breaks():
     check_trainer(_Counting)
-    with pytest.raises(
-        AssertionError, match=r"fails 1 check\(s\):\n  interrupts: saved \['recovery-000000', 'final'\]"
-    ):
+    with pytest.raises(AssertionError) as failed:
         check_trainer(_Unstoppable)
+    assert str(failed.value).splitlines()[:3] == [
+        "trainer _Unstoppable fails 2 check(s):",
+        "  interrupts: saved ['recovery-000000', 'final']: its last row is not <step>_interrupted at the step it "
+        "stopped at",
+        "  keeps steps whole: its steps are atomic, but a stop as step 1 drained its hooks, after the step's own 1 "
+        "update(s), saved ['recovery-000000', 'final'], not the launch checkpoint alone: a step is open once it sends "
+        "training work (run.learner's open it; work sent by hand sets run.clock.step_open)",
+    ]
 
 
 def test_steps_that_a_stop_request_stopped_short_of_their_end_save_an_interrupted_checkpoint_not_the_final_one():
@@ -218,9 +284,8 @@ def test_the_rl_trainer_s_steps_save_through_the_start_it_runs_whatever_a_subcla
 def test_a_start_s_steps_never_save_outside_the_start_that_train_runs():
     config = make_config()
     trainer: Any = PlatoonTinkerRLTrainer(config, [], policies=fake_policies(config))
-    trainer._rollouts = object()  # a start's prepare() opened its draws, but train() did not record that start
     with pytest.raises(RuntimeError, match="steps save through the start train"):
-        trainer._checkpoints(object())
+        trainer._checkpoints()
 
 
 def test_the_rl_trainer_refuses_a_setup_whose_policies_are_not_its_config_s(tmp_path):
@@ -259,9 +324,12 @@ def test_the_run_s_checkpoints_hold_the_counters_then_each_participant_s_entries
 
 
 class _Policies(dict):
-    """The run's policies as the checkpoints read them: by id, with the leader's."""
+    """The run's policies as the checkpoints read them: by id, with the leader's, which trains alone."""
 
     leader = "main"
+
+    def trainable(self) -> list[Any]:
+        return [self[self.leader]]
 
 
 def test_the_step_clock_advances_the_step_then_the_horizon_then_the_event_then_the_watchdog():
@@ -275,41 +343,43 @@ def test_the_step_clock_advances_the_step_then_the_horizon_then_the_event_then_t
     assert (clock.step, clock.end, event.is_set(), order) == (4, 5, True, ["horizon at step 4", "fed"])
 
 
-def test_the_loops_state_reads_and_writes_the_step_and_the_event_on_the_run_s_clock():
+def test_every_trained_policy_steps_on_the_run_s_one_clock():
+    clock = StepClock(step=0, updated=asyncio.Event())
+    policies: Any = SimpleNamespace(trainable=lambda: [SimpleNamespace(id=MAIN), SimpleNamespace(id="worker")])
+    run: Any = SimpleNamespace(policies=policies, clock=clock, _own=None)  # its policies step in lockstep
+    clocks = TrainerRun.clocks.fget(run)
+    assert list(clocks) == [MAIN, "worker"] and all(each is clock for each in clocks.values())
+
+
+def test_the_loops_state_reads_the_step_and_the_event_of_its_end_on_the_run_s_clock():
     clock = StepClock(step=2, updated=asyncio.Event())
     parts: dict[str, Any] = {
         "config": make_config(),
         "shutdown_event": asyncio.Event(),
         "train_dataloader": SimpleNamespace(),
         "eval_dataloader": None,
-        "sampling_client_step": 0,
         "stats_logger": SimpleNamespace(),
         "train_tracker": SimpleNamespace(),
     }
-    state = TrainLoopSharedState(**parts, clock=clock, model_info=SimpleNamespace())
-    state.train_step += 1
-    assert (clock.step, state.sampling_client_updated_event) == (3, clock.updated)
-    with pytest.raises(TypeError, match="clock or the loops' step and event, not both: given clock and train_step"):
-        TrainLoopSharedState(**parts, clock=clock, train_step=0)
-
-    # Made as platoon 0.4.0 made it: a clock of its own, over the step and the event, which feeds the state's watchdog.
-    event = asyncio.Event()
-    watchdog: Any = SimpleNamespace()
-    own: Any = TrainLoopSharedState(
-        **parts, train_step=5, sampling_client_updated_event=event, watchdog=watchdog, model_info=SimpleNamespace()
-    )
-    assert (own.clock.step, own.clock.updated is event, own.clock.watchdog is watchdog) == (5, True, True)
+    state = TrainLoopSharedState(**parts, clock=clock, policies=fake_policies(parts["config"]))
+    clock.advance()
+    assert (state.train_step, state.step_ended, state.step_ended.is_set()) == (3, clock.updated, True)
 
 
 @pytest.mark.parametrize(
     ("name", "problem"),
     [
         ("rl", None),
-        ("sft", "trainer: 'sft' is reserved for a trainer platoon will add; this release trains with rl (the default)"),
-        ("acme-dpo", "trainer: 'acme-dpo' is not a trainer: this release has one, rl (the default)"),
+        (
+            "interleaved",
+            "trainer: 'interleaved' is reserved for a trainer platoon will add; this release has rl and sft",
+        ),
+        ("acme-dpo", "trainer: 'acme-dpo' is not a trainer: this release has rl and sft (rl, the default)"),
     ],
 )
-def test_the_trainer_key_takes_rl_and_refuses_any_other_name_when_the_config_loads(tmp_path, name, problem):
+def test_the_trainer_key_takes_core_s_trainers_and_refuses_any_other_name_when_the_config_loads(
+    tmp_path, name, problem
+):
     settings = {**checks._settings(tmp_path, 2), "trainer": name}
     if problem is None:
         assert build_config(PlatoonTinkerRLTrainerConfig, settings).trainer == "rl"
@@ -328,4 +398,8 @@ def test_the_experimental_api_exports_the_trainer_api_and_the_policy_spec_as_the
     )
     assert px.PolicySpec is spec_module.PolicySpec and px.MAIN is spec_module.MAIN
     assert issubclass(PlatoonTinkerRLTrainer, px.TrainerBase)
-    assert PlatoonTinkerRLTrainer.needs(None, None) == px.TrainerNeeds(rollouts=True)
+    # The rl trainer's steps are not atomic and its updates do not fail closed, as they never were (RFC 0021, open
+    # question 8).
+    assert PlatoonTinkerRLTrainer.needs(None, None) == px.TrainerNeeds(
+        rollouts=True, atomic_steps=False, fail_closed_updates=False
+    )

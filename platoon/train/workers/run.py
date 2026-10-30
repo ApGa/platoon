@@ -26,11 +26,17 @@ from platoon.config_defs import RolloutConfig
 from platoon.envs.service import EnvSetupError
 from platoon.train.tinker.proxy import TinkerLLMProxySession
 from platoon.train.tinker.rollout_metrics import RolloutTimeline
-from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerRequest, RolloutWorkerResponse, resolve_ref
+from platoon.train.workers.protocol import (
+    PROTOCOL_VERSION,
+    PolicyRolloutWorkerRequest,
+    RolloutWorkerRequest,
+    RolloutWorkerResponse,
+    resolve_ref,
+)
 from platoon.train.workers.telemetry import local_telemetry
 from platoon.train.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.utils.rollout_workload import RolloutWorkload
-from platoon.utils.tinker_data_processing import get_train_data_for_trajectory_collection
+from platoon.utils.tinker_data_processing import RolloutPolicies, get_train_data_for_trajectory_collection
 from platoon.utils.trajectory_status import outcome_status, scored_success, trained_reward_key
 from platoon.visualization.event_sinks import emit_rollout_events, rollout_events_path
 
@@ -263,22 +269,45 @@ def _python_environment(request: RolloutWorkerRequest) -> contextlib.AbstractCon
 
 
 def rollout_version(llm: Any, request: RolloutWorkerRequest) -> int:
-    """The policy version a rollout's datums are stamped with (``checkpoint_version``, which staleness is measured
-    against): the oldest one any sample of its tree used, in a worker that followed the trainer's weights while it
-    ran; else the version its request was bound to.  Per-call versions are to replace it."""
+    """The policy version a rollout's datums are stamped with (``checkpoint_version``, which the stale filter measures
+    staleness against): the oldest one any sample of its tree used, in a worker that followed the trainer's weights
+    while it ran; else the version its request was bound to.  Each model call also records the version it sampled
+    (``TinkerLLMInteraction.version``), from which the conversion gives each datum its own (``own_versions``), the
+    oldest its calls sampled, for the per-datum stale filter (``train.stale_filter: datum``); a datum one of whose
+    calls recorded none keeps this one, or in a rollout of several policies its policy's (:func:`rollout_policies`)."""
+
+    return _sampled_version(getattr(llm, "sampling_client", None), request.model.checkpoint_version)
+
+
+def _sampled_version(sampling_client: Any, bound: int) -> int:
+    """The oldest version a sampler that followed the trainer's weights sampled at (``FollowingSamplingClient``,
+    in a rollout worker); else ``bound``, the version the request bound it at."""
 
     # Process workers follow current weights while waiting for the
     # environment. Anchor staleness to actual generation, retaining
     # the oldest root/child/judge sample if weights changed mid-tree.
     from platoon.train.workers.binding import FollowingSamplingClient
 
-    sampling_client = getattr(llm, "sampling_client", None)
-    checkpoint_version = request.model.checkpoint_version
     if isinstance(sampling_client, FollowingSamplingClient):
         sampled_version = sampling_client.oldest_sampled_version
         if sampled_version is not None:
-            checkpoint_version = sampled_version
-    return checkpoint_version
+            return sampled_version
+    return bound
+
+
+def rollout_policies(llm: Any, request: RolloutWorkerRequest) -> RolloutPolicies | None:
+    """The policies of a rollout that sampled several (protocol 3's ``agents``), for its conversion: the agents'
+    default, whose version is :func:`rollout_version`'s, each other's version, as its runtime sampled it, and the
+    policies training trains.  None for a rollout of one policy."""
+
+    if not isinstance(request, PolicyRolloutWorkerRequest) or request.agents is None:
+        return None
+    default = request.agents.default
+    versions = {default: rollout_version(llm, request)}
+    for policy, binding in request.policies.items():
+        runtime = llm.gateway.runtime(policy) if llm is not None else None
+        versions[policy] = _sampled_version(getattr(runtime, "sampler", None), binding.checkpoint_version)
+    return RolloutPolicies(default, versions, frozenset(request.trained))
 
 
 class _RolloutRun:
@@ -360,8 +389,10 @@ class _RolloutRun:
     def convert(
         self, llm: Any, reward_processor: Callable[[dict], tuple[float, dict]], workload: RolloutWorkload
     ) -> tuple[Any, RolloutWorkload]:
-        """The rollout's trajectories as datums, stamped with :func:`rollout_version`, and its workload with the
-        conversion's funnel."""
+        """The rollout's trajectories as datums, stamped with :func:`rollout_version` (in a rollout of several
+        policies, each with its own policy's, :func:`rollout_policies`; each datum's own version beside them,
+        ``own_versions``), each tagged with the agent that produced it when the request asks (protocol 3's
+        ``tag_datums``), and its workload with the conversion's funnel."""
 
         conversion_started = time.monotonic()
         checkpoint_version = rollout_version(llm, self.request)
@@ -376,6 +407,8 @@ class _RolloutRun:
             include_traj_depth=self.request.conversion.include_traj_depth,
             include_traj_start=self.request.conversion.include_traj_start,
             subagent_datum_sampler=self.request.conversion.subagent_datum_sampler,
+            tag_datums=getattr(self.request, "tag_datums", False),
+            policies=rollout_policies(llm, self.request),
         )
         workload = add_datum_funnel(workload, result)
         self.conversion_seconds = time.monotonic() - conversion_started

@@ -166,7 +166,7 @@ def build_agent_trajectory(
     misc: dict[str, Any] = dict(agent.misc)
     misc.update(
         {
-            AGENT_MISC_KEY: {"agent_id": agent.agent_id, "role": agent.role},
+            AGENT_MISC_KEY: _agent_record(agent),
             MODEL_GENERATIONS_KEY: {
                 call.call_id: {**call.generation, "finish_reason": call.finish_reason} for call in agent.calls
             },
@@ -284,6 +284,16 @@ def _step(call: ChatResponse, annotations: Mapping[str, Any] | None = None, *, k
         else:
             misc[key] = value
     return TrajectoryStep(misc=misc)
+
+
+def _agent_record(agent: AgentSession) -> dict[str, Any]:
+    """Who ran a trajectory (its misc's ``agent``): the agent and its role, and the policy it sampled when the gateway
+    serves several (``AgentSession.policy``), which the conversion stamps and keeps its rows by."""
+
+    record: dict[str, Any] = {"agent_id": agent.agent_id, "role": agent.role}
+    if agent.policy is not None:
+        record["policy"] = agent.policy
+    return record
 
 
 def _judge_call(agent: AgentSession, call: ChatResponse) -> dict[str, Any]:

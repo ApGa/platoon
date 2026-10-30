@@ -1,15 +1,14 @@
 """What the train and evaluation loops of one start share (``TrainLoopSharedState``).
 
 The policy they train is the leader of the run's policies (``policies``): its model info, its Tinker clients, its
-optimizer's parameters and the optimizer steps it took are the policy's, which the shared state reads and writes
-through properties of the same names.  The step the loops are at and the event of each step's end are the run's clock's
-(``clock``, :class:`~platoon.train.trainer.run.StepClock`), likewise ``train_step`` and
-``sampling_client_updated_event``.
+optimizer's parameters and the optimizer steps it took are the policy's, which the shared state reads through
+properties of the same names.  The step the loops are at (``train_step``) and the event of each step's end
+(``step_ended``) are the run's clock's (``clock``, :class:`~platoon.train.trainer.run.StepClock`).
 """
 
 import asyncio
-from dataclasses import InitVar, dataclass, field
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 import tinker
 
@@ -17,74 +16,27 @@ from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, TrainEventTr
 from platoon.train.dataloader import PlatoonTinkerDataloader
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.trainer.run import StepClock
 from platoon.train.trainer.signals import Watchdog
 from platoon.utils.stats_logger import StatsLogger
 from platoon.utils.stats_tracker import StatsTracker
 
-# The default of each part of the policy's state below: not given.
-_NOT_GIVEN: Any = object()
-
 
 @dataclass(kw_only=True)
-class _GivenPolicyState:
-    """The policy's state as a shared state was given it before the run's policies held it, and the loops' step and the
-    event of each step's end before the run's clock held them: platoon 0.4.0's keyword arguments, which tests still
-    give.  A shared state made with these, and without ``policies`` or ``clock``, keeps them in a policy or a clock of
-    its own (:meth:`TrainLoopSharedState.__post_init__`).  To be removed with platoon 0.4.0's paths (0.6.0), once the
-    tests make their states with policies and a clock."""
-
-    optimizer_params: InitVar[Any] = _NOT_GIVEN
-    service_client: InitVar[Any] = _NOT_GIVEN
-    training_client: InitVar[Any] = _NOT_GIVEN
-    sampling_client: InitVar[Any] = _NOT_GIVEN
-    model_info: InitVar[Any] = _NOT_GIVEN
-    optimizer_steps: InitVar[Any] = _NOT_GIVEN
-    train_step: InitVar[Any] = _NOT_GIVEN
-    sampling_client_updated_event: InitVar[Any] = _NOT_GIVEN
-
-
-def _main_holding(
-    *,
-    optimizer_params: Any = None,
-    service_client: Any = None,
-    training_client: Any = None,
-    sampling_client: Any = None,
-    model_info: Any = None,
-    optimizer_steps: int = 0,
-) -> Policy:
-    """Main's policy, the model ``model_info`` names, holding the state a shared state was given without the run's
-    policies: each part not given is None, and the optimizer steps 0, as the shared state's defaults were."""
-
-    model_name, renderer_name = getattr(model_info, "model_name", ""), getattr(model_info, "renderer_name", "")
-    policy = Policy(PolicySpec(MAIN, model_name=model_name, renderer_name=renderer_name), model_info)
-    policy.optimizer_params = optimizer_params
-    policy.service_client = service_client
-    policy.training_client = training_client
-    policy.sampling_client = sampling_client
-    policy.optimizer_steps = optimizer_steps
-    return policy
-
-
-@dataclass(kw_only=True)
-class TrainLoopSharedState(_GivenPolicyState):
-    """What the train and evaluation loops of one start share, made with keyword arguments: the trainer gives it the
-    run's policies (``policies``) and clock (``clock``); a state made without them, given the policy's state or the
-    step and the event instead (:class:`_GivenPolicyState`), makes its own.  Given both, it raises ``TypeError``, as
-    ``dataclasses.replace()`` of it does, which gives both: the part given would be dropped.  A copy (``copy.copy()``)
-    shares the original's policies and clock, and so their state."""
+class TrainLoopSharedState:
+    """What the train and evaluation loops of one start share, made with keyword arguments: the run's policies
+    (``policies``), whose leader the loops train, and the run's step clock (``clock``), which each step's end advances.
+    A copy (``copy.copy()``) shares the original's policies and clock, and so their state."""
 
     config: PlatoonTinkerRLTrainerConfig
     shutdown_event: asyncio.Event
     train_dataloader: PlatoonTinkerDataloader
     eval_dataloader: PlatoonTinkerDataloader | None
-    # The run's policies, whose leader the loops train; None only until __post_init__ makes the state's own.
-    policies: PolicySet | None = None
-    # The run's step clock, which each step's end advances; None only until __post_init__ makes the state's own.
-    clock: StepClock | None = None
-    sampling_client_step: int
+    policies: PolicySet
+    clock: StepClock
+    # Each trained policy's clock when they step independently, the leader's ``clock`` (None: in lockstep).
+    clocks: Mapping[str, StepClock] | None = None
     stats_logger: StatsLogger
     train_tracker: StatsTracker
     # The run's watchdog, the one its clock feeds at each step's end (clock.watchdog), which the loops' waits feed too;
@@ -103,117 +55,31 @@ class TrainLoopSharedState(_GivenPolicyState):
     start_step_evaluated: bool = False
     evaluations_path: str | None = None
 
-    def __post_init__(
-        self,
-        optimizer_params: Any,
-        service_client: Any,
-        training_client: Any,
-        sampling_client: Any,
-        model_info: Any,
-        optimizer_steps: Any,
-        train_step: Any,
-        sampling_client_updated_event: Any,
-    ) -> None:
-        """Made without the run's policies: one of its own, ``main``, which holds the state the shared state was given
-        (:func:`_main_holding`).  Made with them: given none of that state, which the policies hold.  Likewise the
-        clock: made without one, one of its own at ``train_step``, with ``sampling_client_updated_event``."""
-
-        self._own_clock(train_step, sampling_client_updated_event)
-
-        parts = {
-            "optimizer_params": optimizer_params,
-            "service_client": service_client,
-            "training_client": training_client,
-            "sampling_client": sampling_client,
-            "model_info": model_info,
-            "optimizer_steps": optimizer_steps,
-        }
-        given = {name: part for name, part in parts.items() if part is not _NOT_GIVEN}
-        if self.policies is None:
-            self.policies = PolicySet([_main_holding(**given)])
-        elif given:
-            raise TypeError(
-                "TrainLoopSharedState takes the run's policies or the policy's state, not both: given policies and "
-                + ", ".join(given)
-            )
-
-    def _own_clock(self, train_step: Any, sampling_client_updated_event: Any) -> None:
-        """The state's clock: the run's, when it was given one, else one of its own over the step and the event it was
-        given (``TypeError`` when it was given both, or neither)."""
-
-        given = [
-            name
-            for name, part in (
-                ("train_step", train_step),
-                ("sampling_client_updated_event", sampling_client_updated_event),
-            )
-            if part is not _NOT_GIVEN
-        ]
-        if self.clock is not None and given:
-            raise TypeError(
-                "TrainLoopSharedState takes the run's clock or the loops' step and event, not both: given clock and "
-                + ", ".join(given)
-            )
-        if self.clock is None:
-            if len(given) < 2:
-                raise TypeError(
-                    "TrainLoopSharedState takes the run's clock, or train_step and sampling_client_updated_event"
-                )
-            self.clock = StepClock(step=train_step, updated=sampling_client_updated_event, watchdog=self.watchdog)
-
-    # The step the loops are at, and the event of each step's end, the run's clock's, under the names the shared state
-    # gave them when it held them itself.
-
-    def _clock(self) -> StepClock:
-        assert self.clock is not None  # __post_init__ made it
-        return self.clock
-
     @property
     def train_step(self) -> int:
-        return self._clock().step
+        """The step the loops are at: the run's clock's."""
 
-    @train_step.setter
-    def train_step(self, step: int) -> None:
-        self._clock().step = step
+        return self.clock.step
 
     @property
-    def sampling_client_updated_event(self) -> asyncio.Event:
-        return self._clock().updated
+    def step_ended(self) -> asyncio.Event:
+        """The event each step's end sets, also a step's that published no policy, and the loops' stop: the run's
+        clock's (``StepClock.updated``), which the evaluation loop wakes on."""
 
-    @sampling_client_updated_event.setter
-    def sampling_client_updated_event(self, event: asyncio.Event) -> None:
-        self._clock().updated = event
+        return self.clock.updated
 
-    # The state of the policy the loops train, the leader, read and written under the names the shared state gave it
-    # when it held that state itself.
+    # The state of the policy the loops train, the leader: the steps publish each new sampling client here.
 
     def _leader(self) -> Policy:
-        assert self.policies is not None  # __post_init__ made them
         return self.policies[self.policies.leader]
 
     @property
     def model_info(self) -> ModelInfo:
         return self._leader().info
 
-    @model_info.setter
-    def model_info(self, info: ModelInfo) -> None:
-        self._leader().info = info
-
-    @property
-    def service_client(self) -> tinker.ServiceClient:
-        return self._leader().service_client
-
-    @service_client.setter
-    def service_client(self, client: tinker.ServiceClient) -> None:
-        self._leader().service_client = client
-
     @property
     def training_client(self) -> tinker.TrainingClient:
         return self._leader().training_client
-
-    @training_client.setter
-    def training_client(self, client: tinker.TrainingClient) -> None:
-        self._leader().training_client = client
 
     @property
     def sampling_client(self) -> tinker.SamplingClient:

@@ -3,14 +3,14 @@ group admission rule, each group the step dequeues takes a place of its microbat
 6), each step trains the first ``batch_size`` admitted groups it dequeues that are not stale, and closes once it has
 counted its cap (:mod:`platoon.train.admissions`).
 
-The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, counts each group it takes here.
+The step itself, :class:`~platoon.train.step.step.TrainStep`, counts each group it takes here.
 """
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from platoon.train.admissions import AdmissionSet
-from platoon.train.dispatch.settled import _Settled
+from platoon.train.dispatch.settled import SettledGroup
 from platoon.utils.stats_tracker import StatsTracker
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ class GroupCounting:
 
         return self.admissions is None
 
-    def take(self, settled: _Settled, taken: str, label: str | None) -> None:
+    def take(self, settled: SettledGroup, taken: str, label: str | None) -> None:
         """Under a rule, count a group of ``label`` that the step took as ``taken`` (``marker``: one the rule decided
         when it settled; else ``stale``, ``failed`` or ``admitted``), and of a marker of a rejected group, its task
         sampler's prediction (in the step's tally, as a consumed group's).  Nothing without a rule."""
@@ -54,7 +54,7 @@ class GroupCounting:
         record = settled.record
         if (
             taken == "marker"
-            and settled.rollout is not None
+            and settled.output is not None
             and record is not None
             and record.score is not None
             and (where := self.dispatch.prefix(record.sampler)) is not None
@@ -65,12 +65,12 @@ class GroupCounting:
         elif counts:
             admissions.waiting(self.step, counted=self.counted, admitted=self.admitted)
 
-    def short_microbatch_weight(self, microbatch: int, groups: int, tasks_per_microbatch: int) -> float | None:
+    def short_microbatch_weight(self, microbatch: int, groups: int, groups_per_microbatch: int) -> float | None:
         """Under a rule, the weight of a short step's partial last microbatch, after full ones, of ``groups`` groups:
         what makes its groups weigh as those of the full ones do.  None for any other microbatch."""
 
-        if self.closed and microbatch > 0 and groups < tasks_per_microbatch:
-            return tasks_per_microbatch / max(1, groups)
+        if self.closed and microbatch > 0 and groups < groups_per_microbatch:
+            return groups_per_microbatch / max(1, groups)
         return None
 
     def step_closed(self) -> None:

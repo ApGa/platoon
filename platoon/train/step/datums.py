@@ -1,18 +1,22 @@
 """A group's datums as a step trains them, by their loss inputs.
 
-- The first stage of a step: the rows of a group's output that the step trains (:func:`trained_rows`), and the copies
-  it collects, whose loss inputs its batch transforms set in place (:func:`_step_datums`).
+- The first stage of a step: the rows of a group's output that the step trains, by trained policy
+  (:func:`policy_rows`; the run's one policy's, :func:`trained_rows`), and the copies it collects, whose loss inputs
+  its batch transforms set in place (:func:`_step_datums`), without those the per-datum stale filter masked
+  (:func:`_kept_datums`).
 - The second stage: the scale of a microbatch's advantages by the action tokens its datums represent, as the step
   prepares it to send (:func:`advantage_scale`, :func:`scale_advantages`).
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any
 
 import tinker
+import torch
 from tinker import TensorData
 
+from platoon.train.policy.spec import PolicyId
 from platoon.train.step.batch_transforms import get_loss_normalization_token_count
 from platoon.train.task_stats import MAIN
 from platoon.train.workflow.protocol import rows_by_policy
@@ -20,30 +24,66 @@ from platoon.train.workflow.protocol import rows_by_policy
 logger = logging.getLogger(__name__)
 
 
-def trained_rows(output: Any) -> Sequence[tinker.Datum]:
-    """The rows of a group's output that the step trains: the run's one trained policy's (``main``,
-    :func:`~platoon.train.workflow.protocol.rows_by_policy`), the output itself for a list of datums; none when it
-    gives none (an empty group).  The rows of any other policy are left out with a warning: this trainer trains one
-    policy."""
+def policy_rows(output: Any, trained: Sequence[PolicyId]) -> dict[PolicyId, Sequence[tinker.Datum]]:
+    """The rows of a group's output that the step trains, by the policy each trains, for each of the ``trained``
+    policies in their order, whose first is the leader (:func:`~platoon.train.workflow.protocol.rows_by_policy`: a
+    list of datums is the leader's rows, the output itself); none of a policy it gives none (an empty group).  The rows
+    of any other policy are left out with a warning: the run trains none."""
 
-    by_policy = rows_by_policy(output, MAIN)
-    others = [policy for policy in by_policy if policy != MAIN]
-    if others:
+    by_policy = rows_by_policy(output, trained[0])
+    if others := [policy for policy in by_policy if policy not in trained]:
         logger.warning(
-            "A group's output gives rows of %s, which this run does not train (it trains one policy, %s): they are "
-            "left out",
+            "A group's output gives rows of %s, which this run does not train (it trains %s%s): they are left out",
             ", ".join(map(str, others)),
-            MAIN,
+            "one policy, " if len(trained) == 1 else "",
+            ", ".join(trained),
         )
-    return by_policy.get(MAIN, ())
+    return {policy: by_policy.get(policy, ()) for policy in trained}
 
 
-def _step_datums(rollout: Sequence[tinker.Datum]) -> list[tinker.Datum]:
+def trained_rows(output: Any) -> Sequence[tinker.Datum]:
+    """The rows of a group's output that a run of one trained policy, ``main``, trains (:func:`policy_rows`)."""
+
+    return policy_rows(output, (MAIN,))[MAIN]
+
+
+def _step_datums(datums: Sequence[tinker.Datum]) -> list[tinker.Datum]:
     """A group's datums as a step trains them: each its own datum, with its own loss inputs, so that the step's batch
     transforms, which set loss inputs in place, leave the group as it settled; a checkpoint that keeps a group a dropped
     step had dequeued then keeps it as it settled, and the step after the resume transforms it once."""
 
-    return [tinker.Datum(model_input=datum.model_input, loss_fn_inputs=dict(datum.loss_fn_inputs)) for datum in rollout]
+    return [tinker.Datum(model_input=datum.model_input, loss_fn_inputs=dict(datum.loss_fn_inputs)) for datum in datums]
+
+
+def _kept_datums(datums: list[tinker.Datum], masked: Collection[int]) -> list[tinker.Datum]:
+    """A group's datums as a step trains them (:func:`_step_datums`) without those the per-datum stale filter masked
+    (``masked``, their indices).  A trajectory's first datum with an action token to train carries its start
+    (``traj_start``, by which depth-level weighting counts trajectories), and the datums up to the next start are the
+    trajectory's: when a masked datum carried a start, the next kept datum of its trajectory with an action token to
+    train carries it instead (set in place, on the step's copy), so that a trajectory that keeps any datum to train
+    still counts once."""
+
+    kept: list[tinker.Datum] = []
+    moving = False  # the current trajectory's start was masked, and no kept datum carries it yet
+    for index, datum in enumerate(datums):
+        starts = _starts_trajectory(datum)
+        if index in masked:
+            moving = moving or starts
+            continue
+        if starts:
+            moving = False
+        elif moving and bool(datum.loss_fn_inputs["mask"].to_torch().any()):
+            datum.loss_fn_inputs["traj_start"] = TensorData.from_torch(torch.tensor([1.0]))
+            moving = False
+        kept.append(datum)
+    return kept
+
+
+def _starts_trajectory(datum: tinker.Datum) -> bool:
+    """Whether ``datum`` carries its trajectory's start (``traj_start``, under depth-level weighting)."""
+
+    start = datum.loss_fn_inputs.get("traj_start")
+    return start is not None and float(start.to_torch().item()) > 0
 
 
 def advantage_scale(datums: list[tinker.Datum], weight: float | None = None) -> float:

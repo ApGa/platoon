@@ -1,8 +1,9 @@
 """``platoon train``'s start of training: :func:`arun_tinker_training` loads and checks the config, lists the tasks,
 builds the run's components from its environments (the Auto factories of :mod:`platoon.train.auto`) and trains on the
 tasks with the trainer (:mod:`platoon.train.trainer`), in the steps that follow it, whose checks stop a config that
-cannot train with a :class:`ConfigError` before Tinker opens.  :mod:`platoon.train.supervise` runs it, in its own
-process or in each supervised start; so does ``python -m platoon.train.launch --config <file>``."""
+cannot train with a :class:`ConfigError` before Tinker opens.  A trainer that rolls nothing out (``trainer: sft``)
+skips the environments and the tasks (:func:`_train_without_rollouts`).  :mod:`platoon.train.supervise` runs it, in
+its own process or in each supervised start; so does ``python -m platoon.train.launch --config <file>``."""
 
 from __future__ import annotations
 
@@ -10,10 +11,12 @@ import asyncio
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from platoon.gateway import default_gateway
 from platoon.options import Phase
 from platoon.train import entry_settings
 from platoon.train.auto import (
@@ -30,13 +33,17 @@ from platoon.train.auto import (
 )
 from platoon.train.components import EnvironmentConfig
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, evaluates, training_problems
+from platoon.train.credit import registry as credit_registry
 from platoon.train.exclusion import TaskExclusion, record_exclusions
-from platoon.train.identity import check_training_run
+from platoon.train.identity import check_run_identity, check_training_run, run_identity
 from platoon.train.labels import check_labels, label_column
-from platoon.train.policy.spec import MAIN
+from platoon.train.policy import spec as policy_spec
+from platoon.train.policy.policy import Policy
+from platoon.train.policy.set import PolicySet
 from platoon.train.sampling import log_sampling_plan
 from platoon.train.startup import worker_preload
-from platoon.train.tinker.proxy import ModelInfo
+from platoon.train.trainer import registry
+from platoon.train.trainer.api import TrainerSetup
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
 from platoon.train.workflow.group import GroupRolloutWorkflow
 from platoon.train.workflow.protocol import WorkflowSetup, _built_by_keywords, capabilities_of
@@ -59,12 +66,17 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
     class that does not apply them, before the trainer is built.  What the exclusions left out, and what each entry's
     own settings change from the run's (``entry_settings``), go into the run directory's ``lock.json``.
 
-    The steps, in that order: :func:`_load_and_check`, :func:`_list_tasks`, :func:`_check_listed`,
-    :func:`_record_run` and :func:`_build_components` before the trainer is built, then :func:`_build_workflows` in
-    the trainer's context, on the trainer's policy, and the trainer trains.
+    The steps, in that order: :func:`_load`, :func:`_check_environments`, :func:`_list_tasks`,
+    :func:`_check_listed`, :func:`_record_run` and :func:`_build_components` before the trainer is built, then
+    :func:`_limit_tools` and :func:`_build_workflows` in the trainer's context, on the trainer's policies, and the
+    trainer trains.  A trainer that rolls nothing out trains after :func:`_load` (:func:`_train_without_rollouts`).
     """
 
-    config, settings, environment = _load_and_check(args, default_config_path)
+    config = _load(args, default_config_path)
+    if not registry.rolls_out(config):
+        await _train_without_rollouts(config)
+        return
+    settings, environment = _check_environments(config)
     training, eval_dataset, exclusions = _list_tasks(config)
     _check_listed(config, settings, training, eval_dataset)
     _record_run(config, settings, exclusions)
@@ -78,18 +90,16 @@ async def arun_tinker_training(args: list[str] | None = None, default_config_pat
         train_sampling=training.sampling,  # the task samplers it draws through, which draw the order's rows
     )
     async with trainer:
+        _limit_tools(config)
         train_workflow, eval_workflow = _build_workflows(
-            config, components, trainer.model_info, settings, training, eval_dataset
+            config, components, trainer.policies, settings, training, eval_dataset
         )
         await trainer.train(train_workflow=train_workflow, eval_workflow=eval_workflow)
 
 
-def _load_and_check(
-    args: list[str] | None, default_config_path: str | None
-) -> tuple[PlatoonTinkerRLTrainerConfig, dict[str, entry_settings.EntrySettings], EnvironmentConfig]:
+def _load(args: list[str] | None, default_config_path: str | None) -> PlatoonTinkerRLTrainerConfig:
     """The run's config, loaded and checked before any environment package is imported, task listed or Tinker session
-    opened; each entry's own training settings, laid over the run's; and the run's environment, once the environments'
-    packages are imported and their mixture pools, routes and harness toolchains checked, before any task is listed."""
+    opened."""
 
     config, _ = load_config(
         args=args or sys.argv[1:],
@@ -99,9 +109,36 @@ def _load_and_check(
     config: PlatoonTinkerRLTrainerConfig = config
     if problems := training_problems(config):
         raise ConfigError(problems)
-    from platoon.eval.config_defs import require_tinker_api_key, sample_timeout_note  # the served policy's checks
+    from platoon.eval.config_defs import require_tinker_api_key  # the served policy's check
 
     require_tinker_api_key()
+    return config
+
+
+async def _train_without_rollouts(config: PlatoonTinkerRLTrainerConfig) -> None:
+    """Train with a trainer that rolls nothing out (``trainer: sft``): no environment is imported and no task listed.
+    A resume that would change the run's model stops here (:mod:`platoon.train.identity`), and ``lock.json`` records
+    the trainer with its options; then the trainer, built from its setup, trains."""
+
+    run_dir = Path(config.log_path, config.stats.experiment_name, config.stats.trial_name)
+    check_run_identity(run_dir, run_identity(config, ()), {})
+    update_run_lock(run_dir, {"trainer": registry.lock_record(config)})
+    setup = TrainerSetup(
+        config=config, policy_specs=policy_spec.policy_specs(config), options=registry.options_of(config)
+    )
+    trainer = registry.trainer_class(config).from_setup(setup)
+    async with trainer:
+        await trainer.run()
+
+
+def _check_environments(
+    config: PlatoonTinkerRLTrainerConfig,
+) -> tuple[dict[str, entry_settings.EntrySettings], EnvironmentConfig]:
+    """Each entry's own training settings, laid over the run's; and the run's environment, once the environments'
+    packages are imported and their mixture pools, routes and harness toolchains checked, before any task is listed."""
+
+    from platoon.eval.config_defs import sample_timeout_note
+
     # The bound on each sampling call and where it came from, in the log; a variable it falls back to that is not a
     # positive number stops the run here.
     logger.info(sample_timeout_note("train.sample_timeout_seconds", config.train.sample_timeout_seconds))
@@ -113,7 +150,7 @@ def _load_and_check(
     check_mixture_pools(AutoEnvironment.environments(config))  # before any env server is contacted
     check_environment_routes(AutoEnvironment.environments(config))  # before any task is listed
     check_harness_toolchains(AutoEnvironment.environments(config))  # a run never builds one
-    return config, settings, environment
+    return settings, environment
 
 
 def _list_tasks(config: PlatoonTinkerRLTrainerConfig) -> tuple[TrainingTasks, Any, list[TaskExclusion]]:
@@ -180,7 +217,8 @@ def _record_run(
 class _Components:
     """What the run's environments give training and evaluation to roll out with (the Auto factories of
     :mod:`platoon.train.auto`): each split's rollout function and task loader, the reward processor, the workflow
-    class, and the arguments the environment gives each split's workflow."""
+    class, the arguments the environment gives each split's workflow, and the credit estimator each entry that sets one
+    chooses, resolved (:func:`~platoon.train.credit.registry.choose_credit`)."""
 
     rollout_fn: Any
     eval_rollout_fn: Any
@@ -190,11 +228,13 @@ class _Components:
     workflow_cls: Any
     workflow_kwargs: dict[str, Any]
     eval_workflow_kwargs: dict[str, Any]
+    credit: dict[str, credit_registry.CreditChoice]
 
 
 def _build_components(config: PlatoonTinkerRLTrainerConfig, environment: EnvironmentConfig) -> _Components:
-    """The run's components (:class:`_Components`); a workflow class that does not apply an entry's own settings stops
-    the run, before the trainer is built."""
+    """The run's components (:class:`_Components`); a workflow class that does not apply an entry's own settings, or
+    an entry's credit estimator, or that cannot bind the several policies the agents sample, stops the run, before
+    the trainer is built."""
 
     components = _Components(
         rollout_fn=AutoRollout.from_config(config, "train"),
@@ -205,32 +245,54 @@ def _build_components(config: PlatoonTinkerRLTrainerConfig, environment: Environ
         workflow_cls=AutoWorkflow.from_config(config, default=GroupRolloutWorkflow),
         workflow_kwargs=environment.workflow_kwargs,
         eval_workflow_kwargs=environment.eval_workflow_kwargs,
+        credit=credit_registry.choose_credit(config, check=False),  # checked as the config loaded
     )
-    # A workflow class that does not apply an entry's own settings would ignore them without a word (exit 78).
-    if problems := entry_settings.workflow_problems(config.environments, components.workflow_cls, environment.workflow):
+    # A workflow class that does not apply an entry's own settings, or its credit estimator, would ignore them without
+    # a word (exit 78).
+    workflow_cls, reference = components.workflow_cls, environment.workflow
+    problems = entry_settings.workflow_problems(config.environments, workflow_cls, reference)
+    problems += credit_registry.workflow_problems(components.credit, workflow_cls, reference)
+    problems += policy_spec.workflow_problems(config, workflow_cls, reference)
+    if problems:
         raise ConfigError(problems)
+    for line in policy_spec.policy_warnings(config):
+        logger.warning("%s", line)
     return components
+
+
+def _limit_tools(config: PlatoonTinkerRLTrainerConfig) -> None:
+    """Limit the tools of the agent roles that ``agents.roles.<role>.tools`` lists in this process's gateway, which
+    the rollouts that run in the trainer's process sample; a rollout worker's gateway takes them from its requests
+    (``role_tools``, which :func:`_workflow_setup` gives the workflows)."""
+
+    if tools := policy_spec.role_tools(config):
+        default_gateway().limit_tools(tools)
 
 
 def _build_workflows(
     config: PlatoonTinkerRLTrainerConfig,
     components: _Components,
-    model_info: ModelInfo,
+    policies: PolicySet,
     settings: dict[str, entry_settings.EntrySettings],
     training: TrainingTasks,
     eval_dataset: Any,
 ) -> tuple[Any, Any]:
     """The training and the evaluation workflow, of the run's workflow class, each built from its phase's
     :class:`~platoon.train.workflow.protocol.WorkflowSetup` (:func:`_workflow_setup`, :func:`_built`): each rolls out
-    its split's tasks on the policy (``model_info``), into the run directory; under entries with settings of their
-    own, each group runs with its entry's; and a workflow whose rollout workers fork from a fork server gets what that
+    its split's tasks on the policies its agents sample (``policies``), into the run directory; under entries with
+    settings of their own, each group runs with its entry's; the training workflow credits the groups of each entry
+    that sets a credit estimator with it, built here on the run's policies (the evaluation's never does, so an
+    evaluation never calls a teacher); and a workflow whose rollout workers fork from a fork server gets what that
     server imports and builds ahead of them (:func:`set_worker_preload`, over the training tasks and
     ``eval_dataset``)."""
 
     workflow_cls = components.workflow_cls
     group_kwargs = {**worker_package_kwargs(workflow_cls, config), **label_kwargs(workflow_cls, config)}
+    views = credit_registry.policy_views(policies) if components.credit else {}  # what estimators read of each
+    entry_credit = credit_registry.build_entry_credit(components.credit, settings, views)
     setups = [
-        _workflow_setup(phase, config, components, model_info, settings, group_kwargs) for phase in ("train", "eval")
+        _workflow_setup(phase, config, components, policies, settings, group_kwargs, entry_credit, views)
+        for phase in ("train", "eval")
     ]
     train_workflow = _built(workflow_cls, setups[0])
     eval_workflow = _built(workflow_cls, setups[1])
@@ -247,21 +309,29 @@ def _workflow_setup(
     phase: Phase,
     config: PlatoonTinkerRLTrainerConfig,
     components: _Components,
-    model_info: ModelInfo,
+    policies: PolicySet,
     settings: dict[str, entry_settings.EntrySettings],
     group_kwargs: dict[str, Any],
+    entry_credit: dict[str, Any] | None = None,
+    policy_views: Mapping[str, Any] | None = None,
 ) -> WorkflowSetup:
     """What ``phase``'s workflow is built with: the phase's rollout function, task loader and settings (``train`` or
-    ``eval``), each entry's own when an entry sets any, the run's one policy (``model_info``), the run directory, the
-    phase's stats scope and ``filter_errors`` (an environment's workflow arguments may set either), the reward
-    processor, the environments' packages and the run's label column for a workflow that runs rollout workers
-    (``group_kwargs``), and the environment's other workflow arguments."""
+    ``eval``), each entry's own when an entry sets any or, in training, a credit estimator (``entry_credit``, which
+    only training gets, with the policies as the estimators read them, ``policy_views``), the policies the agents
+    sample (``policies``: each one's model info, the agents' default first, and when there are several, which agent
+    samples which and the policies the run trains), the tools of the agent roles whose tools are limited
+    (``role_tools``), the run directory, the phase's stats scope and ``filter_errors`` (an environment's workflow
+    arguments may set either), the reward processor, the environments' packages and the run's label column for a
+    workflow that runs rollout workers (``group_kwargs``), and the environment's other workflow arguments."""
 
     training = phase == "train"
     section = config.train if training else config.eval
+    sampled = policies.sampled()
     options = {**group_kwargs, **(components.workflow_kwargs if training else components.eval_workflow_kwargs)}
+    entry_credit = (entry_credit or {}) if training else {}
     entry_configs = None
-    if entry_settings.sets_settings(config.environments):  # each group runs with its entry's settings
+    # Each group runs with its entry's settings, which name its entry, whose estimator credits it.
+    if entry_settings.sets_settings(config.environments) or entry_credit:
         if training:
             entry_configs = {label: own.train for label, own in settings.items()}
         else:
@@ -272,7 +342,7 @@ def _workflow_setup(
         get_task_fn=components.get_task_fn if training else components.eval_get_task_fn,
         config=section.workflow_config,
         entry_configs=entry_configs,
-        policies={MAIN: model_info},
+        policies={policy.id: policy.info for policy in sampled},
         # The run directory, the trainer's run_log_path.
         log_path=os.path.join(config.log_path, config.stats.experiment_name, config.stats.trial_name),
         stats_scope=options.pop("stats_scope", phase),
@@ -281,7 +351,20 @@ def _workflow_setup(
         packages=options.pop("packages", None),
         label_by=options.pop("label_by", None),
         options=options,
+        entry_credit=entry_credit,
+        policy_views=dict(policy_views or {}) if training else {},
+        **_several_policies(policies, sampled),
+        role_tools=policy_spec.role_tools(config),
     )
+
+
+def _several_policies(policies: PolicySet, sampled: list[Policy]) -> dict[str, Any]:
+    """What a workflow whose agents sample several policies is also built with: which agent samples which, and the
+    policies the run trains; nothing when they sample one."""
+
+    if len(sampled) < 2:
+        return {}
+    return {"agents": policies.agents, "trained": frozenset(policy.id for policy in policies.trainable())}
 
 
 def _built(workflow_cls: Any, setup: WorkflowSetup) -> Any:

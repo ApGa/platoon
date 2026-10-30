@@ -144,12 +144,25 @@ async def arun_eval(args: list[str] | None = None) -> dict[str, Any]:
             hosted = getattr(policy, "is_hosted", False)
             dialects = run_dialects(AutoEnvironment.environments(config)) if hosted else []
             await lock_policy(policy, output_dir, dialects)
+        # The toolchains the harnesses run from are staged on this node while the tasks are listed, ahead of the
+        # first rollout, and the node services the environments declare start (platoon.train.startup).
+        startup = await RolloutStartup.begin(AutoEnvironment.environments(config))
+    try:
+        return await _run_evaluation(config, output_dir, policy, startup)
+    finally:
+        if startup is not None:  # its node services stop before the evaluation reaps its sandboxes
+            await startup.close()
+
+
+async def _run_evaluation(
+    config: PlatoonEvalConfig, output_dir: str, policy: Any, startup: RolloutStartup | None
+) -> dict[str, Any]:
+    """The evaluation's rollouts and report, once its rollouts' startup began (``startup``, None for a report): its
+    tasks listed, its rollouts run once the startup is ready, and none started any more once the node services its
+    rollouts need failed (:meth:`RolloutStartup.on_node_service_failure`)."""
 
     dataset: list[Any] = []
     if config.stage != "report":
-        # The toolchains the harnesses run from are staged on this node while the tasks are listed, ahead of the
-        # first rollout (platoon.train.startup).
-        startup = await RolloutStartup.begin(AutoEnvironment.environments(config))
         exclusions: list[TaskExclusion] = []
         dataset = list(AutoDataset.from_config(config, config.split, exclusions=exclusions))
         record_exclusions(output_dir, exclusions)  # the lock.json platoon eval wrote there
@@ -170,6 +183,8 @@ async def arun_eval(args: list[str] | None = None) -> dict[str, Any]:
     runner = EvalRunner(workflow=workflow, output_dir=output_dir)
     if startup is not None:
         await startup.ready()
+        if startup.node_services is not None:
+            startup.on_node_service_failure(runner.stop)
     return await runner.arun(
         dataset=dataset,
         resume=config.inference.resume,

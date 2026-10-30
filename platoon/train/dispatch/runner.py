@@ -3,7 +3,7 @@ settling, or its decision first under the run's group admission rule.
 
 The functions here take the start's rollout source (:class:`~platoon.train.dispatch.source.RolloutSource`), whose
 dispatcher started the group, and read its parts: its workflow, per-task statistics, admission rules, watchdog and
-tracker.  ``_run_group`` runs any group of a workflow, an evaluation's too.
+tracker.  :func:`run_group_guarded` runs any group of a workflow, an evaluation's too.
 """
 
 import asyncio
@@ -12,9 +12,10 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from platoon.train.admissions import AdmissionSet
+from platoon.train.credit.runtime import CreditEstimatorError, settle_credit
 from platoon.train.dispatch.dispatcher import BoundDraw
 from platoon.train.dispatch.permits import DrawLease
-from platoon.train.dispatch.settled import _Settled, carries_datums, emptied
+from platoon.train.dispatch.settled import SettledGroup, carries_datums, emptied
 from platoon.train.leases import holding
 from platoon.train.trainer.waiting import _await_rollout_with_heartbeat
 from platoon.train.workflow.protocol import RolloutWorkflow, report_of
@@ -27,13 +28,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracker, watchdog: "Watchdog | None") -> None:
+def _group_done(output: Any, elapsed: float, task_id: Any, tracker: StatsTracker, watchdog: "Watchdog | None") -> None:
     """What a group that ended adds to the statistics: its time, with the group's own statistics when its report gives
     them (the step that consumes it records them, :func:`~platoon.train.dispatch.settled._record_group_stats`), else in
     ``tracker`` at once (a failed group, or a workflow's plain list); a log line for a slow one; and a watchdog
     heartbeat."""
 
-    report = report_of(rollout)
+    report = report_of(output)
     if report.group_stats is not None:
         report.group_stats.scalar(**{"rollout_completion/rollout_time": elapsed})
     else:
@@ -48,17 +49,20 @@ def _group_done(rollout: Any, elapsed: float, task_id: Any, tracker: StatsTracke
         watchdog.heartbeat()
 
 
-async def _run_group(
+async def run_group_guarded(
     workflow: RolloutWorkflow, row: dict[str, Any], *, watchdog: "Watchdog | None", tracker: StatsTracker
 ) -> Any:
     """Run the group of ``row`` and return its workflow's output; None for a workflow that raised, or whose own
     await was cancelled while this group was not (an inner task it awaited was cancelled): the group failed,
     which ``tracker`` records at once (``rollout_completion/failed_rollouts``), no group output carrying it to the
-    step that consumes the group.  A cancellation of the group itself goes on."""
+    step that consumes the group.  A cancellation of the group itself goes on, and so does the error of a credit
+    estimator (:class:`~platoon.train.credit.runtime.CreditEstimatorError`), which stops the run."""
 
     task_id = row.get("task_id", "unknown")
     try:
         return await _await_rollout_with_heartbeat(workflow.arun_episode(row), watchdog=watchdog)
+    except CreditEstimatorError:
+        raise
     except asyncio.CancelledError:
         current = asyncio.current_task()
         if current is None or current.cancelling():
@@ -73,31 +77,52 @@ async def _run_group(
 async def _run_training_group(source: "RolloutSource", draw: BoundDraw, lease: DrawLease) -> None:
     """Run the group of one of the source's draws, whose label slot and rollout permits are taken, with the draw's
     ``lease`` as its workflow's :func:`~platoon.train.leases.rollout_lease`: release them once its workflow returns
-    (calling ``lease``), record the group in the run's per-task statistics, and hand its output to the step that
-    dequeues it (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group admission
-    rule, the group is decided first (:func:`_settle_under_rule`)."""
+    (calling ``lease``), settle its credit estimator's state (:func:`~platoon.train.credit.runtime.settle_credit`),
+    record the group in the run's per-task statistics, and hand its output to the step that dequeues it
+    (:meth:`Dispatcher.settle`); a group that failed settles with no output.  Under a group admission rule, the group
+    is decided first (:func:`_settle_under_rule`).  Nothing is awaited from the settling of its credit to its hand-over
+    (:func:`_settle_group`), so a full checkpoint, which takes the estimators' state where it takes the groups it keeps,
+    holds both or neither; under independent stepping that section takes the commit lock, which a commit's capture
+    takes too."""
 
     dispatcher, tracker, watchdog = source.dispatcher, source.tracker, source.watchdog
     assert dispatcher is not None and tracker is not None  # the source started it
     start_time = time.perf_counter()
     try:
         with holding(lease):
-            rollout = await _run_group(source.workflow, draw.row, watchdog=watchdog, tracker=tracker)
+            output = await run_group_guarded(
+                source.workflow, source.episode_row(draw), watchdog=watchdog, tracker=tracker
+            )
     finally:
         lease()
-    _group_done(rollout, time.perf_counter() - start_time, draw.task_id, tracker, watchdog)
+    _group_done(output, time.perf_counter() - start_time, draw.task_id, tracker, watchdog)
+    if source.ledger is None:
+        _settle_group(source, draw, output)
+        return
+    async with source.ledger.lock:  # independent stepping: a commit captures the group wholly settled, or not at all
+        _settle_group(source, draw, output)
+
+
+def _settle_group(source: "RolloutSource", draw: BoundDraw, output: Any) -> None:
+    """The settle section of a group, with no await: its credit estimator's state settled, its record in the per-task
+    statistics, and the group handed to the step that dequeues it (under a group admission rule, decided first); when
+    the run's policies step independently, to the share ledger, which splits it into shares."""
+
+    dispatcher = source.dispatcher
+    assert dispatcher is not None  # the source started it
+    settle_credit(output)
     recorder = source.recorder
     record = (
-        recorder.settle(draw.row, entry=draw.entry, label=draw.label, output=rollout) if recorder is not None else None
+        recorder.settle(draw.row, entry=draw.entry, label=draw.label, output=output) if recorder is not None else None
     )
     if (admissions := source.admissions) is not None:
-        _settle_under_rule(source, admissions, draw, rollout, record)
+        _settle_under_rule(source, admissions, draw, output, record)
         return
-    dispatcher.settle(draw, _Settled(draw.entry, draw.label, rollout, record, draw.key))
+    dispatcher.settle(draw, SettledGroup(draw.entry, draw.label, output, record, draw.key))
 
 
 def _settle_under_rule(
-    source: "RolloutSource", admissions: AdmissionSet, draw: BoundDraw, rollout: Any, record: Any
+    source: "RolloutSource", admissions: AdmissionSet, draw: BoundDraw, output: Any, record: Any
 ) -> None:
     """Decide a settled group by the run's group admission rule (RFC 0019, section 6): an admitted group settles
     as any group does, with its reason; a rejected or failed one gets its fate at once (with the rule and its
@@ -108,22 +133,24 @@ def _settle_under_rule(
 
     dispatcher = source.dispatcher
     assert dispatcher is not None  # the source started it
-    decision, rule = admissions.at_settle(draw, rollout, record, now=source.version())
+    decision, rule = admissions.at_settle(draw, output, record, now=source.version())
     if decision.admit:
-        dispatcher.settle(draw, _Settled(draw.entry, draw.label, rollout, record, draw.key, admitted=decision.reason))
+        dispatcher.settle(
+            draw, SettledGroup(draw.entry, draw.label, output, record, draw.key, admitted=decision.reason)
+        )
         return
-    held = not carries_datums(rollout)  # before its datums are dropped
-    marker = _Settled(
+    held = not carries_datums(output)  # before its datums are dropped
+    marker = SettledGroup(
         draw.entry,
         draw.label,
-        emptied(rollout) if rollout is not None else None,
+        emptied(output) if output is not None else None,
         record,
         None,
         rejected=decision.reason,
         window=dispatcher.step,
         held=held,
     )
-    fate = "failed" if rollout is None else "rejected"
+    fate = "failed" if output is None else "rejected"
     recorder = source.recorder
     if recorder is not None and record is not None:
         recorder.fate(record, fate, rule=rule, admission=decision.reason)

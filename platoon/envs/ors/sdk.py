@@ -368,6 +368,21 @@ def terminal_arg(fn: Any) -> str | None:
     return fields[0] if len(fields) == 1 else None
 
 
+def class_tool_names(cls: Any) -> frozenset[str] | None:
+    """The names of every tool an in-process env class serves each session, its ``@terminal`` tool among them, when
+    its class declares them all (:func:`local_tools` lists the same, from a live env); None for a class that lists
+    tools of its own for each task (it overrides ``list_task_tools``) or that is no SDK environment."""
+
+    environment = import_sdk().Environment
+    if not (isinstance(cls, type) and issubclass(cls, environment)):
+        return None
+    if cls.list_task_tools is not environment.list_task_tools:
+        return None
+    listing = cls.list_tools()
+    terminal = getattr(listing, "terminal_tool", None)
+    return frozenset([*(spec.name for spec in listing.tools), *([terminal.name] if terminal is not None else [])])
+
+
 async def local_tools(env: Any) -> list[RawTool]:
     """Every tool an in-process env serves to a session, including a 0.1.163 ``@terminal`` tool.
 

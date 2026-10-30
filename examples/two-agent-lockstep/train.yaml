@@ -1,0 +1,30 @@
+# Two agents, two policies, trained in lockstep on the subagents example's Vault tasks: the delegator (the root
+# agent) samples main, the quickstart-size Qwen3-4B that train: declares, and every subagent it spawns (role
+# subagent) samples a second policy, worker, with its own LoRA adapter, optimizer and staleness bound. Each step
+# trains both, each on its rows of the step's groups. From the repository root:
+#
+#   export PYTHONPATH=$PWD/examples/subagents
+#   uv run platoon train examples/two-agent-lockstep/train.yaml                # needs TINKER_API_KEY
+#
+# The worker names no tinker_base_url, so it trains on the run's service, beside main, in a Tinker session of its
+# own; train-worker-service.yaml gives it a service of its own.
+
+extends: ../subagents/subagents.yaml
+
+policies:
+  worker:                         # trainable (the default): it steps with main, in every step
+    model_name: Qwen/Qwen3-4B-Instruct-2507
+    renderer_name: qwen3_instruct
+    lora_rank: 16                 # its own adapter
+    optimizer: {learning_rate: 1.0e-5}   # its own optimizer; its loss is train.loss_fn's
+    max_staleness: 2              # its rows may be 2 of its versions old; main's, train.max_staleness
+
+agents:
+  roles:
+    subagent: {policy: worker}    # the agents the delegator spawns (ctx.agents.spawn's default role)
+
+train:
+  max_staleness: 1                # main's bound, and the horizon's: the smallest bound of the two
+
+stats:
+  trial_name: delegator-and-worker

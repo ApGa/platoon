@@ -2,16 +2,18 @@
 and a plugin never imports a trainer.
 
 =========  ============================================================================================================
-generic    ``policy/``, ``objectives/``, ``trainer/{api,run,registry,hooks,signals,waiting}.py``, ``dispatch/``,
-           ``checkpoints/``, ``evaluation/``, ``workers/``, and the flat modules but ``launch.py``
+generic    ``policy/``, ``objectives/``, ``trainer/{api,run,clocks,registry,hooks,signals,waiting}.py``,
+           ``dispatch/``, ``checkpoints/``, ``evaluation/``, ``workers/``, ``supervised/``, and the flat modules but
+           ``launch.py``
 trainers   ``trainer/{rl,loops,state,sft,interleaved}.py``, ``step/``
 plugins    ``workflow/``, ``credit/``
 =========  ============================================================================================================
 
 Every import counts, a function's own, those under ``TYPE_CHECKING`` and relative ones (as the absolute import each
 is) included.  ``launch.py`` (which names the trainers), the package's exports (``platoon/train/__init__.py``) and the
-old paths' shims (``tinker/``) belong to no group.  The workflow's contract (``workflow/protocol.py``), which generic
-code calls the workflow through, is everyone's.  No import breaks the rule.
+old paths' shims (``tinker/``) belong to no group.  The workflow's contract (``workflow/protocol.py``) and what the run
+calls of the credit estimators (``credit/runtime.py``), through which generic code calls the workflow and the
+estimators, are everyone's.  No import breaks the rule.
 """
 
 from __future__ import annotations
@@ -22,13 +24,13 @@ import importlib.util
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parents[2] / "platoon" / "train"
-GENERIC_TRAINER_MODULES = {"api", "run", "registry", "hooks", "signals", "waiting"}
+GENERIC_TRAINER_MODULES = {"api", "run", "clocks", "registry", "hooks", "signals", "waiting"}
 TRAINER_MODULES = {"rl", "loops", "state", "sft", "interleaved"}
-GENERIC_PACKAGES = {"policy", "objectives", "dispatch", "checkpoints", "evaluation", "workers"}
+GENERIC_PACKAGES = {"policy", "objectives", "dispatch", "checkpoints", "evaluation", "workers", "supervised"}
 PLUGIN_PACKAGES = {"workflow", "credit"}
 UNGROUPED = {"launch", "__init__", "tinker"}
 # The contract modules that every group may import.
-CONTRACTS = {"platoon.train.workflow.protocol"}
+CONTRACTS = {"platoon.train.workflow.protocol", "platoon.train.credit.runtime"}
 # What each group may not import.
 FORBIDDEN = {"generic": {"trainers", "plugins"}, "plugins": {"trainers"}, "trainers": set()}
 

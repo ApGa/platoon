@@ -6,9 +6,11 @@ a cycle is an error.  Mappings deep-merge; anything else, lists included, replac
 
 The input paths a file names are relative to that file too (:func:`resolve_input_paths`): an environment's
 harness ``.toml`` spec and the options its service declares as naming files (``dataset_dir``, ``overlays``, a
-table's ``path``, ...), made absolute per file before the files merge.  One that names nothing there is a
-configuration error, which names the path relative to the working directory when that one exists.  An override's
-paths are relative to the working directory, and so are the outputs, ``log_path`` and ``inference.output_dir``.
+table's ``path``, ...), and the ``trainer_options`` its trainer declares so (sft's ``dataset_dir``), made absolute per
+file before the files merge.  One that names nothing there is a configuration error, which names the path relative to
+the working directory when that one exists.  Such a trainer option that no file or override sets takes its default
+relative to the config file (:func:`resolve_trainer_path_defaults`).  An override's paths are relative to the working
+directory, and so are the outputs, ``log_path`` and ``inference.output_dir``.
 The loaded config holds the input paths absolute, and a run's record (:func:`write_run_record`) the outputs too, so
 the record loads from any directory.
 
@@ -181,7 +183,9 @@ _GIT_ADDRESS = re.compile(r"^[\w.-]+@[\w.-]+:")  # git's scp-like address of a r
 def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path | None = None) -> list[str]:
     """Make the relative input paths of ``data``'s ``environments`` entries absolute against the directory ``base``,
     in place, and return the problems: a harness ``.toml`` spec path, and the options each entry's service declares
-    as naming files (``path_options``, :class:`platoon.envs.service.PathOption`).
+    as naming files (``path_options``, :class:`platoon.envs.service.PathOption`); and the ``trainer_options`` that
+    the trainer the file names declares as naming files (every core trainer's, in a file that names none:
+    :func:`~platoon.train.trainer.registry.trainer_path_options`).
 
     With ``source``, the config file ``data`` was read from (``base`` is its directory), each such path must name
     something there, unless the run writes it (``PathOption.written``): a problem names each one that does not, with
@@ -191,12 +195,20 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
     left as they are.
     """
 
-    environments = data.get("environments") if isinstance(data, Mapping) else None
-    if not isinstance(environments, list):
-        return []
     from platoon.envs.service import PathOption, service_path_options
 
     resolver = _InputPaths(Path(base), source)
+    trainer_options = data.get("trainer_options") if isinstance(data, Mapping) else None
+    if isinstance(trainer_options, dict):
+        from platoon.train.trainer.registry import trainer_path_options
+
+        for option in trainer_path_options(data.get("trainer")):
+            if trainer_options.get(option) is not None:
+                at = f"trainer_options.{option}"
+                trainer_options[option] = resolver.path(trainer_options[option], at, PathOption())
+    environments = data.get("environments") if isinstance(data, Mapping) else None
+    if not isinstance(environments, list):
+        return resolver.problems
     for index, entry in enumerate(environments):
         if not isinstance(entry, dict):
             continue
@@ -215,6 +227,10 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
             continue
         rules: Mapping[str, PathOption] = service_path_options(service)
         for option, rule in rules.items():
+            if "*" in option:  # a key of each mapping of a mapping, as node_services.*.binds[].source
+                parts = option.replace("[]", ".[]").split(".")
+                _resolve_each(options, parts, f"{where}.service_kwargs", resolver, rule)
+                continue
             name, listed, key = option.partition("[].")
             if not listed:
                 name, _, key = option.partition(".")
@@ -235,6 +251,46 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
                 ]
             else:
                 options[name] = resolver.path(value, at, rule)
+    return resolver.problems
+
+
+def _resolve_each(value: Any, parts: list[str], at: str, resolver: _InputPaths, rule: Any) -> Any:
+    """``value`` with the paths that ``parts`` name below it resolved (:func:`resolve_input_paths`): each segment a key,
+    ``*`` each value of a mapping, ``[]`` each item of a list."""
+
+    if not parts:
+        return resolver.path(value, at, rule)
+    head, *rest = parts
+    if head == "*" and isinstance(value, dict):
+        for key in value:
+            value[key] = _resolve_each(value[key], rest, f"{at}.{key}", resolver, rule)
+    elif head == "[]" and isinstance(value, list):
+        for index, item in enumerate(value):
+            value[index] = _resolve_each(item, rest, f"{at}.{index}", resolver, rule)
+    elif head not in ("*", "[]") and isinstance(value, dict) and value.get(head) is not None:
+        value[head] = _resolve_each(value[head], rest, f"{at}.{head}", resolver, rule)
+    return value
+
+
+def resolve_trainer_path_defaults(data: Any, config_path: str | os.PathLike[str] | None) -> list[str]:
+    """Each ``trainer_options`` key of the merged config's trainer that names files and that no file or override set,
+    at its default made absolute against the config file's directory (the working directory without one), in place,
+    as if the config file named it; the problems, one for each that names nothing there."""
+
+    trainer_options = data.get("trainer_options") if isinstance(data, Mapping) else None
+    if not isinstance(trainer_options, dict):
+        return []
+    from platoon.envs.service import PathOption
+    from platoon.train.trainer.registry import CORE_TRAINERS, trainer_path_options
+
+    trainer = data.get("trainer", "rl")
+    if trainer not in CORE_TRAINERS:  # loading the config refuses the name
+        return []
+    source = Path(config_path).expanduser().resolve() if config_path is not None else None
+    resolver = _InputPaths(source.parent if source is not None else Path.cwd(), source)
+    for option, default in trainer_path_options(trainer).items():
+        if option not in trainer_options and default is not None:
+            trainer_options[option] = resolver.path(default, f"trainer_options.{option} (its default)", PathOption())
     return resolver.problems
 
 
@@ -881,12 +937,27 @@ def _build(
         return tuple(items) if origin is tuple else items
     is_mapping, value_type = _mapping_value(annotation)
     if is_mapping and isinstance(value, Mapping):
-        found = {key: _build(value_type, item, _join(path, key)) for key, item in value.items()}
+        found = {key: _build_entry(value_type, item, _join(path, key)) for key, item in value.items()}
         for key, item in value.items():
             if isinstance(item, Mapping):
                 _keep_given(found[key], item)
         return found
     return value
+
+
+def _build_entry(annotation: Any, value: Any, path: str) -> Any:
+    """A mapping's entry ``value`` built as ``annotation``, at dotted ``path``: a section whose class refuses its values
+    says so naming the entry (``policies.worker: ...``), whose key the class itself never sees.  A refusal that names
+    its path already, or a configuration error, is raised as it is."""
+
+    try:
+        return _build(annotation, value, path)
+    except ConfigError:
+        raise
+    except ValueError as exc:
+        if _schema_fields(_strip(annotation)) is None or not isinstance(value, Mapping) or str(exc).startswith(path):
+            raise
+        raise ValueError(f"{path}: {exc}") from exc
 
 
 def _is_scalar(value: Any) -> bool:
@@ -1266,6 +1337,8 @@ def resolve_config(
         raise ConfigError(exc.problems, source=config_path) from None
     named_providers = _named_providers(data)
     data = _expand_named_environments(data, config_path)
+    if problems := resolve_trainer_path_defaults(data, config_path):
+        raise ConfigError(problems, source=config_path)
     # The files' input paths are absolute already; the overrides' and a named environment's are relative to the
     # working directory.  Outputs stay as given, relative to it too (a leading ~ expanded), and the run's record holds
     # them absolute.

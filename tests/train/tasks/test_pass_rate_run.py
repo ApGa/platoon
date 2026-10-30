@@ -37,13 +37,14 @@ from fakes.pass_rate import (
     trainer_arguments,
 )
 from fakes.tinker_service import FakeTinkerService, make_service_trainer
-from fakes.trainer import interrupt_at, make_trainer
+from fakes.trainer import draws_of, interrupt_at, make_trainer
 
 from platoon.experimental import Draw, Sampler
 from platoon.train.checkpoints.pruning import read_checkpoint_records
+from platoon.train.dispatch import setup as dispatch_setup
+from platoon.train.dispatch.source import RolloutSource
 from platoon.train.task_records import CHANGED_KEY
 from platoon.train.task_stats import TaskStatsStore, read_events
-from platoon.train.trainer import rl as rl_module
 
 
 def _run_once(tmp_path: Path, monkeypatch, train: dict[str, Any], environments: list[dict[str, Any]], *, seed: int = 0):
@@ -236,7 +237,7 @@ def test_a_resume_that_switches_an_entry_to_pass_rate_starts_it_afresh_on_the_ru
         for e in events
         if e["event"] == "draw" and e["start"] == 2 and e["sampler"] == "pass_rate@hard" and e["reason"] != "reissue"
     ]
-    member = second._dispatcher.samplers.entries["hard"]
+    member = draws_of(second).dispatcher.samplers.entries["hard"]
     assert made and member.decisions == len(made)  # afresh, at decision 0
     # It read the statistics the snapshot carried: its first decision saw groups of hard's tasks.
     assert any(
@@ -291,7 +292,7 @@ def test_changed_options_keep_the_state_and_the_same_options_written_out_change_
         for e in events
         if e["event"] == "draw" and e["start"] == 2 and e["sampler"] == "pass_rate@hard" and e["reason"] != "reissue"
     ]
-    assert second._dispatcher.samplers.entries["hard"].decisions == saved + len(made)  # its state loaded
+    assert draws_of(second).dispatcher.samplers.entries["hard"].decisions == saved + len(made)  # its state loaded
     assert any("environments[hard].task_sampler_options:" in change for entry in changed for change in entry["changes"])
     caplog.clear()
     _state, _second, _logged, _events, unchanged = _changed_resume(
@@ -311,7 +312,7 @@ def test_a_sampler_state_that_does_not_load_starts_the_sampler_afresh(tmp_path, 
         tmp_path, monkeypatch, caplog, (CAPPED, environments), (CAPPED, environments), 21
     )
     assert "does not load (KeyError: 'count'): it starts afresh" in caplog.text
-    assert second._dispatcher.samplers.entries["hard"].sampler.made >= 1
+    assert draws_of(second).dispatcher.samplers.entries["hard"].sampler.made >= 1
 
 
 # --- exactly once across two interrupts, with pass_rate on a capped entry -------------------------------------
@@ -320,15 +321,14 @@ def test_a_sampler_state_that_does_not_load_starts_the_sampler_afresh(tmp_path, 
 def test_a_run_with_pass_rate_on_a_capped_entry_interrupted_twice_consumes_every_position_once(tmp_path, monkeypatch):
     service = FakeTinkerService()
     restored: list[tuple[dict, dict]] = []
-    original = rl_module.PlatoonTinkerRLTrainer._restore_dispatch
+    original = RolloutSource.restore
 
-    def restore(self, dispatcher, resume_info, policy_version):
-        original(self, dispatcher, resume_info, policy_version)
-        record = resume_info.extra["dispatch"]
-        saved = json.loads((Path(self.run_log_path) / record["file"]).read_bytes())
+    def restore(self, dispatcher, record, policy_version):
+        original(self, dispatcher, record, policy_version)
+        saved = json.loads((Path(self.run_dir) / record.extra["dispatch"]["file"]).read_bytes())
         restored.append((saved["samplers"], json.loads(json.dumps(dispatcher.samplers.state()))))
 
-    monkeypatch.setattr(rl_module.PlatoonTinkerRLTrainer, "_restore_dispatch", restore)
+    monkeypatch.setattr(RolloutSource, "restore", restore)
     for interrupt in (17, 17, None):
         trainer, logged = _start(
             tmp_path,
@@ -385,8 +385,8 @@ def test_with_its_statistics_stopped_pass_rate_explores_and_says_so_once(tmp_pat
             {"task_sampler": "weighted", "max_training_steps": 6},
             [pool_entry("pool", task_sampler="pass_rate")],
         )
-    assert len(logged) == 6 and trainer._recorder.stopped
-    member = trainer._dispatcher.samplers.entries["pool"]
+    assert len(logged) == 6 and draws_of(trainer).recorder.stopped
+    member = draws_of(trainer).dispatcher.samplers.entries["pool"]
     assert member.fallbacks == 0
     assert caplog.text.count("statistics are not available") == 1
     # The statistics stopped at the first step's metrics: from the second step on, every decision explored.
@@ -398,5 +398,6 @@ def test_with_its_statistics_stopped_pass_rate_explores_and_says_so_once(tmp_pat
 def test_a_trainer_given_no_sampling_refuses_a_sampler_it_cannot_draw(tmp_path):
     config = run_config(tmp_path, {}, [pool_entry("a", task_sampler="pass_rate"), pool_entry("b")])
     trainer, _saves, _logged = make_trainer(config)
+    draws = RolloutSource(config, run_dir="", tasks=trainer._task_sources(), workflow=None, versions=dict)
     with pytest.raises(ValueError, match="entry and adaptive samplers need AutoDataset.training's sampling"):
-        trainer._samplers(None, "auto")
+        dispatch_setup._samplers(draws, None, "auto")

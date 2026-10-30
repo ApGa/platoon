@@ -1,0 +1,27 @@
+# The subagents example with subagents that may only read: each one reads the values under its keys and reports their
+# sum to the root, the only agent that may answer. From the repository root:
+#
+#   export PYTHONPATH=$PWD/examples/subagents
+#   uv run platoon train examples/subagents/read-only-subagents.yaml     # train with Tinker
+#
+# docs/how-to/train-and-eval.md (Limit the tools each role may call) explains agents.roles.<role>.tools.
+
+extends: subagents.yaml
+
+agents:
+  roles:
+    subagent:                     # the role of the children ctx.agents.spawn opens (delegate's)
+      tools: [read]               # they see and call read, and nothing else: an answer call comes back refused
+
+environments:                     # subagents.yaml's entry, but for child_grading: a subagent cannot answer, so it
+  - name: vault                   # shares the root's outcome (child_grading's default, none)
+    service: python://vault_env:VaultEnvironment
+    harness: example-delegator
+    package: delegator
+    agents:
+      max_depth: 1
+      child_max_steps: 6
+      fork: shared
+
+stats:
+  trial_name: read-only-subagents

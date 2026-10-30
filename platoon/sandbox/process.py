@@ -407,7 +407,7 @@ class ProcessProvider:
     """Sandboxes as host directories below ``root``; snapshots are directory copies; stacks of such sandboxes."""
 
     name = "process"
-    capabilities = frozenset({"snapshot", "routes", "host_loopback", "stacks"})
+    capabilities = frozenset({"snapshot", "routes", "host_loopback", "stacks", "externals"})
     # Commands run on the host as this user: a site profile may not choose it (platoon.site), and platoon train
     # refuses it for a Harbor entry unless the run config names it.
     isolates = False

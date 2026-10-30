@@ -1,0 +1,14 @@
+[
+  {"instruction": "Name the largest planet in the solar system.", "input": "", "output": "Jupiter is the largest planet in the solar system."},
+  {"instruction": "Translate the sentence into French.", "input": "The library opens at nine.", "output": "La bibliotheque ouvre a neuf heures."},
+  {"instruction": "Add the two numbers.", "input": "17 and 25", "output": "17 + 25 = 42."},
+  {"instruction": "Give a synonym for the word.", "input": "rapid", "output": "A synonym for rapid is quick."},
+  {"instruction": "Summarize the text in one sentence.", "input": "Bees visit flowers to collect nectar. While they do, pollen sticks to their bodies and travels to the next flower, which lets the plants make seeds.", "output": "Bees pollinate flowers while they collect nectar, which helps the plants make seeds."},
+  {"instruction": "Is the number prime?", "input": "91", "output": "No: 91 = 7 x 13."},
+  {"instruction": "Write a haiku about rain.", "input": "", "output": "Soft rain on the roof\nthe garden drinks in silence\nclouds drift toward the hills"},
+  {"instruction": "Sort the words alphabetically.", "input": "pear, apple, fig", "output": "apple, fig, pear"},
+  {"instruction": "Answer as a pirate would.", "input": "Where is the treasure?", "output": "Arr, the treasure be buried under the old palm, matey!", "system": "You are a cheerful pirate."},
+  {"instruction": "And how deep is it buried?", "input": "", "output": "Ten paces down, where the sand turns dark!", "system": "You are a cheerful pirate.", "history": [["Where is the treasure?", "Arr, under the old palm, matey!"]]},
+  {"instruction": "Convert the temperature to Fahrenheit.", "input": "20 degrees Celsius", "output": "20 degrees Celsius is 68 degrees Fahrenheit."},
+  {"instruction": "What is the capital of Japan?", "input": "", "output": "The capital of Japan is Tokyo."}
+]

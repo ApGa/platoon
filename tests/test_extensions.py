@@ -157,7 +157,7 @@ def test_listing_reads_metadata_and_imports_nothing(acme):
     ]:
         info = rows[(kind, name)]
         assert (info.distribution, info.version, info.status, info.builtin) == ("acme-platoon", "1.4.0", "ok", False)
-        assert info.requires == ("platoon>=0.4,<0.5",)
+        assert info.requires == ("platoon>=0.5,<0.6",)
     assert rows[("harness", "platoon-codeact@1")].builtin
     assert rows[("program", "single@1")].distribution == "platoon"
 

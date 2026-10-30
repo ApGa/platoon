@@ -26,7 +26,7 @@ from platoon.train.admission_api import (
     resolve_group_admission,
 )
 from platoon.train.admissions import AdmissionSet, AdmitAll, Informative, InformativeOptions, choose_admissions
-from platoon.train.dispatch.settled import _Settled
+from platoon.train.dispatch.settled import SettledGroup
 from platoon.train.sampler_api import TaskStatsView
 from platoon.train.task_stats import MAIN, GroupRecord, MemberResult, TaskStatsStore
 
@@ -519,7 +519,7 @@ def test_a_step_judges_each_group_by_its_report_s_verdict_when_the_run_keeps_no_
     config = make_config(train={"group_admission": "informative", "max_staleness": 1})
     admissions = AdmissionSet(choose_admissions(config, check=False), samplers=None, batch_size=2, label_column="c")
     for verdict in ("trained", "uniform"):
-        admissions.dequeued(None, "admitted", _Settled(None, None, _Judged(verdict)))
+        admissions.dequeued(None, "admitted", SettledGroup(None, None, _Judged(verdict)))
 
     metrics = admissions.step_metrics(prefixes={}, counted=2, admitted=2, draws=None)
     assert [value for key, value in metrics.items() if key.endswith("informative_rate")] == [0.5]

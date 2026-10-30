@@ -10,7 +10,8 @@ the generic driver (:func:`platoon.sandbox.stacks.drive_stack`), which orders th
   process's cleanup labels and ``platoon.stack``, the services' aliases among its host names, and the upstreams of the
   services' sandboxes (``main``'s gateway), which the holder relays from ports of the pod's loopback to the host's Unix
   sockets: the first ports from 18080 on that no service declares.  An upstream that is not a Unix socket is refused,
-  since nothing in a pod reaches another host service.
+  since nothing in a pod reaches another host service.  Each of the stack's external services (a node service) is an
+  upstream too, at its own port, and its name and aliases are host names of the pod.
 - **Each service** runs its image with its final argv (or idles, as ``main`` does), its environment, working
   directory, mounts and memory limit, its ``shm_size`` and ``ulimits``, and a run mode (:data:`RunMode`): ``main`` runs
   as ``root`` (your uid, as a single sandbox's commands do); a sidecar whose image runs its command as a user other
@@ -180,7 +181,8 @@ async def start_pod_stack(provider: HpcProvider, spec: StackSpec) -> DrivenStack
 
 def _pod_upstreams(spec: StackSpec) -> tuple[dict[str, str], dict[str, int]]:
     """The upstreams of the stack's services, by name, and the pod's port for each: the first from 18080 on that no
-    service declares.  ``ValueError`` for one that is not a Unix socket, or a name given two sockets."""
+    service declares, and an external service's own port.  ``ValueError`` for one that is not a Unix socket, a name
+    given two sockets, or an external service named like an upstream of a service."""
 
     upstreams: dict[str, str] = {}
     for name, service in spec.services.items():
@@ -192,7 +194,10 @@ def _pod_upstreams(spec: StackSpec) -> tuple[dict[str, str], dict[str, int]]:
                 )
             if upstreams.setdefault(upstream.name, upstream.url) != upstream.url:
                 raise ValueError(f"The services of a pod name two sockets for the upstream {upstream.name!r}")
+    if clash := sorted(set(upstreams) & set(spec.externals)):
+        raise ValueError(f"The external service {clash[0]!r} of a pod is named like an upstream of its services")
     declared = {port for service in spec.services.values() for port in service.ports}
+    declared |= {external.port for external in spec.externals.values()}
     ports: dict[str, int] = {}
     port = FIRST_PORT
     for name in sorted(upstreams):
@@ -200,14 +205,20 @@ def _pod_upstreams(spec: StackSpec) -> tuple[dict[str, str], dict[str, int]]:
             port += 1
         ports[name] = port
         port += 1
+    for name, external in spec.externals.items():
+        upstreams[name] = f"unix://{external.socket}"
+        ports[name] = external.port
     return upstreams, ports
 
 
 def _host_aliases(spec: StackSpec) -> list[str]:
-    """The names the services answer to besides their own (compose's ``hostname`` and network aliases), which every
-    service of a pod resolves to the pod's one loopback address, as it resolves their names."""
+    """The names the services answer to besides their own (compose's ``hostname`` and network aliases), and the names
+    and aliases of the external services, whose relays listen there: every service of a pod resolves each one to the
+    pod's one loopback address, as it resolves the services' names."""
 
-    return sorted({alias for service in spec.services.values() for alias in service.aliases} - set(spec.services))
+    aliases = {alias for service in spec.services.values() for alias in service.aliases}
+    aliases |= {alias for name, external in spec.externals.items() for alias in (name, *external.aliases)}
+    return sorted(aliases - set(spec.services))
 
 
 async def _run_modes(provider: HpcProvider, spec: StackSpec) -> dict[str, RunMode]:

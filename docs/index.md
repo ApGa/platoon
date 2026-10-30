@@ -102,6 +102,7 @@ platoon train my_run.yaml
   [episode programs and reward shaping](tutorials/programs.md).
 
 **How-to guides**: [configs](how-to/configs.md), [training and evaluation](how-to/train-and-eval.md),
+[fine-tuning on a dataset](how-to/train-and-eval.md#fine-tune-on-a-dataset),
 [evaluating a hosted model](how-to/evaluate-hosted-models.md),
 [models and tool calling](how-to/models-and-tool-calling.md),
 [sandboxes and Harbor tasks](how-to/sandboxes-and-harbor.md), [how Harbor tasks are graded](how-to/harbor-grading.md),
@@ -115,14 +116,15 @@ platoon train my_run.yaml
 [judges and verifiers](extending/judges-and-verifiers.md), [sandbox providers](extending/sandbox-providers.md),
 [renderers and tool-call parsers](extending/renderers.md),
 [hooks, telemetry and metrics](extending/hooks-and-metrics.md) and, experimental,
-[task samplers](extending/task-samplers.md), [group admission rules](extending/group-admission.md) and
-[rollout leases](extending/rollout-leases.md).
+[task samplers](extending/task-samplers.md), [group admission rules](extending/group-admission.md),
+[rollout leases](extending/rollout-leases.md), [step hooks](extending/step-hooks.md) and
+[credit estimators](extending/credit-estimators.md).
 
 **Reference**: [CLI](reference/cli.md), [config](reference/config.md), [Python API](reference/api.md),
 [experimental API](reference/experimental.md).
 
-**Background**: [Architecture](architecture.md) explains the design; the [RFCs](rfcs/README.md) propose what
-comes next.
+**Background**: [Architecture](architecture.md) explains the design; [the training code](training-code.md) maps the
+trainer's code for contributors; the [RFCs](rfcs/README.md) propose what comes next.
 
 ## Coming from the original platoon?
 

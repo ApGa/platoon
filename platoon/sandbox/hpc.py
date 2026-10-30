@@ -61,7 +61,7 @@ from platoon.sandbox._processes import kill_other_processes, own_processes
 from platoon.sandbox.base import CAPABILITIES, DownloadReport, DroppedLink, ExecResult, SandboxSnapshot, SandboxSpec
 from platoon.sandbox.hpc_stacks import pods_refusal, start_pod_stack
 from platoon.sandbox.routes import SandboxRoutes
-from platoon.sandbox.stacks import STACKS, DrivenStack, StackSpec
+from platoon.sandbox.stacks import EXTERNALS, STACKS, DrivenStack, StackSpec
 from platoon.utils.stopping import let_finish
 
 logger = logging.getLogger(__name__)
@@ -244,10 +244,11 @@ class HpcProvider:
         self.inner = getattr(self.hpc_sandbox, self.inner_class)(**options)
         # Of the inner provider's capabilities, those of platoon's contract, and the adapter's own: both runtimes run a
         # sandbox on this node, in this host's network namespace unless it has none of its own, and stacks as pods
-        # where hpc-sandbox's pods can run them.
+        # where hpc-sandbox's pods can run them, which reach node services through their relays.
         inner = frozenset(self.inner.capabilities) & CAPABILITIES
         pods = "pods" in self.inner.capabilities and pods_refusal(self.name, self.inner_class) is None
-        self.capabilities: frozenset[str] = inner | {"routes", "host_loopback"} | ({STACKS} if pods else set())
+        stacks = {STACKS, EXTERNALS} if pods else set()
+        self.capabilities: frozenset[str] = inner | {"routes", "host_loopback"} | stacks
 
     @classmethod
     def network_none_refusal(cls, options: Mapping[str, Any]) -> str | None:

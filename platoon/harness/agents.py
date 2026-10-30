@@ -27,9 +27,11 @@ The semantics are the legacy ``launch_subagent``'s, on the agent tree:
    out, a timeout its harness reports included (``AgentResult("timeout")``, say CodeAct's cell timeout).  A
    failing child never raises into its parent: it comes back with an error status and the legacy failure text.
 4. **Grading** (``agents.child_grading``): ``env`` grades the child's forked session; ``verifier`` runs a
-   read-only verifier agent (:mod:`platoon.harness.verify`); ``none`` leaves the child to share the episode
-   outcome.  A child whose verifier does not run (the run's judges are off, or verifiers are switched off) shares
-   the episode outcome too, and its trajectory says why (``child_grading``, :mod:`platoon.utils.judges`).  A child
+   read-only verifier agent (:mod:`platoon.harness.verify`) under the child, whose tool access
+   (``agents.verifier.access``) and tool allowlists (its spawner's and its role's, ``agents.roles.<role>.tools``)
+   are its own, not the child's; ``none`` leaves the child to share the episode outcome.  A child whose verifier
+   does not run (the run's judges are off, or verifiers are switched off) shares the episode outcome too, and its
+   trajectory says why (``child_grading``, :mod:`platoon.utils.judges`).  A child
    whose harness crashed, timed out or was cancelled gets the matching untrainable outcome
    without grading, as the root does; one that crashed after filling its context window is still graded, by its
    env or its verifier, with reason ``context_overflow`` (``platoon.harness.inline.with_reason``).  A child cut
@@ -81,6 +83,7 @@ from platoon.harness.verify import (
     verifier_task_misc,
 )
 from platoon.utils.judges import CHILD_GRADING_MISC_KEY, JUDGES_OFF, grading_fallback
+from platoon.utils.role_tools import allowlists_of
 from platoon.utils.trajectory_status import trajectory_has_forced_zero_reward
 
 if TYPE_CHECKING:
@@ -349,7 +352,8 @@ async def _launch(
 
     The reservation is the spawner's and is released as soon as the child returns.  On success the child's
     session is still open (the caller grades and closes it).  The child runs in a task of its own, so what its
-    harness does to context variables stays there; cancelling the caller cancels it.
+    harness does to context variables stays there; cancelling the caller cancels it.  A verifier opens under the
+    child it judges (``tree_parent``), but with the tool allowlists of its spawner and its role, not the child's.
     """
 
     runtime = spawner.runtime
@@ -373,6 +377,8 @@ async def _launch(
             )
         try:
             agent = runtime.gateway.open_subagent(tree_parent, role=role, goal=goal, max_steps=max_steps, access=access)
+            if tree_parent is not spawner.agent:  # a verifier: the child's role does not limit its tools
+                agent.tool_allowlists = allowlists_of(role, runtime.gateway.role_tools, spawner.agent.tool_allowlists)
             child = InlineAgentContext(
                 runtime,
                 agent,
@@ -403,7 +409,8 @@ async def _launch(
 async def _warn_if_toolless(verifier: InlineAgentContext) -> None:
     """Say once per environment and tool access when a verifier sees no tools: it then judges from the transcript
     alone.  ``read_only`` (the default) lists only tools that declare ``read_only``: on an env server, a tool says so
-    only through the ``read_only_tools`` or ``tool_meta`` options, and Harbor's generic tools never do."""
+    only through the ``read_only_tools`` or ``tool_meta`` options, and Harbor's generic tools never do.  A verifier
+    whose roles limit its tools (``agents.roles.<role>.tools``) is told which they allow."""
 
     try:
         tools = await verifier.list_tools()
@@ -417,12 +424,16 @@ async def _warn_if_toolless(verifier: InlineAgentContext) -> None:
     if key in _WARNED_TOOLLESS_VERIFIERS:
         return
     _WARNED_TOOLLESS_VERIFIERS.add(key)
+    allowlists = verifier.agent.tool_allowlists
+    allowed = "; ".join(f"{allowlist.role}: {', '.join(allowlist.patterns) or 'none'}" for allowlist in allowlists)
     logger.warning(
-        "Verifier agents on %s see no tools with %s access, so they judge children from the transcript alone. "
+        "Verifier agents on %s see no tools with %s access%s, so they judge children from the transcript alone. "
         "Mark the tools a verifier may use read-only (the read_only_tools option, platoon_read_only_tools, or a "
-        "readOnlyHint in tool_meta), or give verifiers another access (agents.verifier.access)",
+        "readOnlyHint in tool_meta), or give verifiers another access (agents.verifier.access)%s",
         environment,
         verifier.access,
+        f" and the tools their roles allow ({allowed})" if allowlists else "",
+        " or other tools (agents.roles.<role>.tools)" if allowlists else "",
     )
 
 

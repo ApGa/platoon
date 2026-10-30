@@ -370,12 +370,12 @@ def test_a_member_waiting_for_its_slot_is_waiting_and_its_slot_wait_joins_its_st
     is exactly 0, and the group started together."""
 
     calls = {member: asyncio.Event() for member in range(4)}
-    admissions: list[members_module._GroupAdmission] = []
+    passes: list[members_module.StartupPass] = []
 
     class Recording(ScriptedMembers):
-        async def _admit_group(self, group_size):
-            admissions.append(await super()._admit_group(group_size))
-            return admissions[-1]
+        async def _enter_startup_gate(self, group_size):
+            passes.append(await super()._enter_startup_gate(group_size))
+            return passes[-1]
 
     async def script(row, member):
         await calls[member].wait()
@@ -394,8 +394,8 @@ def test_a_member_waiting_for_its_slot_is_waiting_and_its_slot_wait_joins_its_st
 
     async def run():
         group = asyncio.ensure_future(workflow(2).arun_episode({"task_id": "t", POSITION_COLUMN: 0}))
-        await until(lambda: admissions and len(admissions[0].starts.waiting) == 2)
-        starts = admissions[0].starts
+        await until(lambda: passes and len(passes[0].starts.waiting) == 2)
+        starts = passes[0].starts
         assert starts.waiting == {2, 3} and starts.offset(2) is None and not starts.together()
         await asyncio.sleep(0.05)
         calls[0].set()
@@ -405,9 +405,9 @@ def test_a_member_waiting_for_its_slot_is_waiting_and_its_slot_wait_joins_its_st
         for event in calls.values():
             event.set()
         await asyncio.wait_for(group, 10)
-        admissions.clear()
+        passes.clear()
         await asyncio.wait_for(workflow(4).arun_episode({"task_id": "t", POSITION_COLUMN: 1}), 10)
-        assert admissions[0].starts.together() and not any(admissions[0].starts._waited.values())
+        assert passes[0].starts.together() and not any(passes[0].starts._waited.values())
 
     asyncio.run(run())
     get_tracker("test_sl_offsets").export(reset=True)

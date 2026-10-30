@@ -139,7 +139,7 @@ def test_a_profile_takes_four_keys_and_says_what_it_is_for(tmp_path):
 
     problems = caught.value.problems
     assert problems[0] == "cahce: unknown key; did you mean cache?"
-    assert problems[1].startswith("model_name: unknown key; a site profile takes cache, runs, provider and")
+    assert problems[1].startswith("model_name: unknown key; a site profile takes cache, runs, provider, provider_")
     assert "never what trains" in problems[1]
     assert str(path) in str(caught.value)
 

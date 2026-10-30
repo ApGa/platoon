@@ -10,7 +10,7 @@ import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, get_args
 
 from platoon.config_defs import RolloutConfig
 from platoon.deprecations import deprecated_keys, removed_hint
@@ -24,7 +24,9 @@ from platoon.train.components import (
     _sampler_checks,
     normalize_environment_configs,
 )
-from platoon.train.trainer.registry import trainer_problems
+from platoon.train.policy.spec import Stepping, policy_problems
+from platoon.train.trainer.registry import rolls_out, trainer_problems
+from platoon.train.workflow.protocol import StaleFilterSetting
 from platoon.utils.config import ConfigError, value_hint
 from platoon.utils.stats_logger import StatsLoggerConfig, WandBConfig
 
@@ -74,6 +76,7 @@ class WorkflowConfig:
 
     UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
         "max_starting_rollouts": "a key of train, not of a workflow config: train.max_starting_rollouts",
+        "stale_filter": "a key of train, not of a workflow config: train.stale_filter",
         # Keys a release removed, with what replaces them (platoon.deprecations).
         "straggler_policy_key": STRAGGLER_POLICY_KEY_REMOVED,
     }
@@ -377,9 +380,39 @@ class RefillConfig:
             raise ValueError(f"train.refill.max_groups_per_step: {problem}")
 
 
+# The ``train:`` keys that only the rl trainer reads (RFC 0021): its batch, its duration, its loss, its stepping and its
+# rollouts.  The others declare the policy every trainer trains (``main``: its model, renderer, adapter and optimizer)
+# and the deadlines of its updates.  Under another trainer, setting one of these is a load error
+# (platoon.train.trainer.registry).
+RL_ONLY_TRAIN_KEYS = (
+    "batch_size",
+    "num_epochs",
+    "max_training_steps",
+    "num_minibatches",
+    "num_microbatches",
+    "max_staleness",
+    "stale_filter",
+    "stepping",
+    "loss_fn",
+    "loss_fn_config",
+    "workflow_config",
+    "max_concurrent_rollouts",
+    "permit_release",
+    "max_starting_rollouts",
+    "label_by",
+    "rollout_group_limits",
+    "task_sampler",
+    "task_sampler_options",
+    "group_admission",
+    "group_admission_options",
+    "refill",
+)
+
+
 @dataclass
 class TrainConfig:
-    """The ``train:`` section: the model, the batch, the loss, the optimizer and the rollout workflow."""
+    """The ``train:`` section: the model, the batch, the loss, the optimizer and the rollout workflow.  Under a trainer
+    other than ``rl``, it declares the policy that trainer trains, and the keys only ``rl`` reads stay unset."""
 
     UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
         **_HOSTED_HINTS,
@@ -451,6 +484,22 @@ class TrainConfig:
     # started and not yet trained. An environment entry may raise its own groups' bound
     # (``environments[].max_staleness``); the run's stays the bound on how far rollouts run ahead.
     max_staleness: int | None = None
+    # How the stale filter judges a group against its bound (experimental): ``group`` (the default) by its oldest
+    # datum, dropping the whole group when that one is too old; ``datum`` each datum by the oldest policy version its
+    # own model calls sampled, dropping only the datums that are too old, the others keeping the advantages their
+    # group's credit gave them, and the whole group only when every datum is. A rollout that spans a published policy
+    # then keeps the datums it sampled since. Under ``datum`` a workflow that does not stamp each datum with its own
+    # version (``GroupRolloutWorkflow`` does) has each datum judged by its rollout's (see
+    # docs/how-to/train-and-eval.md).
+    stale_filter: StaleFilterSetting = "group"
+    # How the run's trained policies step, when it trains several (experimental): ``lockstep`` (the default), every
+    # policy in each step, on its rows of the step's batch_size groups, each checkpoint saving them all; or
+    # ``independent``, each policy on its own clock, with its own batch (``policies.<id>.batch_size``), staleness bound
+    # and checkpoint cadence (``policies.<id>.checkpoint``), no policy waiting for another's training or saves, and
+    # every full save of any policy a point a resume can start from. With one trained policy both are the same. A
+    # resume keeps the run's stepping. Only the rl trainer reads it: trainer: sft, which trains one policy, refuses it.
+    # See docs/how-to/train-and-eval.md.
+    stepping: Stepping = "lockstep"
     optimizer: AdamParams = field(default_factory=AdamParams)
     # Tinker loss function, for example ``cispo`` or ``importance_sampling``.
     loss_fn: str = "cispo"
@@ -536,16 +585,7 @@ class TrainConfig:
     def __post_init__(self):
         rollouts = self.batch_size * self.workflow_config.group_size  # every rollout of a batch
         self.max_concurrent_rollouts = rollouts_at_once("train", self, default=rollouts)
-        seconds = self.sample_timeout_seconds
-        if seconds is not None and (
-            isinstance(seconds, bool)
-            or not isinstance(seconds, (int, float))
-            or not math.isfinite(seconds)
-            or seconds <= 0
-        ):
-            raise ValueError(
-                f"train.sample_timeout_seconds must be a positive number of seconds or null, got {seconds!r}"
-            )
+        _check_sample_timeout("train.sample_timeout_seconds", self.sample_timeout_seconds)
         sampler = self.task_sampler if self.task_sampler is not None else "auto"
         if not isinstance(sampler, str) or not sampler:  # which names a sampler is the trainer config's to say
             raise ValueError(f"train.task_sampler must name a task sampler, got {sampler!r}")
@@ -573,11 +613,153 @@ class TrainConfig:
             raise ValueError("rollout_group_limits requires nonempty labels and positive integer capacities")
         if self.permit_release not in ("group", "rollout"):
             raise ValueError(f"train.permit_release must be 'group' or 'rollout', got {self.permit_release!r}")
+        if self.stale_filter not in get_args(StaleFilterSetting):
+            raise ValueError(f"train.stale_filter must be 'group' or 'datum', got {self.stale_filter!r}")
+        if self.stepping not in get_args(Stepping):
+            raise ValueError(f"train.stepping must be 'lockstep' or 'independent', got {self.stepping!r}")
         limit = self.max_starting_rollouts
         if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
             raise ValueError(
                 f"train.max_starting_rollouts must be a whole number, 1 or more, or null for no limit, got {limit!r}"
             )
+
+
+def _check_sample_timeout(key: str, seconds: Any) -> None:
+    """Refuse a ``sample_timeout_seconds`` (``key``, as the message names it) that is neither null nor a positive
+    number of seconds."""
+
+    if seconds is not None and (
+        isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or seconds <= 0
+    ):
+        raise ValueError(f"{key} must be a positive number of seconds or null, got {seconds!r}")
+
+
+@dataclass
+class PolicyCheckpointConfig:
+    """``policies.<id>.checkpoint``: when a policy the run trains saves full checkpoints, under ``train.stepping:
+    independent``, counted in its own steps.  A key left out is the run's (``checkpoint.every``, in steps, and
+    ``checkpoint.recovery_every``)."""
+
+    # Its own steps between permanent checkpoints; 0 saves none (None: checkpoint.every, in steps).
+    every: int | None = None
+    # Its own steps between recovery checkpoints (None: checkpoint.recovery_every). With checkpoint.keep_recovery,
+    # keep_recovery × this must exceed the policy's bound (its max_staleness, else the run's largest), which its own
+    # pruner keeps.
+    recovery_every: int | None = None
+
+    def __post_init__(self) -> None:
+        every, recovery = self.every, self.recovery_every
+        if every is not None and (isinstance(every, bool) or not isinstance(every, int) or every < 0):
+            raise ValueError(f"checkpoint.every must be a number of the policy's steps, or 0 for never, got {every!r}")
+        if recovery is not None and (isinstance(recovery, bool) or not isinstance(recovery, int) or recovery < 1):
+            raise ValueError(f"checkpoint.recovery_every must be 1 or more, or null, got {recovery!r}")
+
+
+@dataclass
+class PolicyConfig:
+    """A ``policies:`` entry: a model the run trains, samples or scores with besides ``main``, under ``train:``'s names
+    for the same settings (experimental).  A policy the run trains (``trainable``, the default) steps with main, in
+    lockstep (``train.stepping``, the default: each step trains every trained policy on its rows of the step's groups,
+    and each checkpoint saves them all) or on its own clock (``independent``: its own batch and checkpoint cadence),
+    each on its own Tinker service with its own optimizer and loss.  A frozen one (``trainable: false``) is sampled by
+    the agents ``agents:`` binds to it or scores for a credit estimator (a teacher), and is never stepped, saved or
+    pruned."""
+
+    # Hugging Face model name of the base model.
+    model_name: str
+    # Renderer that turns chat messages into the model's tokens, as train.renderer_name.
+    renderer_name: str
+    # Renderer attribute overrides, as train.renderer_kwargs.
+    renderer_kwargs: dict = field(default_factory=dict)
+    # Its context window, as train.context_window_length.
+    context_window_length: int | None = None
+    # The bound on one of its sampling calls, as train.sample_timeout_seconds.
+    sample_timeout_seconds: float | None = None
+    # Its Tinker service (None: the run's tinker_base_url, else TINKER_BASE_URL, else hosted Tinker).  It opens a
+    # session of its own there, also on the run's service.
+    tinker_base_url: str | None = None
+    # Whether the run trains it (false: a frozen policy, which only samples or scores).
+    trainable: bool = True
+    # Rank of the LoRA adapter the run trains, as train.lora_rank (None: train.lora_rank).
+    lora_rank: int | None = None
+    # A trained policy's: the weights its new run starts from (a ``tinker://`` state path; None: its base model's). A
+    # frozen policy's: the sampler it serves (a ``tinker://`` sampler path; None: its base model).
+    load_checkpoint_path: str | None = None
+    # With load_checkpoint_path, a trained policy's new run takes that checkpoint's optimizer state too (Adam's
+    # moments): a new trial that goes on from it. Otherwise its optimizer starts fresh.
+    load_optimizer_state: bool = False
+    # A trained policy's optimizer, as train.optimizer (None: train.optimizer).
+    optimizer: AdamParams | None = None
+    # The loss a trained policy's rows train under, as train.loss_fn (None: train.loss_fn), and its keyword arguments
+    # (None: train.loss_fn_config when the loss is train.loss_fn's, else none, the loss's own defaults).
+    loss_fn: str | None = None
+    loss_fn_config: dict | None = None
+    # How many of the trained policy's own versions old its rows may be and still train (None: their entry's bound,
+    # else train.max_staleness). The dispatcher's horizon counts the smallest bound of the trained policies that agents
+    # sample, train.max_staleness included when main's is unset.
+    max_staleness: int | None = None
+    # Under train.stepping: independent, how many of the policy's shares (its rows of a group) each of its steps trains
+    # (None: train.batch_size); a smaller batch steps more often.
+    batch_size: int | None = None
+    # Under train.stepping: independent, when the policy saves full checkpoints, counted in its own steps (None: the
+    # run's checkpoint.every and checkpoint.recovery_every, in its steps).
+    checkpoint: PolicyCheckpointConfig | None = None
+
+    def __post_init__(self) -> None:
+        # As train:'s own; the loader checks the keys' types, as it does train:'s, and names the entry in front of a
+        # refusal (policies.<id>: ...), whose id the entry does not know.
+        _check_sample_timeout("sample_timeout_seconds", self.sample_timeout_seconds)
+        _check_training_keys(self)
+
+
+def _check_training_keys(policy: PolicyConfig) -> None:
+    """Refuse a ``policies:`` entry's training keys that no run could take, as ``train:``'s own are refused (the loader
+    checks their types): an adapter rank below 1, a negative staleness bound, an empty loss name and a batch below 1,
+    each named by its key; the loader puts the entry's path in front (``policies.worker: lora_rank ...``), since the
+    entry does not know its id."""
+
+    rank = policy.lora_rank
+    if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int) or rank < 1):
+        raise ValueError(f"lora_rank must be a whole number, 1 or more, or null, got {rank!r}")
+    bound = policy.max_staleness
+    if bound is not None and (isinstance(bound, bool) or not isinstance(bound, int) or bound < 0):
+        raise ValueError(f"max_staleness must be a whole number of versions, 0 or more, or null, got {bound!r}")
+    if policy.loss_fn is not None and (not isinstance(policy.loss_fn, str) or not policy.loss_fn):
+        raise ValueError(f"loss_fn must name a Tinker loss, or be null, got {policy.loss_fn!r}")
+    batch = policy.batch_size
+    if batch is not None and (isinstance(batch, bool) or not isinstance(batch, int) or batch < 1):
+        raise ValueError(f"batch_size must be a whole number, 1 or more, or null, got {batch!r}")
+    if isinstance(policy.checkpoint, Mapping):  # a section built in Python from a mapping
+        if unknown := sorted(set(policy.checkpoint) - {"every", "recovery_every"}):
+            raise ValueError(f"checkpoint takes every and recovery_every, not {', '.join(map(str, unknown))}")
+        policy.checkpoint = PolicyCheckpointConfig(**policy.checkpoint)
+
+
+@dataclass
+class AgentRoleConfig:
+    """``agents.roles.<role>``: the policy the agents of that role sample, and the tools they may see and call."""
+
+    # A policy of the run: main, or a policies: entry (None: agents.policy's).
+    policy: str | None = None
+    # The tools they, and the agents under them, may see and call (a verifier, which runs under the child it judges,
+    # takes the lists of that child's spawner instead): names or fnmatch patterns (``read_*``), as agents see them (a
+    # task MCP server's as ``<server>__<tool>``); an empty list allows none (None: every tool).
+    tools: list[str] | None = None
+
+
+@dataclass
+class AgentsConfig:
+    """``agents:``: which policy each agent samples, for its whole life, and which tools it may call (experimental).
+    The root agent samples ``policy``; an agent its harness or program opens with a role samples that role's policy,
+    and ``policy`` when ``roles`` names none for it.  An agent of a role that lists ``tools`` (the root agent's role is
+    ``policy``) sees and calls only those, and so does every agent under it but a verifier, which runs under the child
+    it judges and is limited by the lists of that child's spawner and its own role's (``verifier``) instead."""
+
+    # The root agent's policy, and that of every role roles leaves out (None: main).
+    policy: str | None = None
+    # The policy and the tools of the agents of each role, by role (the role a harness mints a subagent with, such as
+    # ``judge``).
+    roles: dict[str, AgentRoleConfig] = field(default_factory=dict)
 
 
 # The units ``every`` counts in (``TrainEventTriggerConfig.strategy``): training steps, or passes over the training
@@ -652,6 +834,9 @@ class CheckpointConfig(TrainEventTriggerConfig):
 
     # A Tinker checkpoint (``tinker://...``) whose weights a new run starts from, with a fresh optimizer.
     load_checkpoint_path: str | None = None
+    # With load_checkpoint_path: the new run takes the checkpoint's optimizer state too (Adam's moments), a new trial
+    # that goes on from it. Its counters still start at 0, and nothing else of the checkpoint's run is taken up.
+    load_optimizer_state: bool = False
     # Recovery cadence. ``every`` selects the *permanent* checkpoints (named
     # ``<batch>``, kept forever); ``every: 0`` writes none, leaving the launch,
     # recovery and final checkpoints. When ``recovery_every`` is set, every
@@ -675,6 +860,10 @@ class CheckpointConfig(TrainEventTriggerConfig):
         self._check_every("checkpoint")
         if self.keep_recovery is not None and (isinstance(self.keep_recovery, bool) or self.keep_recovery < 1):
             raise ValueError("checkpoint.keep_recovery must be at least 1, or null to keep every recovery checkpoint")
+        if self.load_optimizer_state and not self.load_checkpoint_path:
+            raise ValueError(
+                "checkpoint.load_optimizer_state takes the optimizer state of checkpoint.load_checkpoint_path: set it"
+            )
 
 
 @dataclass
@@ -806,7 +995,7 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
     which the dataloader cannot fill."""
 
     problems = []
-    if config.train.num_epochs is None and config.train.max_training_steps is None:
+    if rolls_out(config) and config.train.num_epochs is None and config.train.max_training_steps is None:
         problems.append("train: set num_epochs or max_training_steps (with both, training runs the shorter)")
     for section in ("train", "eval"):
         if not getattr(getattr(config, section).workflow_config.rollout_config, "judges", True):
@@ -823,6 +1012,7 @@ def training_problems(config: "PlatoonTinkerRLTrainerConfig", *, num_train_tasks
         )
     # Loading checks these too, but a config class whose __post_init__ skips this class's loads without them.
     problems.extend(trainer_problems(config))
+    problems.extend(policy_problems(config))
     problems.extend(entry_settings.problems(config))
     problems.extend(config_pruning_problems(config))
     problems.extend(task_sampler_problems(config))
@@ -869,9 +1059,15 @@ class PlatoonTinkerRLTrainerConfig:
     train: TrainConfig
     # Evaluation during training; a config without the section does not evaluate (``eval.every`` is 0).
     eval: EvalConfig = field(default_factory=EvalConfig, kw_only=True)
-    # The trainer: rl, GRPO-style training on the rollouts of the training tasks, with ``train:``'s settings (the one
-    # trainer of this release; sft and interleaved are reserved for trainers platoon adds).
+    # The trainer: rl, GRPO-style training on the rollouts of the training tasks, with ``train:``'s settings; or sft,
+    # supervised fine-tuning on chat datasets in LLaMA-Factory's conventions, with ``trainer_options`` as its settings
+    # (interleaved is reserved for a trainer platoon adds). See docs/how-to/train-and-eval.md.
     trainer: str = field(default="rl", kw_only=True)
+    # The trainer's options, checked against the trainer's when the config loads: rl's are the step hooks it attaches
+    # to each of its steps, ``hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]``
+    # (docs/extending/step-hooks.md); sft's (dataset, dataset_dir, batch_size, num_epochs, ...) are listed under
+    # Trainers in the config reference.
+    trainer_options: dict[str, Any] = field(default_factory=dict, kw_only=True)
     # Root of the run directories; a run writes to ``log_path/<stats.experiment_name>/<stats.trial_name>``. A config
     # without one takes the site profile's ``runs`` (platoon.site), and then ``stats.experiment_name`` defaults to the
     # config file's name. A relative one is relative to the working directory.
@@ -884,6 +1080,13 @@ class PlatoonTinkerRLTrainerConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     stats: StatsConfig = field(default_factory=StatsConfig)
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
+    # The run's other policies, by id (a lowercase name such as ``teacher``), besides main, which train: declares: ones
+    # it trains in lockstep with main, and frozen ones its agents sample or its credit estimators score with
+    # (experimental).
+    policies: dict[str, PolicyConfig] = field(default_factory=dict)
+    # Which policy each agent samples, and which tools it may call, by role (experimental); without it, every agent
+    # samples main and may call every tool.
+    agents: AgentsConfig = field(default_factory=AgentsConfig)
 
     def __post_init__(self):
         self.environments = normalize_environment_configs(self.environments)
@@ -891,6 +1094,7 @@ class PlatoonTinkerRLTrainerConfig:
         # pruning, which keeps the checkpoints within the largest staleness bound of the run and its entries.
         if problems := [
             *trainer_problems(self),
+            *policy_problems(self),
             *entry_settings.problems(self),
             *config_pruning_problems(self),
             *task_sampler_problems(self),

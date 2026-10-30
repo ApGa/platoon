@@ -29,6 +29,9 @@ serve a group, and a variable that is not set is an error; a relative path is re
 * ``provider`` and ``provider_options``: the sandbox runtime of every Harbor entry that names no provider, spelled as
   an entry spells them, and of ``platoon sandbox reap`` for a run whose record names none.  An entry that names its
   own provider uses its own options; one that names none lays its ``provider_options`` over the profile's.
+* ``node_services``: declarations of node services by name (:mod:`platoon.envs.harbor.node_services.spec`), such as
+  a judge pool whose image and test data live at this site's paths, which a Harbor entry takes by naming one with
+  ``site`` (``node_services: {frontier-cs-judge: site}``); each runs on the entry's provider.
 
 **What it may not do.**  The profile says where files live and which isolating
 runtime starts sandboxes; it never weakens isolation and never changes what trains.
@@ -81,7 +84,7 @@ __all__ = [
 #: The variable that names the site profile's file.
 SITE_ENV = "PLATOON_SITE"
 #: The keys a site profile takes.
-KEYS = ("cache", "runs", "provider", "provider_options")
+KEYS = ("cache", "runs", "provider", "provider_options", "node_services")
 #: The provider options a site profile may set: none of them weakens a sandbox's isolation.  Binds and extra runtime
 #: arguments (``extra_start_args``, ``binary``, ...) belong in a run config.
 PROVIDER_OPTIONS = ("allow_network_none", "rootfs_layout", "scratch_root", "image_cache", "stage_images", "gpu")
@@ -114,6 +117,7 @@ class SiteProfile:
     runs: Path | None = None
     provider: str | None = None
     provider_options: Mapping[str, Any] = field(default_factory=dict)
+    node_services: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def values(self) -> dict[str, Any]:
@@ -128,6 +132,8 @@ class SiteProfile:
             values["provider"] = self.provider
         if self.provider_options:
             values["provider_options"] = dict(self.provider_options)
+        if self.node_services:
+            values["node_services"] = dict(self.node_services)
         return values
 
     def describe(self) -> str:
@@ -143,7 +149,10 @@ class SiteProfile:
         for key in KEYS:
             if key in values:
                 value = values[key]
-                shown.append(f"{key} {_flow(value) if isinstance(value, Mapping) else value}")
+                if key == "node_services":  # declarations: their names say enough here
+                    shown.append(f"{key} {', '.join(value)}")
+                else:
+                    shown.append(f"{key} {_flow(value) if isinstance(value, Mapping) else value}")
         return f"site profile {self.path}: {', '.join(shown)}"
 
     def snippet(self) -> str:
@@ -241,8 +250,8 @@ def load_profile(path: str | os.PathLike[str]) -> SiteProfile:
     from platoon.utils.config import unknown_key
 
     takes = (
-        "a site profile takes cache, runs, provider and provider_options: where platoon's files live and which runtime "
-        "starts sandboxes, never what trains"
+        "a site profile takes cache, runs, provider, provider_options and node_services: where platoon's files live, "
+        "which runtime starts sandboxes and which services a node runs for its rollouts, never what trains"
     )
     problems = [unknown_key(key, KEYS, "", otherwise=takes) for key in data if key not in KEYS]
     values: dict[str, Any] = {}
@@ -281,6 +290,16 @@ def load_profile(path: str | os.PathLike[str]) -> SiteProfile:
                     checked[name] = _expand_all(value, f"provider_options.{name}", problems)
             if checked and provider is None:
                 problems.append("provider_options: options for no provider: name the provider they are for")
+    services = data.get("node_services")
+    node_services: dict[str, Any] = {}
+    if services is not None:
+        if not isinstance(services, Mapping) or not all(isinstance(each, Mapping) for each in services.values()):
+            problems.append("node_services: declarations of node services by name, each a mapping")
+        else:
+            node_services = {
+                str(name): _expand_all(declared, f"node_services.{name}", problems)
+                for name, declared in services.items()
+            }
     if problems:
         raise SiteProfileError(problems, source=path)
     return SiteProfile(
@@ -290,6 +309,7 @@ def load_profile(path: str | os.PathLike[str]) -> SiteProfile:
         runs=values.get("runs"),
         provider=provider,
         provider_options=checked,
+        node_services=node_services,
     )
 
 

@@ -101,13 +101,14 @@ def snippets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Callab
 
 
 def _unregister(packages: set[str]) -> None:
-    """Drop the function harnesses, programs, task samplers and group admission rules that the snippet ``packages``
-    registered, and nothing else."""
+    """Drop the function harnesses, programs, task samplers, group admission rules and credit estimators that the
+    snippet ``packages`` registered, and nothing else."""
 
     from platoon import programs
     from platoon.harness import function
     from platoon.registry import get_registry
     from platoon.train.admission_api import REGISTRY_KIND as ADMISSION_KIND
+    from platoon.train.credit.registry import REGISTRY_KIND as CREDIT_KIND
     from platoon.train.sampler_api import REGISTRY_KIND
 
     def ours(fn: Any) -> bool:
@@ -119,7 +120,7 @@ def _unregister(packages: set[str]) -> None:
     with programs._lock:
         for name in [name for name, fn in programs._programs.items() if ours(fn)]:
             del programs._programs[name]
-    for kind in (REGISTRY_KIND, ADMISSION_KIND):
+    for kind in (REGISTRY_KIND, ADMISSION_KIND, CREDIT_KIND):
         registry = get_registry(kind)
         registry._items = {name: item for name, item in registry._items.items() if not ours(item.value)}
 
@@ -456,7 +457,8 @@ def test_the_audited_provider_keeps_the_inner_provider_s_capabilities(snippets, 
 def test_the_capabilities_table_lists_the_capabilities_providers_declare() -> None:
     from platoon.sandbox import base
 
-    declared = set(re.search(r"subset of \{(.*?)\}", base.__doc__)[1].replace('"', "").split(", "))
+    listed = re.search(r"subset of \{(.*?)\}", base.__doc__, re.S)[1]
+    declared = {name.strip().strip('"') for name in listed.split(",")}
     assert declared == base.CAPABILITIES
     text = (GUIDES / "sandbox-providers.md").read_text(encoding="utf-8")
     table = text[text.index("| Capability |") :]
@@ -560,6 +562,55 @@ def test_the_worked_task_sampler_passes_the_conformance_check(snippets, monkeypa
     check_task_sampler("acme-skip-solved", levels=("entry", "run"))
     test = next(code for code in blocks("task-samplers.md", "python") if code.startswith("from platoon.testing"))
     assert run_test_functions(test, "test_skip_solved") == ["test_skip_solved_keeps_the_contract"]
+
+
+# --------------------------------------------------------------------------- credit-estimators.md
+
+
+def test_the_worked_credit_estimator_passes_the_conformance_check(snippets) -> None:
+    """The guide's ``RunningBaseline``, written out as its package, passes ``check_credit_estimator`` by
+    ``module:Class`` and by the name its decorator registers (its state resumes); and the guide's test of it runs."""
+
+    from platoon.testing import check_credit_estimator
+    from platoon.train.credit.registry import resolve_credit_estimator
+
+    snippets("credit-estimators.md", "# acme_credit/running.py")
+    check_credit_estimator("acme_credit.running:RunningBaseline", options={"rate": 0.05})
+    assert resolve_credit_estimator("acme-running").__name__ == "RunningBaseline"
+    check_credit_estimator("acme-running")
+    test = next(code for code in blocks("credit-estimators.md", "python") if code.startswith("from platoon.testing"))
+    assert run_test_functions(test, "test_running") == ["test_the_running_baseline_keeps_the_contract"]
+
+
+def test_the_credit_guide_s_config_resolves_as_platoon_train_resolves_it(snippets, tmp_path) -> None:
+    """The guide's config, with its package written out (and each entry given tasks), loads and resolves as ``platoon
+    train`` resolves it: ``solo``'s ``acme-running`` resolves from the entry's package with its options, and ``other``
+    keeps the workflow's own credit."""
+
+    from platoon.extensions import run_components
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.utils.config import resolve_config
+
+    snippets("credit-estimators.md", "# acme_credit/running.py")
+    [guide] = [code for code in blocks("credit-estimators.md", "yaml") if "acme-running" in code]
+    data = yaml.safe_load(guide)
+    for entry in data["environments"]:
+        entry.update({"dataset_loader": f"{__name__}:_guide_tasks", "rollout": f"{__name__}:_guide_tasks"})
+    data.update(
+        {
+            "train": {"model_name": "m", "renderer_name": "r", "max_training_steps": 3},
+            "eval": {"every": 0},
+            "watchdog": {"enabled": False},
+            "log_path": str(tmp_path / "logs"),
+        }
+    )
+    path = tmp_path / "train.yaml"
+    path.write_text(yaml.safe_dump(data))
+    config = resolve_config(path, [], PlatoonTinkerRLTrainerConfig).config
+    records = [record for record in run_components(config) if record["kind"] == "credit"]
+    assert [(record["ref"], record["environments"], record["options"]) for record in records] == [
+        ("acme-running", ["solo"], {"solo": {"rate": 0.05}})
+    ]
 
 
 # --------------------------------------------------------------------------- group-admission.md

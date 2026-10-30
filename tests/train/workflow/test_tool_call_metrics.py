@@ -45,7 +45,7 @@ def test_a_trajectory_sums_its_calls_counts():
     }
 
 
-def _outcome(tool_calls: int, unparsed: int) -> output_module._SingleRolloutOutcome:
+def _outcome(tool_calls: int, unparsed: int) -> output_module.MemberOutcome:
     stats = TrajectoryStats(
         trajectory_id="root",
         reward=1.0,
@@ -58,7 +58,7 @@ def _outcome(tool_calls: int, unparsed: int) -> output_module._SingleRolloutOutc
         num_unparsed_tool_calls=unparsed,
     )
     result = TrajectoryCollectionResult(datums=[], task_reward=1.0, trajectory_stats=[stats], root_rewards_dict={})
-    return output_module._SingleRolloutOutcome(result=result, workload=RolloutWorkload(), observed=True)
+    return output_module.MemberOutcome(result=result, workload=RolloutWorkload(), observed=True)
 
 
 def test_rollout_metrics_report_the_counts_per_trajectory():

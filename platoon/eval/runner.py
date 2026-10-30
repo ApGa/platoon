@@ -106,6 +106,15 @@ class EvalRunner:
         self.report_dir = self.output_dir / "reports"
         self._last_rollout_stage_elapsed_seconds: float | None = None
         self._stop_reason: str | None = None  # why no further rollout starts (EvalRolloutRecord.stop_run)
+        self._stopped: str | None = None  # why the run stopped its rollouts (stop)
+
+    def stop(self, why: str) -> None:
+        """Start no further rollout: those in flight finish, and the rollout stage then fails with ``why`` (a
+        ``RuntimeError``), as when what every rollout needs failed (the run's node services)."""
+
+        if self._stopped is None:
+            logger.error("Stopping the evaluation after the rollouts in flight: %s", why)
+            self._stopped = why
 
     def _write_rollout_artifacts(self, record: EvalRolloutRecord, collection_path: Path, metadata_path: Path) -> None:
         if record.trajectory_collection is not None:
@@ -252,7 +261,7 @@ class EvalRunner:
 
         async def _guarded_single(data: dict[str, Any], rollout_index: int) -> EvalRolloutRecord | None:
             async with sem:
-                if self._stop_reason is not None:
+                if self._stop_reason is not None or self._stopped is not None:
                     return None  # the evaluation is stopping: this rollout does not start
                 try:
                     return await self._arun_single_rollout(
@@ -281,6 +290,11 @@ class EvalRunner:
 
         if refused:  # every other rollout would be refused alike; its one line says why
             raise refused[0]
+        if self._stopped is not None:
+            raise RuntimeError(
+                f"the evaluation stopped after {len(records)} rollout(s), {len(results) - len(records)} not started: "
+                f"{self._stopped}"
+            )
         if self._stop_reason is not None:
             raise ConfigError(
                 f"the evaluation stopped after {len(records)} rollout(s), {len(results) - len(records)} not started: "

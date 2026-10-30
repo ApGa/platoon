@@ -1,44 +1,102 @@
-"""Publishing a step's policy, the fifth stage of a step, after its updates and its commit (:func:`publish_policy`):
-the save (weights for the sampler, or a checkpoint when one is due), the new sampling client, which the policy samples
-from and the rollout workers are given (:func:`_publish_worker_binding`); and why a step took no update
+"""Publishing the policies a step updated, the fifth stage of a step, after its updates and its commit
+(:func:`publish_policies`): the save (weights for the samplers, or a checkpoint when one is due), then each updated
+policy's new sampling client, which the policy samples from and hands to whoever subscribed; the subscription that
+hands it to the rollout workers (:func:`subscribed_bindings`); and why a step took no update
 (:func:`_no_update_reason`).
 
-The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, publishes after a step that stepped the optimizer,
-and logs why a step that did not keeps its policy.  ``_publish_worker_binding`` is a static method of
-:class:`~platoon.train.trainer.rl.PlatoonTinkerRLTrainer` still, which keeps it under its name: to replace it, replace
-the method, not the function.
+The step itself is :class:`~platoon.train.step.step.TrainStep`, which publishes at its end
+(:func:`~platoon.train.trainer.hooks.finish_step`) each policy that it or one of the run's step hooks updated, and logs
+why one that neither did keeps its sampler and version.
 """
 
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
+
+from platoon.train.checkpoints.barrier import Counters
+from platoon.train.checkpoints.saving import _save_checkpoint_and_get_sampling_client, save_after_step
+from platoon.train.policy.binding import _publish_worker_binding
+from platoon.train.policy.policy import Subscriber
 
 if TYPE_CHECKING:
-    from platoon.train.trainer.loops import StepContext
+    from platoon.train.policy.set import PolicySet
+    from platoon.train.step.lanes import PolicyLane
+    from platoon.train.step.step import StepContext
 
 logger = logging.getLogger(__name__)
 
 
-async def publish_policy(context: "StepContext") -> None:
-    """Publish the policy that a step's updates made, through the trainer's seams: save it, and a checkpoint when one
-    is due (``_save_checkpoint_and_get_sampling_client``), then give its sampling client to the policy, which counts
-    one more version, and to the rollout workers (``_publish_worker_binding``)."""
+async def publish_policies(context: "StepContext", updated: "Sequence[PolicyLane]") -> None:
+    """Publish the policies whose optimizer a step stepped (``updated``, their lanes): save them, a checkpoint of every
+    trained policy when the cadence says one is due, then give each its new sampling client
+    (:meth:`~platoon.train.policy.policy.Policy.publish`), which counts one more version of it, and which its
+    subscribers hand to the rollout workers.  A run of one trained policy saves through
+    :func:`~platoon.train.checkpoints.saving._save_checkpoint_and_get_sampling_client`, as it always did; a run of
+    several through :func:`~platoon.train.checkpoints.saving.save_after_step`, which that function calls for one."""
 
     trainer, state = context.trainer, context.state
     logger.info(f"Calling _save_checkpoint_and_get_sampling_client for batch {state.train_step}")
-    sampling_client = await trainer._save_checkpoint_and_get_sampling_client(
-        training_client=state.training_client,
-        i_batch=state.train_step,
-        save_every=state.save_every,
-        start_batch=context.start_batch,
-        watchdog=state.watchdog,
-        recovery_every=trainer.config.checkpoint.recovery_every,
-        policy_version=context.version() + 1,
-        optimizer_steps=state.optimizer_steps,
-    )
-    state.model_info.llm.update_sampling_client(sampling_client)
-    trainer._publish_worker_binding(context.workflow, sampling_client, context.version())
-    state.sampling_client = sampling_client
-    state.sampling_client_step += 1
+    if len(context.lanes) == 1:
+        (lane,) = updated
+        sampling_clients = {
+            lane.policy_id: await _save_checkpoint_and_get_sampling_client(
+                trainer,
+                training_client=state.training_client,
+                i_batch=state.train_step,
+                save_every=state.save_every,
+                start_batch=context.start_batch,
+                watchdog=state.watchdog,
+                recovery_every=trainer.config.checkpoint.recovery_every,
+                policy_version=context.version() + 1,
+                optimizer_steps=state.optimizer_steps,
+            )
+        }
+    else:
+        sampling_clients = await save_after_step(
+            trainer,
+            trainer._checkpoints(),
+            state.train_step,
+            updated={lane.policy_id: Counters(lane.version() + 1, lane.policy.optimizer_steps) for lane in updated},
+            save_every=state.save_every,
+            start_batch=context.start_batch,
+            watchdog=state.watchdog,
+            recovery_every=trainer.config.checkpoint.recovery_every,
+        )
+    for lane in updated:
+        lane.policy.publish(sampling_clients[lane.policy_id])
+
+
+@contextmanager
+def subscribed_bindings(policies: "PolicySet", workflow: Any) -> Generator[None]:
+    """While the steps run: each trained policy that the agents sample hands each sampler it publishes to the rollout
+    workers of the training ``workflow`` (:func:`~platoon.train.policy.binding._publish_worker_binding`): the agents'
+    default policy as their default binding, each other one as its own."""
+
+    default = policies.agents.default
+    ends = [
+        policy.subscribe(_binding_writer(workflow, None if policy.id == default else policy.id))
+        for policy in policies.sampled()
+        if policy.trainable
+    ]
+    try:
+        yield
+    finally:
+        for end in ends:
+            end()
+
+
+def _binding_writer(workflow: Any, policy: str | None) -> Subscriber:
+    """What hands a policy's new sampler to ``workflow``'s rollout workers: the agents' default binding (``policy``
+    None), else ``policy``'s own."""
+
+    def write(sampling_client: Any, version: int) -> None:
+        if policy is None:
+            _publish_worker_binding(workflow, sampling_client, version)
+        else:
+            _publish_worker_binding(workflow, sampling_client, version, policy=policy)
+
+    return write
 
 
 def _no_update_reason(zero_objective_microbatches: int, empty_microbatches: int, *, counted: int | None = None) -> str:
@@ -56,31 +114,3 @@ def _no_update_reason(zero_objective_microbatches: int, empty_microbatches: int,
     if empty_microbatches and not zero_objective_microbatches:
         return "it had no datums to train on"
     return f"{zero_objective_microbatches} microbatch(es) had a zero objective and {empty_microbatches} had no datums"
-
-
-def _publish_worker_binding(workflow, sampling_client, version: int, *, required: bool = False) -> None:
-    """Republish the sampling client for rollout workers.
-
-    A no-op for ``inprocess`` mode and for custom workflows that do not
-    run workers.  A *re*-publication failure is logged and swallowed: every
-    worker keeps the client it already holds, and under the full-finetune
-    gateway that client samples the newest weights anyway.
-
-    The FIRST publication is different, and only under
-    ``rollout_isolation: process``.  Each worker builds its sampling client
-    by reading this file at startup and dies with ``FileNotFoundError``
-    when it is missing, so swallowing that failure would leave every
-    rollout of the run crashing and the trainer producing no training data
-    at all -- for as long as the job is allowed to run.  That one is fatal,
-    and fatal here, before the first rollout is dispatched.
-    """
-
-    publish = getattr(workflow, "publish_model_binding", None)
-    if publish is None:
-        return
-    try:
-        publish(sampling_client, version)
-    except Exception:
-        logger.exception("could not publish the rollout worker sampling-client binding")
-        if required and getattr(workflow, "rollout_isolation", "inprocess") == "process":
-            raise

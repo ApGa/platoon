@@ -348,9 +348,7 @@ def test_group_atomic_admission_admits_whole_groups(tmp_path, limit):
                 start.first_call()
             await asyncio.sleep(0.15)
             events.append(("done", group))
-            return output_module._SingleRolloutOutcome(
-                result=None, workload=group_module.RolloutWorkload(), observed=False
-            )
+            return output_module.MemberOutcome(result=None, workload=group_module.RolloutWorkload(), observed=False)
 
     config = WorkflowConfig(
         group_size=3,

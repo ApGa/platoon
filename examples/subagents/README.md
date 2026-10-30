@@ -9,6 +9,7 @@ through it.
 | `vault_env.py` | `VaultEnvironment` (ORS): add up the numbers stored under some keys with `read(key)` and the terminal `answer(total)`; `platoon_fork` gives each subagent its own keys on the same vault |
 | `delegator.py` | `@pt.harness("example-delegator")`: a tool-calling loop plus a `delegate(goal, max_steps)` tool that spawns a subagent; several `delegate` calls in one reply run in parallel |
 | `subagents.yaml` | The environment entry (`agents:` settings for depth, budgets, access, grading and forks) and a training section |
+| `read-only-subagents.yaml` | The same training, with subagents that may only `read` (`agents.roles.subagent.tools`): only the root answers |
 
 ## Run it
 
@@ -35,3 +36,21 @@ of a Tinker model (CPU only, with no model download; see
 ```bash
 uv run pytest tests/examples/test_subagents_example.py
 ```
+
+## Subagents that may only read
+
+`read-only-subagents.yaml` gives the role of the subagents `delegate` spawns, `subagent`, one tool: `read`
+(`agents.roles.subagent.tools: [read]`). A subagent's listing of the environment's tools then holds `read` alone (the
+harness's own `delegate` tool is no environment tool, so the list does not reach it), and a call to `answer` comes
+back as an error result that says the role may call only `read`, without reaching the environment, so a subagent
+reports its sum in its final message, which the root adds up and answers. Subagents share the root's outcome
+(`child_grading` is left at `none`). [Limit the tools each role may
+call](../../docs/how-to/train-and-eval.md#limit-the-tools-each-role-may-call-experimental) explains the setting and
+what it does not reach.
+
+```bash
+uv run platoon train examples/subagents/read-only-subagents.yaml     # needs TINKER_API_KEY
+```
+
+`tests/examples/test_read_only_subagents_example.py` trains it for two steps on the fake Tinker service, CPU only:
+it checks each subagent's listing and that an `answer` call is refused while the run trains on.

@@ -356,7 +356,7 @@ def test_get_provider_resolves_names_and_import_paths(tmp_path: Path):
     assert isinstance(get_provider("process", root=tmp_path), ProcessProvider)
     provider = get_provider("platoon.sandbox.process:ProcessProvider", root=tmp_path)
     assert provider.root == tmp_path
-    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback", "stacks"})
+    assert provider.capabilities == frozenset({"snapshot", "routes", "host_loopback", "stacks", "externals"})
 
 
 @pytest.mark.asyncio

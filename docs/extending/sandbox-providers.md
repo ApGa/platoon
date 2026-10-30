@@ -80,6 +80,7 @@ Capabilities tell platoon what it may ask for, instead of checking provider name
 | `routes` | The provider implements `spec.upstreams` and `Sandbox.routes` |
 | `host_loopback` | A sandbox on the host network shares this host's network namespace, so its processes reach the model gateway on this host's loopback as they are. A provider whose sandboxes run elsewhere (another node, a cloud) must not declare it: platoon then places a harness in one of its sandboxes only through a route to the gateway |
 | `stacks` | *Since 0.5.0.* The provider also starts stacks, a task's services each in a sandbox of its own (`start_stack`, [below](#run-multi-container-stacks)): a Harbor task whose compose file names services besides `main` runs only on such a provider |
+| `externals` | *Since 0.5.0.* The provider's stacks reach the services a spec's `externals` name, outside the stack ([below](#run-multi-container-stacks)): a Harbor stack that reaches a node service runs only on such a provider |
 | `privileged` | *Since 0.5.0.* The provider's stacks give a service every privilege of the host, or any capability, when its spec asks for it (`ServiceSpec.privileged`, `cap_add`), as Docker does: a Harbor stack fetched with `refuse: {privileges: false}` whose services ask for them runs only on such a provider. Declare it only when the provider grants exactly that |
 
 Two optional class attributes concern a site's profile, which can choose a provider for every config run on the
@@ -159,8 +160,8 @@ class AuditedProvider:
     ) -> None:
         self.inner = get_provider(inner, **(inner_options or {}))
         self.name = f"audited-{self.inner.name}"
-        # No more than the inner provider can do, and no stacks: the wrapper has no start_stack.
-        self.capabilities = frozenset(self.inner.capabilities) - {"stacks"}
+        # No more than the inner provider can do, and no stacks, nor what only stacks reach: no start_stack.
+        self.capabilities = frozenset(self.inner.capabilities) - {"stacks", "externals"}
         self.log = Path(log_path)
 
     async def start(self, spec: SandboxSpec) -> AuditedSandbox:
@@ -300,6 +301,14 @@ class StackSpec:
     services: dict[str, ServiceSpec]  # "main" is the agents' sandbox
     network: Literal["egress", "none"] = "egress"
     labels: dict[str, str] = ...
+    externals: dict[str, ExternalService] = ...  # services outside the stack (node services), by name
+
+
+@dataclass(frozen=True)
+class ExternalService:
+    socket: str  # a Unix socket on this host (a node service's scope)
+    port: int  # where the stack's services reach it, by its name
+    aliases: tuple[str, ...] = ()
 
 
 class Stack(Protocol):
@@ -324,6 +333,7 @@ class Stack(Protocol):
 | Start everything, or nothing | Make the stack's volumes, filled by their `fill` where they have one (the Harbor service copies the task's files that its services bind writable that way, so that they share one copy and the stack owns it), before any service starts: `platoon.sandbox.stacks.make_volumes(spec, root)` makes them below a directory of the stack's, and gives each service's mounts of them. Return once every service runs, each one with a healthcheck has passed it and each init job has completed within its `timeout_s`, as `docker compose up --wait` does, and a last probe finds every service up. A service that fails, exits or never turns healthy raises `StackStartError(service, message, log=<its log's tail>)`, which a session reports as `sidecar_start`, after the provider stopped every service it started; a cancelled start stops them too, also a service caught in the middle of its start, before it raises. Make each stop a cleanup that a stopping process lets finish (`platoon.utils.stopping.let_finish`). A `setup`'s own exception passes through as it is |
 | Tell each service's state | `health()` probes: an init job `completed` (or `exited` with another status), any other service `running`, `healthy` or `unhealthy` by its healthcheck (or by what the provider finds wrong with it: a service handle's optional `problem()`, which `drive_stack` asks), or `exited`. Harbor grading probes the sidecars before and after the tests, and a sidecar that is not up makes the outcome `invalid` (`sidecar_unhealthy`) |
 | Address the services | Where the services share a network of their own (a pod, a compose project), each reaches the others by name at their declared ports, and `rewrite` is the identity, and the stack says so (`host_loopback` false, as `drive_stack(..., host_loopback=False)` makes it): a harness in `main` then reaches the gateway only through its route. Where they share the host's network, give each declared port a port of the host that the stack holds for its life, which no other stack is given and the service learns from its listen variables (`PLATOON_PORT_<port>`, and those its `listen` names), and make `rewrite` turn a reference to a service at a port it declares (`scheme://<service>:<port>`, `<service>:<port>`), and a service's own `localhost:<port>`, into the address that reaches it; environment values, commands and healthchecks are rewritten so before the services start |
+| Reach an external service | *Since 0.5.0.* A spec's `externals` run outside the stack: each one a Unix socket on this host (a node service's scope, [Node services](../how-to/sandboxes-and-harbor.md#node-services)) that the stack's services reach by its name and aliases at its port, as one of their own. A pod relays the port to the socket and resolves the names to its loopback; a stack on the host's network relays a port of the host that it holds and rewrites the references to it. A provider whose stacks reach them declares the `externals` capability; one whose stacks cannot reach a host socket raises `ValueError` for a spec with externals, as Docker's compose projects and the host-network fallback do, and the Harbor service refuses stacks that reach a node service on a provider without the capability |
 | Reach a service from this host | `connect(service, port)` gives an endpoint on this host that reaches the port of that service, as the service's own network has it: `unix://<socket>`, a socket only your uid reaches, or `tcp://<host>:<port>` (the port of this host that a stack on the host's network holds for it). Harbor's tool plane reaches a task's MCP servers through it. A socket's path holds at most 107 bytes: `platoon.sandbox.stacks.SocketLinks` hands out a short link to one whose path is longer |
 | Be reaped | Register the stack for cleanup as its sandboxes are (`platoon.sandbox.cleanup.register` before it starts, `attach` once it runs, `unregister` once it stopped), with this process's labels on every service's sandbox, and remove what a dead process's stacks left in `reap(labels)`, their volumes too |
 

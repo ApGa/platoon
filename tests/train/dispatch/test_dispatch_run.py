@@ -48,7 +48,7 @@ from fakes.runs import (
     weighted_mixture,
 )
 from fakes.tinker_service import FakeTinkerService, make_service_trainer
-from fakes.trainer import interrupt_at, make_trainer
+from fakes.trainer import draws_of, interrupt_at, make_trainer
 
 from platoon.train import dataloader as dataloader_module
 from platoon.train import task_records
@@ -123,7 +123,7 @@ def test_at_k_the_groups_started_and_not_consumed_never_exceed_k_plus_one_batche
 
     assert logged == list(range(1, 11))
     assert max(ahead) <= (k + 1) * 3
-    assert trainer._dispatcher.peak == (k + 1) * 3  # it is reached: the bound is the horizon, not the permits
+    assert draws_of(trainer).dispatcher.peak == (k + 1) * 3  # it is reached: the bound is the horizon, not the permits
     assert sorted(position for step in client.steps for position in step) == list(range(30))
 
 
@@ -194,7 +194,7 @@ def test_no_draw_while_every_label_of_the_run_is_at_its_limit(tmp_path, monkeypa
 
     assert logged == [1, 2, 3, 4, 5, 6]
     assert draws and all(draws)  # each draw was made while some label had room
-    dispatcher = trainer._dispatcher
+    dispatcher = draws_of(trainer).dispatcher
     assert not dispatcher.skipped and dispatcher.next_position == len(workflow.started) + sum(
         dispatcher.parked_by_label().values()
     )
@@ -320,7 +320,7 @@ def test_a_resume_trains_each_group_its_checkpoint_kept_once_and_without_it_roll
     if kept == "kept":
         assert sorted(workflow.started) == [6, 7]  # the kept groups were not rolled out again
         assert sorted(trained[:4]) == [2, 3, 4, 5]  # and the first steps trained them
-        store = second._recorder.store
+        store = draws_of(second).recorder.store
         assert sum(store.task(task_id).groups for task_id in store.task_ids()) == 8  # each group settled once
     else:
         assert sorted(workflow.started) == [2, 3, 4, 5, 6, 7]  # rolled out again, as before
@@ -615,7 +615,7 @@ def test_a_failed_group_a_checkpoint_kept_is_consumed_as_failed_after_the_resume
 
     assert sorted(workflow.started) == [6, 7]  # position 3 was not rolled out again
     assert sorted(position for step in client.steps for position in step) == [2, 4, 5, 6, 7]
-    record = second._recorder.store.task(task)
+    record = draws_of(second).recorder.store.task(task)
     assert record.groups == 1 and record.fates == {"failed": 1}
 
 

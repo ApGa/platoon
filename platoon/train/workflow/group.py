@@ -31,30 +31,40 @@ which the trainer hands the workflow as ``entry_configs``. Inside a group,
 see its settings too; code that reads ``self.config`` from a thread of
 ``loop.run_in_executor`` gets the run's.
 
-Extension point: to change how advantages are estimated, subclass
-``GroupRolloutWorkflow`` and override ``compute_baselines`` (a different
-baseline) or ``assign_advantages`` (for example to also rescale), then select
-the subclass with ``environments[0].workflow: "package.module.MyWorkflow"`` or
-construct it in a train script. Advantages are always computed in the trainer
-process, so an override never crosses the rollout-worker boundary. An override
-reads its group's settings through ``self.config``.
+Extension point: to change how advantages are estimated, give an environment
+entry a credit estimator (``environments[].credit``, RFC 0021,
+:mod:`platoon.train.credit.api`), which the workflow awaits once per group
+over every member, and, when it reads agents, every agent with its role and
+its own reward (``crediting``); without one, each member's datums are centered
+on its baseline, as the workflow always did.  A subclass may still override
+``compute_baselines`` (a different baseline) or ``assign_advantages`` (for
+example to also rescale), selected with ``environments[0].workflow:
+"package.module.MyWorkflow"`` or constructed in a train script; it then credits
+with those, and loading refuses an entry's estimator beside it
+(``applies_credit``).  Advantages are always computed in the trainer process,
+so neither crosses the rollout-worker boundary.  An override reads its group's
+settings through ``self.config``.
 """
 
 import asyncio
 import logging
 import os
+import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import replace
 from types import MappingProxyType
-from typing import Callable, ClassVar, Self
+from typing import Any, Callable, ClassVar, Self
 
 import tinker
 import torch
 from tinker import TensorData
 
+from platoon.deprecations import PlatoonDeprecationWarning
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN, row_entry
 from platoon.train.config_defs import RolloutConfig, WorkflowConfig
+from platoon.train.credit.api import PolicyView, ScoringFailed
 from platoon.train.credit.group import (
     # Re-exported: tests read it from this module.  filter_error_tokens looks it up in credit.group, so patch it there.
     _filter_positive_centered_error_tokens,  # noqa: F401
@@ -62,7 +72,9 @@ from platoon.train.credit.group import (
     group_baselines,
     group_verdict,
 )
+from platoon.train.credit.runtime import Credit, assign_credit
 from platoon.train.labels import task_label
+from platoon.train.policy.spec import AgentBindings
 from platoon.train.startup import WorkerPreload
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.tinker.rollout_metrics import ClientThroughputMonitor
@@ -71,11 +83,11 @@ from platoon.train.workers.protocol import validated_ref
 from platoon.train.workers.run import DEFAULT_REWARD_PROCESSOR
 from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 from platoon.train.workers.workload import add_datum_funnel, workload_from_raw_rollout
-from platoon.train.workflow import members, requests, telemetry
+from platoon.train.workflow import crediting, members, requests, telemetry
 from platoon.train.workflow import output as group_output
 from platoon.train.workflow.context import _group_config, _group_entry, _group_stats
-from platoon.train.workflow.output import _member, _SingleRolloutOutcome, _TaskRolloutOutput, _trained_keys
-from platoon.train.workflow.protocol import WorkflowSetup, _built_by_keywords
+from platoon.train.workflow.output import GroupOutput, MemberOutcome, PolicyGroupOutput, _member, _trained_keys
+from platoon.train.workflow.protocol import StaleFilterSetting, WorkflowSetup, _built_by_keywords
 from platoon.train.workflow.settings import GroupSettings
 from platoon.train.workflow.start_limit import StartLimit
 from platoon.utils.rollout_workload import RolloutWorkload
@@ -87,8 +99,13 @@ from platoon.utils.tinker_data_processing import SubagentDatumSamplingStats, Tra
 logger = logging.getLogger(__name__)
 
 
-# The methods through which a ``GroupRolloutWorkflow`` runs its members on the lease (``runs_rollouts_on_lease``).
+# The methods through which a ``GroupRolloutWorkflow`` runs its members on the lease (``runs_rollouts_on_lease``), and
+# those through which it credits its groups without an estimator (``applies_credit``).
 _LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
+_CREDIT_METHODS = ("compute_baselines", "assign_advantages")
+# The startup gate's methods under their names before platoon 0.5.0, which the workflow no longer calls: a subclass that
+# overrides one is warned of, until platoon 0.6.0 (``__init_subclass__``).
+_RENAMED_METHODS = {"_admit_group": "_enter_startup_gate", "_admission_semaphore": "_startup_semaphore"}
 
 
 # The workload helpers of ``workers.workload`` (which the rollout worker calls too) under the names that
@@ -98,21 +115,34 @@ _workload_from_raw_rollout = workload_from_raw_rollout
 _add_datum_funnel = add_datum_funnel
 
 
-def as_member_outcomes(raw_outcomes: Sequence) -> list[_SingleRolloutOutcome]:
+def as_member_outcomes(raw_outcomes: Sequence) -> list[MemberOutcome]:
     """What ``_run_group_rollouts`` returned, as one outcome per member.  ``arun_episode_single`` always returns an
     outcome; an override of it (a custom workflow's, a test's) may return a ``TrajectoryCollectionResult`` or None
     instead, which becomes an outcome with its datum funnel, observed unless None."""
 
     return [
         outcome
-        if isinstance(outcome, _SingleRolloutOutcome)
-        else _SingleRolloutOutcome(
+        if isinstance(outcome, MemberOutcome)
+        else MemberOutcome(
             result=outcome,
             workload=_add_datum_funnel(RolloutWorkload(), outcome),
             observed=outcome is not None,
         )
         for outcome in raw_outcomes
     ]
+
+
+def _overrides(cls: type, flag: str, methods: Sequence[str]) -> bool:
+    """Whether ``cls``, a subclass whose own body does not set ``flag``, takes one of ``methods`` from a class other
+    than ``GroupRolloutWorkflow`` that the class setting ``flag`` nearest in its method resolution order does not
+    derive from."""
+
+    declared = next(klass for klass in cls.__mro__ if flag in klass.__dict__)
+    for name in methods:
+        owner = next(klass for klass in cls.__mro__ if name in klass.__dict__)
+        if owner is not GroupRolloutWorkflow and not issubclass(declared, owner):
+            return True
+    return False
 
 
 class GroupRolloutWorkflow:
@@ -147,15 +177,49 @@ class GroupRolloutWorkflow:
     runs_rollouts_on_lease: ClassVar[bool] = True
     # It takes the run's limit on rollouts starting at once as its ``start_limit`` (below), which the trainer sets.
     takes_start_limit: ClassVar[bool] = True
+    # It takes how the run's stale filter judges its groups as its ``stale_filter`` (below), which the trainer sets. A
+    # subclass that overrides ``arun_episode`` or ``_run_group`` without calling this class's stamps no datum with its
+    # own version (``_stamp_own_versions``), so its datums are judged by their rollout's, unwarned: such a subclass sets
+    # the flag False in its body, so that the run warns, or stamps them itself.
+    takes_stale_filter: ClassVar[bool] = True
     # Its rollouts can run in rollout workers (``rollout_isolation: process``): ``platoon train`` gives it the
     # environments' ``packages`` and the run's ``label_by`` as arguments, and its fork server's ``worker_preload``.
     runs_rollout_workers: ClassVar[bool] = True
+    # It credits each entry's groups with the entry's credit estimator (``entry_credit``) when the entry sets one. A
+    # subclass that overrides ``compute_baselines`` or ``assign_advantages`` (``_CREDIT_METHODS``) credits with those:
+    # it reads as False, and loading refuses an entry's estimator beside it, unless its own class body sets the flag.
+    applies_credit: ClassVar[bool] = True
+    # Its rollouts may sample several policies (``sampled_policies``), each bound to its own file for the rollout
+    # workers: its ``publish_model_binding`` takes ``policy=``.
+    binds_policies: ClassVar[bool] = True
     # The settings of each environment entry's groups, by label: the run's with the entry's own laid over them, which
     # ``platoon train`` sets after construction. A group of an entry it does not list runs with ``config``, the run's.
     entry_configs: Mapping[str, WorkflowConfig] = MappingProxyType({})
+    # The credit estimator of each environment entry that sets one (``environments[].credit``), by label, which
+    # ``platoon train`` sets after construction for the training workflow, never for the evaluation's.
+    entry_credit: Mapping[str, Any] = MappingProxyType({})
+    # The run's policies as its estimators read them, by id, which ``platoon train`` sets with ``entry_credit``: the
+    # credit group's policies and versions.  Empty without: the group's policy is then main, from ``model_info``.
+    policy_views: Mapping[str, PolicyView] = MappingProxyType({})
+    # In a run whose agents sample several policies, which ``platoon train`` sets after construction: the model info
+    # of each sampled policy but the agents' default (``agents.default``), whose is ``model_info``, by id; which agent
+    # samples which policy; and the policies the run trains, whose agents alone make datums.  Empty and None in a run
+    # of one sampled policy.
+    sampled_policies: Mapping[str, ModelInfo] = MappingProxyType({})
+    agents: AgentBindings | None = None
+    trained_policies: frozenset[str] = frozenset()
+    # The tool name patterns of each agent role whose tools are limited (agents.roles.<role>.tools), which ``platoon
+    # train`` sets after construction and the rollout workers' requests carry; empty: every agent sees every tool.
+    role_tools: Mapping[str, tuple[str, ...]] = MappingProxyType({})
     # The run's limit on rollouts starting at once (platoon.train.workflow.start_limit), which the trainer sets on its
     # training and evaluation workflows as training starts; None: no limit. _run_group_member takes the slots.
     start_limit: StartLimit | None = None
+    # How the run's stale filter judges this workflow's groups (train.stale_filter), which the trainer sets on its
+    # training workflow as training starts: under ``datum`` each datum is stamped with its own policy version, the
+    # oldest its model calls sampled, in place of its rollout's (_stamp_own_versions).
+    stale_filter: StaleFilterSetting = "group"
+    # Whether this workflow, one start's, warned of a member's result whose own versions do not match its datums.
+    _warned_unstamped: bool = False
     # The node-local directory of the rollout workers' files, made at its first use (requests._ipc_dir).
     _ipc_dir_cache: str | None = None
     # What __init__ sets, at the defaults it sets them to: a custom workflow, or a test, that builds the class with
@@ -167,25 +231,30 @@ class GroupRolloutWorkflow:
     rollout_fn_ref: str | None = None
     subagent_datum_sampler: DeterministicSubagentDatumSampler | None = None
     # The rollout worker supervisor (``supervisor``), and the semaphore of the startup gate with its limit
-    # (members._admission_semaphore), each made at its first use.
+    # (members._startup_semaphore), each made at its first use.
     _supervisor: RolloutWorkerSupervisor | None = None
-    _admission: asyncio.Semaphore | None = None
-    _admission_limit: int = 0
+    _startup_semaphore_cache: asyncio.Semaphore | None = None
+    _startup_semaphore_limit: int = 0
 
     def __init_subclass__(cls, **kwargs: object) -> None:
-        """The flag of a subclass whose own body does not set it: that of the class that sets it nearest in its method
-        resolution order, unless one of :data:`_LEASE_METHODS` comes from a class other than this one that the
-        declaring class does not derive from (the subclass itself, a mixin, another branch of a diamond): False."""
+        """The ``runs_rollouts_on_lease`` and ``applies_credit`` flags of a subclass whose own body does not set them:
+        each that of the class that sets it nearest in its method resolution order, unless one of its methods
+        (:data:`_LEASE_METHODS`, :data:`_CREDIT_METHODS`) comes from a class other than this one that the declaring
+        class does not derive from (the subclass itself, a mixin, another branch of a diamond): False.  And a warning
+        for each method the subclass defines under a name the workflow no longer calls (:data:`_RENAMED_METHODS`)."""
 
         super().__init_subclass__(**kwargs)
-        if "runs_rollouts_on_lease" in cls.__dict__:
-            return
-        declared = next(klass for klass in cls.__mro__ if "runs_rollouts_on_lease" in klass.__dict__)
-        for name in _LEASE_METHODS:
-            owner = next(klass for klass in cls.__mro__ if name in klass.__dict__)
-            if owner is not GroupRolloutWorkflow and not issubclass(declared, owner):
-                cls.runs_rollouts_on_lease = False
-                return
+        for old, new in _RENAMED_METHODS.items():
+            if old in cls.__dict__:
+                warnings.warn(
+                    f"{cls.__qualname__}.{old} is never called: platoon 0.5.0 renamed GroupRolloutWorkflow.{old} to "
+                    f"{new}, so override {new} instead (platoon 0.6.0 removes this warning)",
+                    PlatoonDeprecationWarning,
+                    stacklevel=2,
+                )
+        for flag, methods in (("runs_rollouts_on_lease", _LEASE_METHODS), ("applies_credit", _CREDIT_METHODS)):
+            if flag not in cls.__dict__ and _overrides(cls, flag, methods):
+                setattr(cls, flag, False)
 
     def __init__(
         self,
@@ -342,7 +411,7 @@ class GroupRolloutWorkflow:
         group_stats = _group_stats.get()
         return group_stats if group_stats is not None else self.tracker
 
-    async def arun_episode(self, data: dict) -> list[tinker.Datum]:
+    async def arun_episode(self, data: dict) -> GroupOutput | PolicyGroupOutput:
         """Run multiple rollouts for a task and return training data.
 
         Args:
@@ -353,6 +422,9 @@ class GroupRolloutWorkflow:
             task generation workload for trainer-side batch accounting, and
             ``group_stats``, the group's own statistics, for the consumer to
             record in the step that consumes it (see the module docstring).
+            Under an entry's credit estimator that reads agents, the group's
+            rows tagged by who produced them, with the same report
+            (``PolicyGroupOutput``).
         """
         entries = self.entry_configs or {}
         if entries:
@@ -368,26 +440,34 @@ class GroupRolloutWorkflow:
             _group_entry.reset(entry_token)
             _group_config.reset(config_token)
             _group_stats.reset(token)
-        if isinstance(output, _TaskRolloutOutput):
+        if isinstance(output, GroupOutput):
             output.label = task_label(data, self.label_by)
             output.entry = entry
+        elif isinstance(output, PolicyGroupOutput):
+            label = task_label(data, self.label_by)
+            output.report = replace(output.report, label=label, entry=entry)
         return output
 
-    async def _run_group(self, data: dict) -> list[tinker.Datum]:
+    async def _run_group(self, data: dict) -> GroupOutput | PolicyGroupOutput:
         """Run the group's members (``_run_group_rollouts``), then compute its credit, in the order
-        :mod:`platoon.train.credit.group` describes: collect the members' datums; stop at the first reason the group
-        trains nothing before any credit (``_untrainable_verdict``); center each member's datums on its baseline
-        (``_assign_credit``, through ``assign_advantages``); filter the error tokens; and say what the group trains.
-        Every return is the group's output (``_make_task_output``), with its verdict and what each member returned."""
+        :mod:`platoon.train.credit.group` describes: collect the members' datums (under the per-datum stale filter each
+        stamped with its own policy version, :attr:`stale_filter`); stop at the first reason the group trains nothing
+        before any credit (``_untrainable_verdict``); credit the members' datums (``_assign_credit``: by the entry's
+        estimator, or centered on each member's baseline through ``assign_advantages``), the group failing when a
+        policy's scoring for its estimator does (``_credit_failed``); filter the error tokens; and say what the group
+        trains.  Every return is the group's output (``_make_task_output``), with its verdict and what each member
+        returned; under an estimator, as it credited it (``_credited_output``)."""
 
         with self._monitor().group_in_flight():
             raw_outcomes = await self._run_group_rollouts(data)
         outcomes = as_member_outcomes(raw_outcomes)
         results = [outcome.result for outcome in outcomes if outcome.result is not None]
-        # What each member returned, read before any datum is filtered (the per-task statistics).
+        # What each member returned, read before any datum is filtered or stamped (the per-task statistics).
         members = tuple(_member(outcome) for outcome in outcomes)
+        if self.stale_filter == "datum":  # the per-datum stale filter judges each datum by its own version
+            self._stamp_own_versions(data, results)
 
-        def output(datums: list[tinker.Datum], verdict: str, trainable_rollouts: int = 0) -> _TaskRolloutOutput:
+        def output(datums: list[tinker.Datum], verdict: str, trainable_rollouts: int = 0) -> GroupOutput:
             return self._make_task_output(
                 datums, outcomes=outcomes, trainable_rollouts=trainable_rollouts, verdict=verdict, members=members
             )
@@ -399,14 +479,36 @@ class GroupRolloutWorkflow:
         # The completed roots' rewards as the members returned them, for group_verdict's DEBUG line: an override of
         # assign_advantages may change them.
         completed_rewards = [result.task_reward for result in results if result.task_reward_valid]
-        self._assign_credit(data, results)
-        datums, error_filter_totals, _ = filter_error_tokens(results)
+        try:
+            credit = await self._assign_credit(data, results)
+        except ScoringFailed as exc:  # a teacher's scoring failed: this group alone fails
+            return output([], self._credit_failed(data, exc))
+        datums, error_filter_totals, kept = filter_error_tokens(results)
         if error_filter_totals:
             self._group_stats().scalar(**error_filter_totals)
         verdict, trainable_rollouts = group_verdict(datums, results, completed_rewards, self.config, data)
         if verdict == "no_datums":  # no datum the filter kept has a policy action token
-            return output([], verdict)
-        return output(datums, verdict, trainable_rollouts)
+            datums = []
+        grouped = output(datums, verdict, trainable_rollouts)
+        return grouped if credit is None else self._credited_output(grouped, credit, kept)
+
+    def _stamp_own_versions(self, data: dict, results: list[TrajectoryCollectionResult]) -> None:
+        """Stamp each member's datums with their own policy versions, under the per-datum stale filter.  A result whose
+        own versions do not match its datums (a subclass that changed ``result.datums`` after the conversion, or a
+        conversion that gives none) keeps its rollout's, warned once per start."""
+
+        unstamped = sum(not result.stamp_own_versions() for result in results)
+        if unstamped and not self._warned_unstamped:
+            self._warned_unstamped = True
+            logger.warning(
+                "train.stale_filter is datum, but the datums of %s of the %s members of task %s do not match their "
+                "own versions (TrajectoryCollectionResult.own_versions) in number, as when a workflow drops datums "
+                "after the conversion: they keep their rollout's version, by which the stale filter judges them. Keep "
+                "a result's own_versions in step with its datums (warned once per start)",
+                unstamped,
+                len(results),
+                data.get("task_id"),
+            )
 
     def _collect_datums(self, results: list[TrajectoryCollectionResult]) -> list[tinker.Datum]:
         """The members' datums, in member order.  Records the group's subagent sampling counts when its settings sample
@@ -424,7 +526,7 @@ class GroupRolloutWorkflow:
     def _untrainable_verdict(
         self,
         data: dict,
-        outcomes: list[_SingleRolloutOutcome],
+        outcomes: list[MemberOutcome],
         results: list[TrajectoryCollectionResult],
         datums: list[tinker.Datum],
     ) -> str | None:
@@ -482,11 +584,25 @@ class GroupRolloutWorkflow:
             return "no_datums"
         return None
 
-    def _assign_credit(self, data: dict, valid_results: list[TrajectoryCollectionResult]) -> None:
+    async def _assign_credit(self, data: dict, valid_results: list[TrajectoryCollectionResult]) -> Credit | None:
         """The group's credit, over the members that returned a result (``valid_results``) of the group of task row
-        ``data``: each member's datums centered on its baseline (:meth:`assign_advantages`)."""
+        ``data``: by its entry's estimator when the entry sets one (``_entry_estimator``, awaited over the group it
+        sees, ``_credit_group``, by :func:`~platoon.train.credit.runtime.assign_credit`), whose credit it returns;
+        else each member's datums centered on its baseline (:meth:`assign_advantages`), at once, as the workflow
+        always credited them, and None."""
 
-        self.assign_advantages(valid_results)
+        estimator = self._entry_estimator() if self.entry_credit else None
+        if estimator is None:
+            if len(self.trained_policies) > 1:
+                raise RuntimeError(
+                    "a run that trains several policies credits every group with an estimator, which tells each row's "
+                    f"policy, and the group of task {data['task_id']} has none: its workflow credits with hooks of its "
+                    "own (applies_credit is False), or its entry has no settings of its own"
+                )
+            self.assign_advantages(valid_results)
+            return None
+        tagged = crediting.tags_rows(self, estimator)
+        return await assign_credit(estimator, self._credit_group(data, valid_results, tagged=tagged))
 
     def compute_baselines(self, results: list[TrajectoryCollectionResult]) -> list[float]:
         """Return one baseline per usable rollout of a task group.
@@ -534,15 +650,21 @@ class GroupRolloutWorkflow:
                 }
             )
 
-    # Moved methods, as above: running the members (``members``) and their worker requests (``requests``).
-    _admission_semaphore = members._admission_semaphore
-    _admit_group = members._admit_group
+    # Moved methods, as above: a group's credit under its entry's estimator (``crediting``), running the members
+    # (``members``) and their worker requests (``requests``).
+    _entry_estimator = crediting._entry_estimator
+    _credit_group = crediting._credit_group
+    _credit_failed = crediting._credit_failed
+    _credited_output = crediting._credited_output
+    _startup_semaphore = members._startup_semaphore
+    _enter_startup_gate = members._enter_startup_gate
     _run_group_member = members._run_group_member
     _member_start_slot = members._member_start_slot
     _run_group_rollouts = members._run_group_rollouts
     _cancel_late_members = members._cancel_late_members
     _slug = requests._slug
     _model_binding = requests._model_binding
+    _policy_bindings = requests._policy_bindings
     _build_worker_request = requests._build_worker_request
     _rollout_budget_seconds = requests._rollout_budget_seconds
     _ipc_dir = requests._ipc_dir
@@ -594,12 +716,16 @@ class GroupRolloutWorkflow:
 
     _warm_up_request = requests._warm_up_request  # moved, as above (``requests``)
 
-    def publish_model_binding(self, sampling_client, version: int) -> None:
-        """Republish the trainer's sampling client for its rollout workers."""
+    def publish_model_binding(self, sampling_client, version: int, *, policy: str | None = None) -> None:
+        """Republish the trainer's sampling client for its rollout workers: the agents' default policy's, or that of
+        ``policy``, another policy its rollouts sample (``sampled_policies``)."""
 
         if self._isolation != "process":
             return
-        self.supervisor.publish_binding(sampling_client, version)
+        if policy is None:
+            self.supervisor.publish_binding(sampling_client, version)
+        else:
+            self.supervisor.publish_binding(sampling_client, version, policy=policy)
 
     # Moved methods, as above: a worker's files (``requests``), a member's outcome (``output``), the workers'
     # telemetry (``telemetry``).

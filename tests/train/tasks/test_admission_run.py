@@ -34,14 +34,15 @@ import pytest
 from fakes.config import mixture_config
 from fakes.runs import PositionGroups, RecordingClient, check_fates_once, crash_after, dispatch_state, run_start
 from fakes.tinker_service import FakeTinkerService, make_service_trainer
-from fakes.trainer import StepLog, datum, make_trainer
+from fakes.trainer import StepLog, datum, draws_of, make_trainer
 
 from platoon.train.checkpoints.pruning import read_checkpoint_records
 from platoon.train.components import ENVIRONMENT_COLUMN
 from platoon.train.dispatch.dispatcher import POSITION_COLUMN, Dispatcher
+from platoon.train.dispatch.source import RolloutSource
 from platoon.train.task_records import CHANGED_KEY
 from platoon.train.task_stats import MAIN, MemberResult, read_events
-from platoon.train.workflow.output import _TaskRolloutOutput
+from platoon.train.workflow.output import GroupOutput
 from platoon.utils.rollout_workload import RolloutWorkload
 
 # --- the fakes --------------------------------------------------------------------------------------------------------
@@ -108,7 +109,7 @@ class _VerdictGroups:
         self.verdicts[position] = verdict
         trained = verdict == "trained"
         label = data.get(self.column)
-        return _TaskRolloutOutput(
+        return GroupOutput(
             [datum(position, advantage=1.0 if trained else 0.0, version=version)],
             workload=RolloutWorkload(
                 trajectories=4, postmerge_datums=1, policy_eligible_datums=1, post_sampling_datums=1
@@ -603,7 +604,7 @@ class _Outage(_VerdictGroups):
         await asyncio.sleep(0)
         if self.how == "raise":
             raise RuntimeError(f"the environment is down (position {position})")
-        return _TaskRolloutOutput(
+        return GroupOutput(
             [],
             workload=RolloutWorkload(
                 trajectories=4, postmerge_datums=0, policy_eligible_datums=0, post_sampling_datums=0
@@ -777,7 +778,7 @@ def test_the_trainer_s_start_runs_no_rule_s_check_again(tmp_path):
     assert CountsChecks.calls == ["run"]
     trainer, logged, _client = _trainer(config)
     _train(trainer, _VerdictGroups(trainer.model_info.llm, verdict=lambda position, task_id: "trained"))
-    assert len(logged) == 2 and trainer._admissions is not None and CountsChecks.calls == ["run"]
+    assert len(logged) == 2 and draws_of(trainer).admissions is not None and CountsChecks.calls == ["run"]
 
 
 def test_groups_without_a_verdict_are_admitted_as_unknown_and_train_as_all_mode_would(tmp_path, caplog):
@@ -825,7 +826,7 @@ def test_evaluation_never_meets_a_rule(tmp_path):
     evaluation = Workflow(delay=0.0)
     asyncio.run(asyncio.wait_for(trainer.train(train_workflow=workflow, eval_workflow=evaluation), 120))
     settled = sum(1 for e in _events(trainer) if e["event"] == "settle")
-    assert evaluation.started >= 3 and trainer._admissions.calls == settled
+    assert evaluation.started >= 3 and draws_of(trainer).admissions.calls == settled
 
 
 # --- metrics -------------------------------------------------------------------------------------------------------
@@ -879,7 +880,7 @@ def test_all_mode_logs_no_admission_metric_and_builds_no_admission_set(tmp_path)
         )
         trainer, logged, _client = _trainer(config)
         _train(trainer, _VerdictGroups(trainer.model_info.llm, verdict=by_hash(0.5, "all")))
-        assert trainer._admissions is None
+        assert draws_of(trainer).admissions is None
         assert not any(key.startswith("train/admission/") for stats in logged.stats for key in stats)
 
 
@@ -1104,7 +1105,6 @@ def test_a_resume_that_cannot_read_the_dispatcher_s_state_goes_on_where_the_orde
     position the run trained or rejected is drawn again."""
 
     from platoon.train.checkpoints import dispatch_state as dispatch_state_module
-    from platoon.train.trainer import rl as rl_module
 
     service = FakeTinkerService()
     config = _config(
@@ -1120,10 +1120,7 @@ def test_a_resume_that_cannot_read_the_dispatcher_s_state_goes_on_where_the_orde
     )
     first, _logged = make_service_trainer(config, service, tasks=40)
     run_dir = Path(first.run_log_path)
-    write, checkpoint_state = (
-        dispatch_state_module.write_tasks_file,
-        rl_module.PlatoonTinkerRLTrainer._checkpoint_state,
-    )
+    write, checkpoint_state = dispatch_state_module.write_tasks_file, RolloutSource.checkpoint_state
     captured: dict[str, int] = {}
 
     def refused(directory, name, content):
@@ -1132,17 +1129,17 @@ def test_a_resume_that_cannot_read_the_dispatcher_s_state_goes_on_where_the_orde
             raise OSError(28, "No space left on device")
         return write(directory, name, content)
 
-    async def capture(self, checkpoint, loop_state):
+    async def capture(self, checkpoint):
         if checkpoint == "recovery-000004":
             captured["events"] = len(list(read_events(run_dir)))
-        return await checkpoint_state(self, checkpoint, loop_state)
+        return await checkpoint_state(self, checkpoint)
 
     monkeypatch.setattr(dispatch_state_module, "write_tasks_file", refused)
-    monkeypatch.setattr(rl_module.PlatoonTinkerRLTrainer, "_checkpoint_state", capture)
+    monkeypatch.setattr(RolloutSource, "checkpoint_state", capture)
     verdict = by_hash(0.3, "degraded")
     run_start(first, _VerdictGroups(first.model_info.llm, verdict=verdict))
     monkeypatch.setattr(dispatch_state_module, "write_tasks_file", write)
-    monkeypatch.setattr(rl_module.PlatoonTinkerRLTrainer, "_checkpoint_state", checkpoint_state)
+    monkeypatch.setattr(RolloutSource, "checkpoint_state", checkpoint_state)
     rows = crash_after(run_dir, "recovery-000004")
     assert "dispatch" not in rows[-1] and rows[-1]["next_position"] == captured["next_position"] > 4 * 2
     before = len(list(read_events(run_dir)))
@@ -1206,7 +1203,7 @@ def test_a_resume_that_turns_admission_off_goes_back_to_all_mode(tmp_path, caplo
     run_start(second, _VerdictGroups(second.model_info.llm, verdict=by_position(0, period=2)))
     [changed] = json.loads((run_dir / "lock.json").read_text())[CHANGED_KEY]
     assert "environments[default].group_admission: informative -> all" in changed["changes"]
-    assert second._admissions is None
+    assert draws_of(second).admissions is None
     assert not any(key.startswith("train/admission/") for stats in logged.stats for key in stats)
 
 
@@ -1267,7 +1264,7 @@ def test_a_rule_still_decides_when_the_statistics_stopped(tmp_path, monkeypatch)
     )
     trainer, logged, client = _trainer(config)
     _train(trainer, _VerdictGroups(trainer.model_info.llm, verdict=by_position(0, period=2)))
-    assert trainer._recorder.stopped
+    assert draws_of(trainer).recorder.stopped
     assert all(stats["train/admission/rejected"] >= 1 for stats in logged.stats[1:])  # informative still judged them
     assert all(token % 2 == 0 for sent in client.sent for token, _ in sent)
 
@@ -1289,7 +1286,7 @@ def test_group_record_that_raises_admits_the_group_and_nothing_escapes(tmp_path,
         },
     )
     trainer, logged, client = _trainer(config)
-    trainer._begin_task_records = lambda resume_info, start_batch: setattr(trainer, "_recorder", None)
+    monkeypatch.setattr(RolloutSource, "begin_task_records", lambda self, record, step: None)  # no statistics
     monkeypatch.setattr(task_records, "group_record", broken)
     _train(trainer, _VerdictGroups(trainer.model_info.llm, verdict=lambda position, task_id: "uniform"))
     assert len(logged) == 2 and all(stats["train/admission/errors"] == 2 for stats in logged.stats)

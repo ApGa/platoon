@@ -313,9 +313,75 @@ fake Tinker service whose saves the run's `checkpoints.jsonl` records as a real 
 rolls out, over 16 tasks whose every group is one datum with a nonzero advantage. It raises one `AssertionError` that names every
 check that failed: `trains` (a run of two steps saves its launch checkpoint at step 0 and its final one at step 2, each
 row with the run's counters), `interrupts` (a stop request in the third optimizer step of a run of four ends it at a
-step boundary, with `<step>_interrupted` saved there) and `resumes` (the next start resumes from that row and trains to
-the run's end). Call it outside a running event loop; it puts back the signal handlers it found. `check_trainer`
-checks the experimental trainer API (`platoon.experimental`), and changes with it.
+step boundary, with `<step>_interrupted` saved there), `resumes` (the next start resumes from that row and trains to
+the run's end), `runs step hooks` (a hook of the check's own, which adds one optimizer update at each step's end,
+hears the launch and each step's end in order, each step publishes once, and the run counts the hook's updates: end
+each step with `run.end_step`) and `keeps steps whole` (a stop request as that hook drains step 1, after the step's
+own updates, saves no checkpoint of the step when the trainer's steps are atomic, `needs().atomic_steps`, and lets the
+step end first when they are not, saving `000002_interrupted`). A run is as long as `train.max_training_steps` says;
+for a trainer whose options say how long it trains, `options_for_steps` gives the options of a run of so many steps,
+as for the sft trainer:
+
+```python
+from platoon.train.supervised.options import SupervisedOptions
+from platoon.train.trainer.sft import SupervisedTrainer
+
+check_trainer(
+    SupervisedTrainer,
+    options_for_steps=lambda steps: SupervisedOptions(
+        dataset="alpaca_demo",
+        dataset_dir="examples/sft/data",  # the sft example's datasets, from the repository's root
+        batch_size=4,
+        max_training_steps=steps,
+    ),
+)
+```
+
+Its policy renders with the toy renderer (`toy_renderer()`). Call it outside a running event loop; it puts back the
+signal handlers it found. `check_trainer` checks the experimental trainer API (`platoon.experimental`), and changes
+with it.
+
+The fake Tinker service it runs on is `fake_tinker_service()`, a context manager that yields the service
+(`FakePolicyService`): inside it, `platoon train` runs a config on CPU, and the service records what it was sent
+(`calls`, the `datums` it trained on, the checkpoint paths it `deleted`), as
+[`tests/examples/test_sft_example.py`](../../tests/examples/test_sft_example.py) does for the sft example:
+
+```python
+from platoon import cli
+from platoon.testing import fake_tinker_service
+
+
+def test_my_config_trains(tmp_path):
+    with fake_tinker_service() as service:
+        cli.main(["train", "my_sft.yaml", f"log_path={tmp_path}"])
+
+    assert service.calls.count("optim_step") == 6
+```
+
+## Check a credit estimator
+
+A credit estimator of your own ([Write a credit estimator](../extending/credit-estimators.md)) is checked against its
+contract by `check_credit_estimator`, which needs neither a model nor a training run:
+
+```python
+from platoon.testing import check_credit_estimator
+
+
+def test_my_estimator_keeps_the_contract():
+    check_credit_estimator("my_pkg.credit:ByRole", options={"leave_one_out": True})
+```
+
+It builds the estimator (a class, a registered name, or `module:Class`) with `options` checked against its schema, and
+credits fixture groups of four members, each a root (role `policy`) that delegated to one subagent (role `helper`),
+with an interrupted root and a subagent whose rows were left out; an estimator that does not read agents gets them
+without agents or tags. It raises one `AssertionError` that names every check that failed: `protocol` (it is an
+estimator class: an async `assign`, a bool `needs_agents`, a synchronous `settle` if any, both or neither of `state()`
+and `load_state()`; it builds, and its `check`, given a loaded config of one entry, returns or raises `ValueError`),
+`options` (and a typed schema refuses an unknown key), `action_tokens` (every row keeps its length, its type and its
+values off the action tokens, and every advantage is finite) and `resumes` (an estimator that credited and settled
+three groups, and a new one that took up its state as JSON, credit the next group alike, and `assign` alone leaves
+`state()` as it was). Call it outside a running event loop. `check_credit_estimator` checks the
+experimental credit API (`platoon.experimental`), and changes with it.
 
 ## Reference
 
@@ -337,8 +403,11 @@ checks the experimental trainer API (`platoon.experimental`), and changes with i
 | `TOY_MODEL_NAME`, `TOY_RENDERER_NAME`, `TOY_TOKENIZER_DIR` | `"platoon/toy"`, `"qwen3_instruct"`, and the directory of the toy tokenizer's files |
 | `check_task_sampler` | `check_task_sampler(sampler, *, options=None, levels=("entry", "run"), budget_ms=20.0)`: raises `AssertionError` naming each check a task sampler fails ([Check a task sampler](#check-a-task-sampler)) |
 | `check_group_admission` | `check_group_admission(rule, *, options=None, levels=("run", "entry"), budget_ms=2.0)`: raises `AssertionError` naming each check a group admission rule fails ([Check a group admission rule](#check-a-group-admission-rule)) |
-| `check_trainer` | `check_trainer(trainer, *, options=None)`: raises `AssertionError` naming each check a trainer fails ([Check a trainer](#check-a-trainer)) |
+| `check_trainer` | `check_trainer(trainer, *, options=None, options_for_steps=None)`: raises `AssertionError` naming each check a trainer fails ([Check a trainer](#check-a-trainer)) |
+| `fake_tinker_service` | `fake_tinker_service(*, stop_at=None)`: a context manager that yields a `FakePolicyService` in place of the Tinker service, puts back the signal handlers a run installs, and with `stop_at` asks the run to stop in that optimizer step |
+| `FakePolicyService` | The fake service: `calls` (what it was asked, in order), `datums` (each datum sent to forward_backward), `deleted` (the checkpoint paths deleted), `optimizer_steps` |
+| `check_credit_estimator` | `check_credit_estimator(estimator, *, options=None)`: raises `AssertionError` naming each check a credit estimator fails ([Check a credit estimator](#check-a-credit-estimator)) |
 
-The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission` and
-`check_trainer`, which check the experimental sampler, admission and trainer APIs and change with them; its submodules
-are not.
+The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission`,
+`check_trainer`, `fake_tinker_service`, `FakePolicyService` and `check_credit_estimator`, which serve the
+experimental sampler, admission, trainer and credit APIs and change with them; its submodules are not.

@@ -74,6 +74,10 @@ package.
   count toward the batch, and check it with `check_group_admission`.
 - [Run rollouts on the lease](extending/rollout-leases.md) (experimental): return each rollout's permit as it ends,
   from a workflow of your own, under `train.permit_release: rollout`.
+- [Write a step hook](extending/step-hooks.md) (experimental): add work at the end of each training step, such as
+  supervised updates of the policy RL trains, attached to the `rl` trainer from the config.
+- [Write a credit estimator](extending/credit-estimators.md) (experimental): turn a group's rewards into advantages
+  your own way, per agent and role, chosen per environment entry, and check it with `check_credit_estimator`.
 
 ## Reference
 
@@ -89,6 +93,8 @@ Generated from the code by `scripts/gen_reference.py`; `tests/docs/test_referenc
 
 - [Architecture](architecture.md): how environments, harnesses, the model gateway, episode programs and the
   trainer fit together, and why.
+- [The training code](training-code.md): a map of `platoon/train` for contributors, from `platoon train` to one
+  training step, with a link to the code of each part.
 
 ## RFCs
 

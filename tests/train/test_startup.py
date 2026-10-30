@@ -1,5 +1,6 @@
 """What a run readies before its first rollout (:mod:`platoon.train.startup`): the fork server's preload derived from
-the environment entries, the task lists an in-process ORS environment builds once, and the toolchains staged ahead."""
+the environment entries, the task lists an in-process ORS environment builds once, and the toolchains staged ahead;
+and the node services a start stops as it ends."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -253,3 +255,52 @@ def test_without_toolchains_or_workflows_the_startup_is_ready_at_once():
 
     asyncio.run(scenario())
     assert startup.__all__  # the module's public names
+
+
+# ------------------------------------------------------------------------------------- node services as the start ends
+
+
+class _Startup:
+    """A rollout startup whose node services failed (``failure``), or not."""
+
+    def __init__(self, failure: str | None) -> None:
+        self.failure = failure
+        self.closed = 0
+
+    async def close(self) -> str | None:
+        self.closed += 1
+        return self.failure
+
+
+class _Run:
+    """A start's lifecycle that ends, or fails with ``error``."""
+
+    def __init__(self, error: BaseException | None = None) -> None:
+        self.error = error
+
+    async def execute(self) -> None:
+        if self.error is not None:
+            raise self.error
+
+
+def test_a_start_stops_its_node_services_as_it_ends_and_fails_once_they_failed():
+    from platoon.envs.harbor.node_services import NodeServiceError
+    from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+
+    trainer: Any = object.__new__(PlatoonTinkerRLTrainer)  # only what _execute uses
+    asyncio.run(trainer._execute(_Run()))  # no startup yet: nothing to stop
+    trainer._startup = served = _Startup(None)
+    asyncio.run(trainer._execute(_Run()))
+    trainer._startup = failed = _Startup("the judge could not be started again")
+    with pytest.raises(NodeServiceError, match="node services failed: the judge could not be started again"):
+        asyncio.run(trainer._execute(_Run()))
+    with pytest.raises(KeyError):  # the start's own failure is its error
+        asyncio.run(trainer._execute(_Run(KeyError("checkpoint"))))
+    assert (served.closed, failed.closed) == (1, 2)
+
+
+def test_without_node_services_the_startup_hears_of_no_failure_and_closes_at_once():
+    begun = asyncio.run(RolloutStartup.begin([]))
+    heard: list[str] = []
+    begun.on_node_service_failure(heard.append)
+    assert asyncio.run(begun.close()) is None and heard == []

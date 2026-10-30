@@ -24,6 +24,8 @@ What a pod gives a stack and the host network does not, the fallback makes up fo
   nothing checks that a service refuses a request without it.
 - **No network.**  A stack whose network is ``none`` is refused, as is a switch to ``none``: its services have the
   host's, which the fallback cannot take away.
+- **Node services.**  A stack that reaches a node service (``externals``) is refused: the relay to it would be a port
+  of this host that every process of the node reaches.
 - **Your own uid.**  The stack's volumes are directories of yours on this host, which its services write as your uid.
   A provider whose sandboxes run other users (``docker``, whose stacks run as compose projects anyway, and
   ``singularity`` with ``fakeroot``) is refused, since what those users wrote there your uid could not delete
@@ -62,6 +64,12 @@ NO_NETWORK = (
     "that runs without a network (a task's no-network phase, internal networks only, network_policy: none) runs as a "
     "pod or a compose project"
 )
+#: Why the fallback runs no stack that reaches a node service.
+NO_EXTERNALS = (
+    "the host-network fallback relays a port of this host to what a stack reaches outside it (a node service), and "
+    "every process of the node would reach that port: a stack that reaches a node service runs as a pod, or on the "
+    "process provider"
+)
 _LISTEN = "0A"  # a socket's state in /proc/net/tcp: TCP_LISTEN
 _TABLES = (("/proc/net/tcp", 4), ("/proc/net/tcp6", 6))  # this process's network namespace: the host's
 
@@ -88,6 +96,8 @@ class HostNetworkStackProvider:
         isolated = [name for name, service in spec.services.items() if service.sandbox.network != "host"]
         if spec.network == "none" or isolated:
             raise ValueError(NO_NETWORK)
+        if spec.externals:
+            raise ValueError(NO_EXTERNALS)
         return await start_host_stack(self.provider, spec, root=self.root, reaper=self, backend_class=_Backend)
 
     async def reap(self, labels: Mapping[str, str]) -> int:
@@ -232,4 +242,12 @@ def _address(text: str, family: int) -> ipaddress.IPv4Address | ipaddress.IPv6Ad
     return ipaddress.IPv4Address(words) if family == 4 else ipaddress.IPv6Address(words)
 
 
-__all__ = ["NO_NETWORK", "HostNetworkStackProvider", "Listener", "beyond_loopback", "host_network_refusal", "listeners"]
+__all__ = [
+    "NO_EXTERNALS",
+    "NO_NETWORK",
+    "HostNetworkStackProvider",
+    "Listener",
+    "beyond_loopback",
+    "host_network_refusal",
+    "listeners",
+]

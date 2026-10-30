@@ -21,24 +21,21 @@ from types import SimpleNamespace
 import pytest
 import tinker
 import torch
+from fakes.workers import FakeProxySession
 from tinker import TensorData
 
 import platoon.train.tinker  # noqa: F401  (import order: package before data processing)
 from platoon.config_defs import RolloutConfig
 from platoon.envs.service import EnvSetupError
 from platoon.task import Task
-from platoon.train.tinker.rollout_metrics import (
-    RolloutTimeline,
-    current_timeline,
-    record_model_call,
-    timeline_scope,
-)
+from platoon.train.tinker.rollout_metrics import current_timeline, record_model_call
 from platoon.train.workers import run as run_module
 from platoon.train.workers.binding import FollowingSamplingClient, publish_binding
 from platoon.train.workers.protocol import (
     PROTOCOL_VERSION,
     ConversionPolicy,
     ModelBinding,
+    PolicyRolloutWorkerRequest,
     RefResolutionError,
     RolloutWorkerRequest,
     dump_response,
@@ -52,29 +49,6 @@ def named_reward_processor(trajectory: dict) -> tuple[float, dict]:
     """A module-level, non-default reward processor that resolves by reference."""
 
     return trajectory["reward"], {"reward/named": trajectory["reward"]}
-
-
-class _FakeSession:
-    """Stands in for TinkerLLMProxySession with an injectable interaction map.
-
-    It binds a timeline the same way the real session does, because that
-    binding is what the proxy records model-call timings into.
-    """
-
-    interactions_to_inject: dict = {}
-
-    def __init__(self) -> None:
-        self.interactions = dict(type(self).interactions_to_inject)
-        self._scope = timeline_scope(RolloutTimeline())
-        self.timeline = None
-
-    async def __aenter__(self):
-        self.timeline = self._scope.__enter__()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self._scope.__exit__(exc_type, exc, tb)
-        return None
 
 
 def _interaction(routing_id, input_tokens=100, output_tokens=10):
@@ -143,10 +117,10 @@ def _request(tmp_path, **overrides) -> RolloutWorkerRequest:
 
 @pytest.fixture(autouse=True)
 def _fake_proxy_session(monkeypatch):
-    monkeypatch.setattr(run_module, "TinkerLLMProxySession", _FakeSession)
-    _FakeSession.interactions_to_inject = {}
+    monkeypatch.setattr(run_module, "TinkerLLMProxySession", FakeProxySession)
+    FakeProxySession.interactions_to_inject = {}
     yield
-    _FakeSession.interactions_to_inject = {}
+    FakeProxySession.interactions_to_inject = {}
 
 
 def _run(request, rollout_fn, result=None, monkeypatch=None, **kwargs):
@@ -246,7 +220,7 @@ def test_completed_rollout_carries_the_funnel(tmp_path, monkeypatch):
     async def rollout_fn(_task, _config):
         return {"trajectories": {"root": {"steps": [{}, {}]}}}
 
-    _FakeSession.interactions_to_inject = {"c1": _interaction(11), "c2": _interaction(12)}
+    FakeProxySession.interactions_to_inject = {"c1": _interaction(11), "c2": _interaction(12)}
     response = _run(
         _request(tmp_path), rollout_fn, result=_result(num_datums=2, stats_datums=3), monkeypatch=monkeypatch
     )
@@ -313,7 +287,7 @@ def test_a_rollout_that_raises_still_reports_the_model_calls_it_made(tmp_path):
     """The session's interactions are taken whether the rollout returned or raised: an error after two model calls
     reports both, and their routing ids."""
 
-    _FakeSession.interactions_to_inject = {"c1": _interaction(7), "c2": _interaction(None)}
+    FakeProxySession.interactions_to_inject = {"c1": _interaction(7), "c2": _interaction(None)}
 
     async def raising(_task, _config):
         raise RuntimeError("boom")
@@ -417,7 +391,7 @@ def test_routing_id_present_counts_only_non_none(tmp_path, monkeypatch):
     async def rollout_fn(_task, _config):
         return {"trajectories": {"root": {"steps": [{}]}}}
 
-    _FakeSession.interactions_to_inject = {
+    FakeProxySession.interactions_to_inject = {
         "c1": _interaction(7),
         "c2": _interaction(None),
         "c3": _interaction(9),
@@ -707,3 +681,25 @@ def test_the_response_names_the_reward_key_its_roots_scored_outcome_trained(tmp_
     assert _run(_request(tmp_path), platoons_zero, result=result, monkeypatch=monkeypatch).reward_key is None
     empty = _result(num_datums=0, stats_datums=0)  # no result: the key still travels
     assert _run(_request(tmp_path), graded, result=empty, monkeypatch=monkeypatch).reward_key == "correctness"
+
+
+@pytest.mark.parametrize("tagging", [False, True])
+def test_the_conversion_tags_the_datums_when_the_request_asks(tmp_path, monkeypatch, tagging):
+    """A protocol 3 request (a credit estimator that reads agents) has its rollout's datums tagged; protocol 2's not."""
+
+    seen: dict = {}
+
+    def convert(**kwargs):
+        seen.update(kwargs)
+        return _result(num_datums=1, stats_datums=1)
+
+    async def rollout_fn(_task, _config):
+        return {"trajectories": {"root": {"steps": [{}]}}}
+
+    monkeypatch.setattr(run_module, "get_train_data_for_trajectory_collection", convert)
+    request = _request(tmp_path)
+    if tagging:
+        request = PolicyRolloutWorkerRequest.tagging(request)
+    response = _run(request, rollout_fn)
+    assert response.status == "completed" and seen["tag_datums"] is tagging
+    assert response.protocol_version == PROTOCOL_VERSION  # the response is protocol 2's either way

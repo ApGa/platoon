@@ -16,14 +16,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
 from platoon.sandbox import cleanup as sandbox_cleanup
-from platoon.train.policy.spec import PolicyId, PolicySpec
+from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec, Stepping
 from platoon.train.trainer import signals, waiting
+
+# A start's stats logger is made of this module's name (TrainerBase._new_stats_logger), so that a patch of it reaches
+# the stats logger a start opens, also one made through the old path platoon.train.tinker.rl, as in platoon 0.4.0.
+from platoon.utils.stats_logger import StatsLogger
 
 if TYPE_CHECKING:
     from platoon.train.checkpoints.resume import StartPoint
     from platoon.train.policy.set import PolicySet
     from platoon.train.trainer.run import TrainerRun
-    from platoon.utils.stats_logger import StatsLogger
     from platoon.utils.stats_tracker import StatsTracker
 
 logger = logging.getLogger(__name__)
@@ -51,11 +54,24 @@ class TaskSources:
 
 @dataclass(frozen=True)
 class TrainerNeeds:
-    """What a trainer asks of the run, which ``platoon train`` reads before it lists any task: ``rollouts``, whether it
-    trains on rollouts of the run's training tasks (then the run lists them, builds the training workflow, and opens
-    the start's draws when the trainer asks for them, ``run.rollouts()``)."""
+    """What a trainer asks of the run, which ``platoon train`` reads before it lists any task (RFC 0021, rule 10 for
+    the second and third)."""
 
+    # Whether it trains on rollouts of the run's training tasks: then the run lists them, builds the training workflow,
+    # and opens the start's draws when the trainer asks for them (run.rollouts()).
     rollouts: bool = False
+    # Whether its steps reach a checkpoint whole or not at all: once a step sent training work, an interrupt saves no
+    # <step>_interrupted checkpoint of it, and the resume starts from the last full one.  The rl trainer's are not.
+    atomic_steps: bool = True
+    # Whether an optimizer step that the service skipped, or whose metrics are not finite, raises (UpdateRejected)
+    # before anything publishes, for every update, the step hooks' too.  The rl trainer only logs such metrics.
+    fail_closed_updates: bool = True
+    # Whether each training episode sees its draw (ctx.draw: platoon.programs.DrawInfo), the key that a step's end
+    # names it by (StepEnd.consumed).  Off, the rollouts' requests are as they always were.
+    draw_provenance: bool = False
+    # The clocks the run builds for its trained policies: one for them all (lockstep), or one each (independent: each
+    # policy steps, publishes and saves on its own; a run of one trained policy has one clock either way).
+    stepping: Stepping = "lockstep"
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,7 @@ class TrainerSetup:
       trainer's constructor registers.
     - ``options``: the trainer's options (None: it takes none).
     - ``tasks``: the run's tasks, when the trainer rolls them out.
+    - ``agents``: which policy each agent samples (:func:`~platoon.train.policy.spec.agent_bindings`).
     - ``workflow_builder``: how the start's workflows are built on the trainer's policies, for a trainer that rolls
       out.  :meth:`build_workflows` calls it as the run begins."""
 
@@ -76,6 +93,8 @@ class TrainerSetup:
     policy_specs: Mapping[PolicyId, PolicySpec]
     options: Any = None
     tasks: TaskSources | None = None
+    # Which policy each agent samples (agents:); None: every agent samples the first policy.
+    agents: AgentBindings | None = None
     # Launch's builder of the start's workflows, on the trainer's policies; None: the setup builds none.
     workflow_builder: "Callable[[PolicySet], Workflows] | None" = None
 
@@ -91,9 +110,12 @@ class TrainerSetup:
 
 @dataclass(frozen=True)
 class StepPlan:
-    """Where a start's steps end: ``end_step``, the step after the run's last one (the start trains up to it)."""
+    """Where a start's steps end: ``end_step``, the step after the run's last one (the start trains up to it); and
+    ``steps_per_epoch``, the steps of one pass over what the trainer trains on, by which ``checkpoint.strategy: epoch``
+    counts (None: a pass is a step)."""
 
     end_step: int
+    steps_per_epoch: int | None = None
 
 
 class Trainer(Protocol):
@@ -119,8 +141,10 @@ class TrainerBase:
     """An optional base of trainers.  ``run()`` takes the trainer through the lifecycle every trainer shares
     (:class:`~platoon.train.trainer.run.TrainerRun`), which calls the hooks below in order, each with the run; every
     hook has a default but ``prepare`` and ``run_steps``, which a subclass writes.  ``async with`` opens what every
-    start logs to, the stats logger (which resumes the W&B run of the checkpoint the start resumes from) and the train
-    tracker, and labels every sandbox the run starts with the run, so that the run's sandboxes can be reaped by it."""
+    start logs to, the stats logger (:attr:`stats_logger`, which resumes the W&B run of the checkpoint the start
+    resumes from) and the train tracker (:attr:`train_tracker`), and labels every sandbox the run starts with the run,
+    so that the run's sandboxes can be reaped by it.  The policies' training clients open before ``prepare``, each
+    trainable one with its optimizer's parameters."""
 
     # What the trainer was built with; None for a trainer built with a constructor of its own, outside platoon train.
     setup: TrainerSetup | None = None
@@ -128,7 +152,7 @@ class TrainerBase:
     options: Any = None
     # The run's policies, registered as the trainer is built.
     policies: "PolicySet"
-    _stats_logger: "StatsLogger | None" = None
+    _stats_logger: StatsLogger | None = None
     _train_tracker: "StatsTracker | None" = None
     _sandbox_labels: ExitStack | None = None
 
@@ -137,7 +161,7 @@ class TrainerBase:
 
         self.setup, self.config, self.options = setup, setup.config, setup.options
         # The policies the config declares, and the model gateway that samples them, this process's default.
-        self.policies = PolicySet.build(setup.policy_specs)
+        self.policies = PolicySet.build(setup.policy_specs, setup.agents)
 
     @classmethod
     def needs(cls, config: Any, options: Any) -> TrainerNeeds:
@@ -148,6 +172,23 @@ class TrainerBase:
     @classmethod
     def from_setup(cls, setup: TrainerSetup) -> Self:
         return cls(setup)
+
+    @property
+    def stats_logger(self) -> "StatsLogger":
+        """The run's stats logger, which ``async with`` opens: each step's metrics go to it (``log(step=, stats=)``)."""
+
+        if self._stats_logger is None:
+            raise RuntimeError(f"{type(self).__name__}'s stats logger opens with 'async with trainer:'")
+        return self._stats_logger
+
+    @property
+    def train_tracker(self) -> "StatsTracker":
+        """The run's train tracker, which ``async with`` opens: what a step records (a learner's metrics among it),
+        until the step exports it."""
+
+        if self._train_tracker is None:
+            raise RuntimeError(f"{type(self).__name__}'s train tracker opens with 'async with trainer:'")
+        return self._train_tracker
 
     @property
     def run_log_path(self) -> str:
@@ -194,10 +235,8 @@ class TrainerBase:
             self._stats_logger.close()
         return False
 
-    def _new_stats_logger(self, stats_logger_config: Any) -> "StatsLogger":
+    def _new_stats_logger(self, stats_logger_config: Any) -> StatsLogger:
         """The run's stats logger, with the run's config as its W&B run's config."""
-
-        from platoon.utils.stats_logger import StatsLogger
 
         return StatsLogger(stats_logger_config, exp_config=self.config)
 
@@ -212,7 +251,8 @@ class TrainerBase:
 
     def check(self, run: "TrainerRun") -> None:
         """1. Before any service opens: raise ``ConfigError`` for what the trainer cannot run.  Participants of the
-        run's checkpoints registered here take up the start point before any training client opens."""
+        run's checkpoints registered here (``run.checkpoints.register``) take up the start point before any training
+        client opens; step hooks may register here too (``run.hooks.register``), or in ``prepare``."""
 
     async def prepare(self, run: "TrainerRun", start: "StartPoint") -> StepPlan:
         """5. The policies are open at ``start``: prepare the steps, and say where they end.  A trainer that rolls out
@@ -232,18 +272,21 @@ class TrainerBase:
 
     async def run_steps(self, run: "TrainerRun") -> None:
         """8. The steps, from ``run.clock.step`` to ``run.clock.end``, stopping at a step boundary once a stop is asked
-        for (``run.shutdown``).  Steps that the stop request stopped short of the end were interrupted: the run then
-        saves ``<step>_interrupted``, also when they did not set ``run.interrupted``, which an interrupt of their own
-        sets."""
+        for (``run.shutdown``); a step awaits the service with ``run.wait``.  Each step ends with ``run.end_step``: the
+        step hooks, the publication of the policies it updated, and the clock's advance.  Steps that the stop request
+        stopped short of the end were interrupted: the run then saves ``<step>_interrupted``, also when they did not set
+        ``run.interrupted``, which an interrupt of their own sets, and so does a ``TrainInterrupted`` they raise.  The
+        run stops the clock's watchdog after them."""
 
         raise NotImplementedError(f"{type(self).__name__} must write its steps (TrainerBase.run_steps)")
 
     async def close(self, run: "TrainerRun") -> None:
-        """10. After the save at exit: close what the trainer opened."""
+        """10. After the save at exit, and after a failure too (``run.ended`` says which): close what the trainer
+        opened.  The run's step hooks and participants close after it."""
 
     # What the lifecycle calls through the trainer, so that a subclass or a test may replace it on the class or an
-    # instance: the waiter of the run's saves, the signal handlers, how the policies open, and what a start that had
-    # no step left to train says.
+    # instance: the waiter of the run's saves, the signal handlers, how the policies open, where a recovery checkpoint
+    # that a step's end saved goes, and what a start that had no step left to train says.
 
     _await_with_heartbeat = waiting._await_with_heartbeat
     _setup_signal_handlers = signals._setup_signal_handlers
@@ -252,6 +295,10 @@ class TrainerBase:
         """4. Open the policies' training clients at the start point; False when training was stopped first."""
 
         return await run.policies.open(start, stop=run.shutdown)
+
+    def _recovery_saved(self, paths: dict[str, str], policy_version: int) -> None:
+        """8. A recovery checkpoint that a step's end saved (``run.end_step``), which ``checkpoints.jsonl`` now records,
+        at ``policy_version``: a trainer that prunes them (``checkpoint.keep_recovery``) hands it to its pruner."""
 
     def _nothing_to_train(self, run: "TrainerRun") -> None:
         """9. Say why a start that resumed at its last step trained nothing."""

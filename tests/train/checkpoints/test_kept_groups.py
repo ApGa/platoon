@@ -23,7 +23,7 @@ from platoon.train.checkpoints.kept_groups import (
     write_kept,
 )
 from platoon.train.task_stats import GroupRecord, MemberResult
-from platoon.train.workflow.output import _TaskRolloutOutput
+from platoon.train.workflow.output import GroupOutput
 from platoon.utils.rollout_stats import RolloutStats
 from platoon.utils.rollout_workload import RolloutWorkload
 from platoon.utils.stats_tracker import DeferredStats, ReduceType, StatsTracker
@@ -58,7 +58,7 @@ def _member(valid: bool) -> MemberResult:
     )
 
 
-def _group_output() -> _TaskRolloutOutput:
+def _group_output() -> GroupOutput:
     group_stats = DeferredStats()
     group_stats.scalar(**{"rollout_completion/rollout_time": 1.5})
     group_stats.denominator(**{"credit/n": torch.tensor([True, False, True])})
@@ -66,7 +66,7 @@ def _group_output() -> _TaskRolloutOutput:
         denominator="credit/n", reduce_type=ReduceType.AVG_MIN_MAX, **{"credit/x": torch.tensor([1.0, 2.0, 3.0])}
     )
     rollout_stats = RolloutStats(groups=1, values={"task_reward": [0.98, 0.0]}, counts={"outcome/scored": 1})
-    return _TaskRolloutOutput(
+    return GroupOutput(
         [_datum([5, 6, 7], [-0.5, float("-inf"), float("nan")]), _datum([9, 8, 7], [0.0, -1.25, -2.0])],
         workload=RolloutWorkload(environment_steps=4, model_calls=4, trajectories=2, postmerge_datums=2),
         requested_rollouts=2,
@@ -118,7 +118,7 @@ def test_a_kept_group_reads_back_as_it_settled(tmp_path):
     key, entry, label, read_record, read_output = decode_group(data)
 
     assert (key, entry, label, read_record) == ((2, 5), "quick", "quick", _record())
-    assert type(read_output) is _TaskRolloutOutput and len(read_output) == 2
+    assert type(read_output) is GroupOutput and len(read_output) == 2
     for read, kept in zip(read_output, output):
         assert read.model_input == kept.model_input
         assert read.loss_fn_inputs.keys() == kept.loss_fn_inputs.keys()
@@ -164,7 +164,7 @@ def test_a_workflow_s_plain_datums_and_a_failed_group_are_kept_and_other_outputs
 def test_every_field_of_a_group_s_output_is_kept():
     """A field that GroupRolloutWorkflow's output gains must be kept too, or a resume trains the group without it."""
 
-    fields = [name for name in inspect.signature(_TaskRolloutOutput.__init__).parameters if name != "self"]
+    fields = [name for name in inspect.signature(GroupOutput.__init__).parameters if name != "self"]
     encoded = _encode_output(_group_output())
     assert encoded is not None
     assert [name for name in fields if name not in encoded] == []

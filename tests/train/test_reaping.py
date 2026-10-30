@@ -485,10 +485,10 @@ async def answer(task, config) -> dict:
     }
 
 
-def test_eval_records_itself_and_reaps_the_sandboxes_labelled_with_it_as_it_exits(tmp_path, capsys, caplog):
+def test_eval_records_itself_and_reaps_the_sandboxes_labelled_with_it_before_and_as_it_exits(tmp_path, capsys, caplog):
     caplog.set_level(logging.INFO)
     root, output = tmp_path / "sandboxes", tmp_path / "results"
-    leftover = asyncio.run(leave_sandbox(root, sandbox_cleanup.run_label(output)))  # a killed evaluation's, here
+    leftover = asyncio.run(leave_sandbox(root, sandbox_cleanup.run_label(output)))  # an earlier, killed start's
     elsewhere = asyncio.run(leave_sandbox(root, sandbox_cleanup.run_label(tmp_path / "other")))
     entry = {
         "dataset_loader": f"{__name__}:load_tasks",
@@ -508,9 +508,97 @@ def test_eval_records_itself_and_reaps_the_sandboxes_labelled_with_it_as_it_exit
         record = reaping.read_process(output)
         assert record is not None and (record.command, record.pid) == ("eval", os.getpid())
         assert not alive(leftover) and alive(elsewhere)
-        assert f"labelled {RUN}={output} as the run exits (this process's own: 0, process: 1)" in caplog.text
+        assert f"labelled {RUN}={output} before the run starts (process: 1)" in caplog.text
+        assert f"labelled {RUN}={output} as the run exits (this process's own: 0, process: 0)" in caplog.text
     finally:
         reaping.RunReaper(tmp_path / "other", [("process", {"root": str(root)})]).reap("after the test")
+
+
+HANGING_ROLLOUT = """
+import asyncio
+import os
+from pathlib import Path
+
+from platoon.sandbox import SandboxSpec
+from platoon.sandbox.process import ProcessProvider
+from platoon.task import Task
+
+
+def load_tasks(config, split, **kwargs):
+    return ["one"]
+
+
+def load_task(task_id):
+    return Task(goal="hang", id=task_id)
+
+
+async def hang(task, config):
+    sandbox = await ProcessProvider(root=os.environ["HANG_ROOT"]).start(SandboxSpec(image="local"))
+    pid = (await sandbox.exec("sleep 300 > /dev/null 2>&1 & echo $!")).stdout.strip()
+    mark = Path(os.environ["HANG_MARK"])
+    try:
+        mark.write_text(pid)
+        await asyncio.sleep(3600)
+    finally:
+        mark.with_suffix(".ended").write_text("the rollout ended")
+"""
+
+
+@pytest.mark.parametrize("ctrl_c", ["default", "ignored"])  # ignored: as in a script's background job
+def test_eval_that_gets_sigterm_stops_as_at_ctrl_c_reaps_its_sandboxes_and_exits_143(tmp_path, ctrl_c):
+    """A scheduler's SIGTERM at the end of a job's time: the rollout in flight is cancelled, the sandbox it left is
+    reaped as the evaluation exits, and the exit status says SIGTERM ended it."""
+
+    root, output, mark = tmp_path / "sandboxes", tmp_path / "results", tmp_path / "rollout.pid"
+    (tmp_path / "modules").mkdir()
+    (tmp_path / "modules" / "hanging_rollout.py").write_text(HANGING_ROLLOUT)
+    entry = {
+        "dataset_loader": "hanging_rollout:load_tasks",
+        "task_loader": "hanging_rollout:load_task",
+        "rollout": "hanging_rollout:hang",
+        "service": "harbor",
+        "service_kwargs": {"task_dirs": [], "provider": "process", "provider_options": {"root": str(root)}},
+    }
+    config = tmp_path / "eval.yaml"
+    config.write_text(
+        yaml.safe_dump({"inference": {"model_name": "fake-model", "output_dir": str(output)}, "environments": [entry]})
+    )
+    paths = [str(tmp_path / "modules"), *filter(None, [os.environ.get("PYTHONPATH")])]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(paths), "HANG_ROOT": str(root), "HANG_MARK": str(mark)}
+
+    def preexec() -> None:
+        if ctrl_c == "ignored":
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    run = subprocess.Popen(
+        [sys.executable, "-m", "platoon.cli", "eval", str(config)],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        preexec_fn=preexec,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not mark.exists() and run.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert mark.exists(), run.communicate(timeout=60)
+        sleeper = int(mark.read_text())
+        assert alive(sleeper)
+
+        run.send_signal(signal.SIGTERM)
+        _, err = run.communicate(timeout=120)
+
+        assert run.returncode == 128 + signal.SIGTERM, err[-3000:]
+        assert "platoon: the evaluation stopped on SIGTERM" in err
+        assert mark.with_suffix(".ended").exists()  # cancelled, as at Ctrl+C
+        assert f"labelled {RUN}={output} as the run exits" in err
+        assert not alive(sleeper)
+    finally:
+        if run.poll() is None:
+            run.kill()
+            run.wait()
+        reaping.RunReaper(output, [("process", {"root": str(root)})]).reap("after the test")
 
 
 @pytest.mark.parametrize("stage", ["full", "report"])

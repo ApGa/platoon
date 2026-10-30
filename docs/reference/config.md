@@ -19,6 +19,8 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 - [`CheckpointConfig`](#checkpointconfig)
 - [`StatsConfig`](#statsconfig)
 - [`WatchdogConfig`](#watchdogconfig)
+- [`PolicyConfig`](#policyconfig)
+- [`AgentsConfig`](#agentsconfig)
 - [`AdamParams`](#adamparams)
 - [`WorkflowConfig`](#workflowconfig)
 - [`RefillConfig`](#refillconfig)
@@ -27,6 +29,8 @@ This page is generated from the config classes by `scripts/gen_reference.py`. To
 - [`EvalOverrides`](#evaloverrides)
 - [`AgentTreeConfig`](#agenttreeconfig)
 - [`WandBConfig`](#wandbconfig)
+- [`PolicyCheckpointConfig`](#policycheckpointconfig)
+- [`AgentRoleConfig`](#agentroleconfig)
 - [`RolloutConfig`](#rolloutconfig)
 - [`StragglerPolicy`](#stragglerpolicy)
 - [`EntryRolloutSettings`](#entryrolloutsettings)
@@ -52,13 +56,16 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 |---|---|---|---|
 | `train` | [TrainConfig](#trainconfig) | required |  |
 | `eval` | [EvalConfig](#evalconfig-platoon-train-config-defs) | `EvalConfig()` | Evaluation during training; a config without the section does not evaluate (`eval.every` is 0). |
-| `trainer` | str | `"rl"` | The trainer: rl, GRPO-style training on the rollouts of the training tasks, with `train:`'s settings (the one trainer of this release; sft and interleaved are reserved for trainers platoon adds). |
+| `trainer` | str | `"rl"` | The trainer: rl, GRPO-style training on the rollouts of the training tasks, with `train:`'s settings; or sft, supervised fine-tuning on chat datasets in LLaMA-Factory's conventions, with `trainer_options` as its settings (interleaved is reserved for a trainer platoon adds). See docs/how-to/train-and-eval.md. |
+| `trainer_options` | dict[str, Any] | `{}` | The trainer's options, checked against the trainer's when the config loads: rl's are the step hooks it attaches to each of its steps, `hooks: [pkg.mod:Hook, {hook: pkg.mod:Other, options: {...}}]` (docs/extending/step-hooks.md); sft's (dataset, dataset_dir, batch_size, num_epochs, ...) are listed under Trainers in the config reference. |
 | `log_path` | str | required | Root of the run directories; a run writes to `log_path/<stats.experiment_name>/<stats.trial_name>`. A config without one takes the site profile's `runs` (platoon.site), and then `stats.experiment_name` defaults to the config file's name. A relative one is relative to the working directory. |
 | `tinker_base_url` | str \| None | `null` | URL of a self-hosted Tinker-compatible service, such as miles-tinker (https://github.com/neulab/miles-tinker); None: `TINKER_BASE_URL`, else hosted Tinker. |
 | `environments` | list[[EnvironmentConfig](#environmentconfig)] | `[EnvironmentConfig()]` | The environments to train on: one, or a mixture whose entries each have a `name`. |
 | `checkpoint` | [CheckpointConfig](#checkpointconfig) | `CheckpointConfig()` |  |
 | `stats` | [StatsConfig](#statsconfig) | `StatsConfig()` |  |
 | `watchdog` | [WatchdogConfig](#watchdogconfig) | `WatchdogConfig()` |  |
+| `policies` | dict[str, [PolicyConfig](#policyconfig)] | `{}` | The run's other policies, by id (a lowercase name such as `teacher`), besides main, which train: declares: ones it trains in lockstep with main, and frozen ones its agents sample or its credit estimators score with (experimental). |
+| `agents` | [AgentsConfig](#agentsconfig) | `AgentsConfig()` | Which policy each agent samples, and which tools it may call, by role (experimental); without it, every agent samples main and may call every tool. |
 
 <a id="trainconfig"></a>
 
@@ -68,7 +75,8 @@ A training config (`platoon train`): what to train on, how, and where the run wr
 
 In a training config: `train`.
 
-The `train:` section: the model, the batch, the loss, the optimizer and the rollout workflow.
+The `train:` section: the model, the batch, the loss, the optimizer and the rollout workflow.  Under a trainer
+other than `rl`, it declares the policy that trainer trains, and the keys only `rl` reads stay unset.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
@@ -83,6 +91,8 @@ The `train:` section: the model, the batch, the loss, the optimizer and the roll
 | `num_minibatches` | int | `1` | Number of minibatches per batch. Batch must be divisible by num_minibatches. Results in num_minibatches weight updates per batch. |
 | `num_microbatches` | int | `1` | Number of microbatches per minibatch. Minibatch must be divisible by num_microbatches. Used for gradient accumulation --> A single weight update per microbatch. With tinker, gradient accumulation is less important, but this may still be useful for streaming to overlap rollout sampling with forward backward computation within the same batch. |
 | `max_staleness` | int \| None | `null` | How many training steps the rollouts of a batch may run ahead of the trained policy, and how many policy versions old a group may be and still train (None: no limit): at most `max_staleness + 1` batches of groups are started and not yet trained. An environment entry may raise its own groups' bound (`environments[].max_staleness`); the run's stays the bound on how far rollouts run ahead. |
+| `stale_filter` | "group" \| "datum" | `"group"` | How the stale filter judges a group against its bound (experimental): `group` (the default) by its oldest datum, dropping the whole group when that one is too old; `datum` each datum by the oldest policy version its own model calls sampled, dropping only the datums that are too old, the others keeping the advantages their group's credit gave them, and the whole group only when every datum is. A rollout that spans a published policy then keeps the datums it sampled since. Under `datum` a workflow that does not stamp each datum with its own version (`GroupRolloutWorkflow` does) has each datum judged by its rollout's (see docs/how-to/train-and-eval.md). |
+| `stepping` | "lockstep" \| "independent" | `"lockstep"` | How the run's trained policies step, when it trains several (experimental): `lockstep` (the default), every policy in each step, on its rows of the step's batch_size groups, each checkpoint saving them all; or `independent`, each policy on its own clock, with its own batch (`policies.<id>.batch_size`), staleness bound and checkpoint cadence (`policies.<id>.checkpoint`), no policy waiting for another's training or saves, and every full save of any policy a point a resume can start from. With one trained policy both are the same. A resume keeps the run's stepping. Only the rl trainer reads it: trainer: sft, which trains one policy, refuses it. See docs/how-to/train-and-eval.md. |
 | `optimizer` | [AdamParams](#adamparams) | `AdamParams()` |  |
 | `loss_fn` | str | `"cispo"` | Tinker loss function, for example `cispo` or `importance_sampling`. |
 | `loss_fn_config` | dict | `{"clip_low_threshold": 0.0, "clip_high_threshold": 5.0}` | Keyword arguments of the loss function. A config's loss_fn_config replaces this default whole, so it names every key its loss takes (cispo: both thresholds); the Tinker service fills a missing one with its own default. |
@@ -163,6 +173,8 @@ entry's `package` registers.
 | `task_sampler_options` | dict[str, Any] | `{}` | Options of the entry's task_sampler, checked against its options when the config loads (pass_rate's: explore, max_draws_per_epoch, max_outstanding_per_task, candidates, seed); `uniform` takes none. |
 | `group_admission` | str \| None | `null` | Which of the entry's settled training groups count toward the batch (experimental; null: the run's, `train.group_admission`, with its options): `all`, `informative`, a name the entry's `package` registers with `@group_admission`, or `module:Class`. Once any entry's rule is not `all`, every entry's groups are counted as train.group_admission says (a stale or failed group of an entry at `all` no longer counts toward the batch), and train.refill's cap is the run's. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
 | `group_admission_options` | dict[str, Any] | `{}` | Options of the entry's own group_admission, which they go with (an entry that sets none inherits the run's rule and options); `all` takes none. |
+| `credit` | str \| None | `null` | How the entry's training groups turn rewards into advantages (experimental; null: the workflow's own credit, each rollout's datums centered on the group's completed-root baseline): `group` (that credit, as an estimator), `keyed` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), a name the entry's `package` registers with `@credit_estimator`, or `module:Class`. Its estimator runs once per group in the trainer, never in an evaluation. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
+| `credit_options` | dict[str, Any] | `{}` | Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key, leave_one_out); `group` takes none. |
 | `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's own training settings, laid over `train.workflow_config` for its training groups: the keys that act on one group or one rollout (EntryWorkflowSettings), such as `group_size`, `min_successful_group_size`, `leave_one_out_baseline` and `rollout_config.max_steps`. A key it leaves out keeps the run's; `null` unsets it. Its rollout settings are also its evaluation's defaults, below the phase's section (eval.workflow_config, inference.workflow), and `eval_overrides.workflow_config` sets what its evaluation rollouts change. `platoon config show` prints each entry's effective settings and where each came from. |
 | `max_staleness` | int \| None | `null` | How many policy versions old the entry's training groups may be and still train (null: the run's, `train.max_staleness`): the stale filter's bound for its groups. At least the run's, which stays the bound on how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning keeps the checkpoints within the largest bound of the run and its entries. |
 | `success_threshold` | float | `1.0` | The lowest reward that counts a training rollout of the entry as a pass, in the per-task statistics and their metrics (platoon.train.task_stats), judged as platoon eval judges success: on the reward the entry's environment scored, before any reward processor. A partial-credit environment sets its own. |
@@ -199,6 +211,7 @@ directory resumes from the newest, weights and optimizer state.
 | `every` | int \| None | `null` | Units of `strategy` between events, training steps unless it says epoch; 0 never triggers the event (None: 0, or 1 when the config sets strategy). |
 | `strategy` | "step" \| "epoch" \| None | `null` | The unit of `every`: `step`, a training step, or `epoch`, a pass over the training tasks (None: step). A config that sets it and leaves `every` out triggers the event every 1 of its units. |
 | `load_checkpoint_path` | str \| None | `null` | A Tinker checkpoint (`tinker://...`) whose weights a new run starts from, with a fresh optimizer. |
+| `load_optimizer_state` | bool | `false` | With load_checkpoint_path: the new run takes the checkpoint's optimizer state too (Adam's moments), a new trial that goes on from it. Its counters still start at 0, and nothing else of the checkpoint's run is taken up. |
 | `recovery_every` | int \| None | `null` | Recovery cadence. `every` selects the *permanent* checkpoints (named `<batch>`, kept forever); `every: 0` writes none, leaving the launch, recovery and final checkpoints. When `recovery_every` is set, every `recovery_every` steps that is not already a permanent save writes a full weights+optimizer checkpoint named `recovery-<batch>` instead of the weights-only update, so a crash loses at most that many steps. Recovery checkpoints are disposable: `keep_recovery` deletes all but the newest few. `None` disables the recovery cadence. |
 | `keep_recovery` | int \| None | `null` | Recovery checkpoints to keep (None: every one). After each recovery save, platoon deletes the run's recovery checkpoints beyond the newest `keep_recovery` through the training service, beside training: never a permanent checkpoint, the one a resume starts from, or one this start saved within the run's largest staleness bound (`train.max_staleness`, or an environment's `max_staleness` above it) of policy versions, which rollouts may still sample from. It needs `train.max_staleness`; with `recovery_every`, `keep_recovery × recovery_every` must exceed that largest bound. |
 
@@ -236,13 +249,67 @@ The `watchdog:` section: a timer that ends a training process that stops making 
 | `exit_code` | int | `2` | Exit code of a process the watchdog ends. |
 | `max_restarts` | int | `0` | Restarts after a failure (0: none). Above 0, `platoon train` trains in a child process and starts it again after any exit but success (0), a configuration error (78) and an interrupt, at most this many times, each start resuming from the newest checkpoint once the run's leftover rollout workers and sandboxes are reaped. It stops after three starts in a row that saved no new checkpoint. |
 
+<a id="policyconfig"></a>
+
+## PolicyConfig
+
+`platoon.train.config_defs.PolicyConfig`
+
+In a training config: `policies.<key>`.
+
+A `policies:` entry: a model the run trains, samples or scores with besides `main`, under `train:`'s names
+for the same settings (experimental).  A policy the run trains (`trainable`, the default) steps with main, in
+lockstep (`train.stepping`, the default: each step trains every trained policy on its rows of the step's groups,
+and each checkpoint saves them all) or on its own clock (`independent`: its own batch and checkpoint cadence),
+each on its own Tinker service with its own optimizer and loss.  A frozen one (`trainable: false`) is sampled by
+the agents `agents:` binds to it or scores for a credit estimator (a teacher), and is never stepped, saved or
+pruned.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `model_name` | str | required | Hugging Face model name of the base model. |
+| `renderer_name` | str | required | Renderer that turns chat messages into the model's tokens, as train.renderer_name. |
+| `renderer_kwargs` | dict | `{}` | Renderer attribute overrides, as train.renderer_kwargs. |
+| `context_window_length` | int \| None | `null` | Its context window, as train.context_window_length. |
+| `sample_timeout_seconds` | float \| None | `null` | The bound on one of its sampling calls, as train.sample_timeout_seconds. |
+| `tinker_base_url` | str \| None | `null` | Its Tinker service (None: the run's tinker_base_url, else TINKER_BASE_URL, else hosted Tinker). It opens a session of its own there, also on the run's service. |
+| `trainable` | bool | `true` | Whether the run trains it (false: a frozen policy, which only samples or scores). |
+| `lora_rank` | int \| None | `null` | Rank of the LoRA adapter the run trains, as train.lora_rank (None: train.lora_rank). |
+| `load_checkpoint_path` | str \| None | `null` | A trained policy's: the weights its new run starts from (a `tinker://` state path; None: its base model's). A frozen policy's: the sampler it serves (a `tinker://` sampler path; None: its base model). |
+| `load_optimizer_state` | bool | `false` | With load_checkpoint_path, a trained policy's new run takes that checkpoint's optimizer state too (Adam's moments): a new trial that goes on from it. Otherwise its optimizer starts fresh. |
+| `optimizer` | [AdamParams](#adamparams) \| None | `null` | A trained policy's optimizer, as train.optimizer (None: train.optimizer). |
+| `loss_fn` | str \| None | `null` | The loss a trained policy's rows train under, as train.loss_fn (None: train.loss_fn), and its keyword arguments (None: train.loss_fn_config when the loss is train.loss_fn's, else none, the loss's own defaults). |
+| `loss_fn_config` | dict \| None | `null` |  |
+| `max_staleness` | int \| None | `null` | How many of the trained policy's own versions old its rows may be and still train (None: their entry's bound, else train.max_staleness). The dispatcher's horizon counts the smallest bound of the trained policies that agents sample, train.max_staleness included when main's is unset. |
+| `batch_size` | int \| None | `null` | Under train.stepping: independent, how many of the policy's shares (its rows of a group) each of its steps trains (None: train.batch_size); a smaller batch steps more often. |
+| `checkpoint` | [PolicyCheckpointConfig](#policycheckpointconfig) \| None | `null` | Under train.stepping: independent, when the policy saves full checkpoints, counted in its own steps (None: the run's checkpoint.every and checkpoint.recovery_every, in its steps). |
+
+<a id="agentsconfig"></a>
+
+## AgentsConfig
+
+`platoon.train.config_defs.AgentsConfig`
+
+In a training config: `agents`.
+
+`agents:`: which policy each agent samples, for its whole life, and which tools it may call (experimental).
+The root agent samples `policy`; an agent its harness or program opens with a role samples that role's policy,
+and `policy` when `roles` names none for it.  An agent of a role that lists `tools` (the root agent's role is
+`policy`) sees and calls only those, and so does every agent under it but a verifier, which runs under the child
+it judges and is limited by the lists of that child's spawner and its own role's (`verifier`) instead.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `policy` | str \| None | `null` | The root agent's policy, and that of every role roles leaves out (None: main). |
+| `roles` | dict[str, [AgentRoleConfig](#agentroleconfig)] | `{}` | The policy and the tools of the agents of each role, by role (the role a harness mints a subagent with, such as `judge`). |
+
 <a id="adamparams"></a>
 
 ## AdamParams
 
 `platoon.train.config_defs.AdamParams`
 
-In a training config: `train.optimizer`.
+In a training config: `train.optimizer`, `policies.<key>.optimizer`.
 
 The Adam optimizer's settings, applied by the Tinker service at each optimizer step.
 
@@ -426,6 +493,37 @@ Configuration for Weights & Biases logging.
 | `api_key` | str \| None | `null` | API key (None: `WANDB_API_KEY`). |
 | `base_url` | str \| None | `null` | URL of a self-hosted W&B server. |
 | `resume_run_id` | str \| None | `null` | W&B run id to resume. |
+
+<a id="policycheckpointconfig"></a>
+
+## PolicyCheckpointConfig
+
+`platoon.train.config_defs.PolicyCheckpointConfig`
+
+In a training config: `policies.<key>.checkpoint`.
+
+`policies.<id>.checkpoint`: when a policy the run trains saves full checkpoints, under `train.stepping: independent`, counted in its own steps.  A key left out is the run's (`checkpoint.every`, in steps, and
+`checkpoint.recovery_every`).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `every` | int \| None | `null` | Its own steps between permanent checkpoints; 0 saves none (None: checkpoint.every, in steps). |
+| `recovery_every` | int \| None | `null` | Its own steps between recovery checkpoints (None: checkpoint.recovery_every). With checkpoint.keep_recovery, keep_recovery × this must exceed the policy's bound (its max_staleness, else the run's largest), which its own pruner keeps. |
+
+<a id="agentroleconfig"></a>
+
+## AgentRoleConfig
+
+`platoon.train.config_defs.AgentRoleConfig`
+
+In a training config: `agents.roles.<key>`.
+
+`agents.roles.<role>`: the policy the agents of that role sample, and the tools they may see and call.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `policy` | str \| None | `null` | A policy of the run: main, or a policies: entry (None: agents.policy's). |
+| `tools` | list[str] \| None | `null` | The tools they, and the agents under them, may see and call (a verifier, which runs under the child it judges, takes the lists of that child's spawner instead): names or fnmatch patterns (`read_*`), as agents see them (a task MCP server's as `<server>__<tool>`); an empty list allows none (None: every tool). |
 
 <a id="rolloutconfig"></a>
 
@@ -721,3 +819,84 @@ valid result censored, and a task whose last 3 groups had no valid member drawn 
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `band` | tuple[float, float] \| None | `null` | Also reject a group whose pass rate, its passes over its valid members (passes as the per-task statistics judge them: the scored reward against the entry's success_threshold), is below lo (reason below_band) or above hi (above_band): two numbers 0 <= lo < hi <= 1, such as [0.2, 0.8]; null: no band. |
+
+<a id="trainers"></a>
+
+## Trainers
+
+`trainer:` chooses how a run trains, and `trainer_options` sets the trainer's options. Core's trainers are below ([Fine-tune on a dataset](../how-to/train-and-eval.md#fine-tune-on-a-dataset) for `sft`). Under a trainer other than `rl`, the `train:` keys that only `rl` reads are refused when set: `batch_size`, `num_epochs`, `max_training_steps`, `num_minibatches`, `num_microbatches`, `max_staleness`, `stale_filter`, `stepping`, `loss_fn`, `loss_fn_config`, `workflow_config`, `max_concurrent_rollouts`, `permit_release`, `max_starting_rollouts`, `label_by`, `rollout_group_limits`, `task_sampler`, `task_sampler_options`, `group_admission`, `group_admission_options`, `refill`.
+
+| Trainer | What it trains on | Options |
+|---|---|---|
+| `rl` | The default: GRPO-style training on the rollouts of the run's training tasks, with `train:`'s settings. | [below](#rl-options) |
+| `sft` | Supervised fine-tuning on chat datasets in LLaMA-Factory's conventions (a `dataset_info.json` of `alpaca` and `sharegpt` datasets), with the loss on the model's turns; `train:` declares the policy it trains. | [below](#sft-options) |
+
+<a id="rl-options"></a>
+
+### `rl`'s options
+
+`platoon.train.trainer.registry.RLOptions`: the keys of `trainer_options` under `trainer: rl`.
+
+The rl trainer's options (`trainer_options`): the step hooks it attaches to each of its steps (`hooks`, RFC
+0021 section 9: `platoon.train.trainer.hook_config`).  Its other settings are `train:`'s.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `hooks` | tuple[HookSpec, ...] | `[]` | The step hooks it attaches to each of its steps, each `pkg.mod:Hook` (or a name a package registered) or `{hook: pkg.mod:Hook, options: {...}}` (docs/extending/step-hooks.md). |
+
+<a id="sft-options"></a>
+
+### `sft`'s options
+
+`platoon.train.supervised.options.SupervisedOptions`: the keys of `trainer_options` under `trainer: sft`.
+
+`trainer_options` under `trainer: sft`: the datasets to train on, named as LLaMA-Factory names them
+(`dataset` in the `dataset_info.json` of `dataset_dir`), how many conversations a step trains on and for how
+long, and how each conversation is cut and which of its turns train.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | str \| list[str] | required | The datasets to train on, by their names in dataset_dir's dataset_info.json: one name, several separated by commas (as LLaMA-Factory's dataset argument), or a list. Their conversations are put together in this order. |
+| `dataset_dir` | str | `"data"` | The directory that holds dataset_info.json and the files its entries name (LLaMA-Factory's dataset_dir), relative to the config file; left out, the data directory beside the config file. |
+| `batch_size` | int | `32` | Conversations per training step, which take one optimizer step together. |
+| `num_epochs` | int \| None | `null` | Passes over the conversations. With max_training_steps as well, training runs the shorter of the two; one of them is required. |
+| `max_training_steps` | int \| None | `null` | Training steps to run. With num_epochs as well, training runs the shorter of the two. |
+| `num_microbatches` | int | `1` | How many forward_backward calls a step's conversations are sent in, before the step's one optimizer step. |
+| `max_length` | int \| None | `null` | Tokens a rendered conversation is cut to, as LLaMA-Factory's cutoff_len cuts it: turn by turn from the first (from the last with mask_history), each prompt and reply sharing what is left; null: no cut. |
+| `mask_history` | bool | `false` | Train on the last model turn of each conversation only (LLaMA-Factory's mask_history), not on every one. |
+| `seed` | int | `42` | Seeds each epoch's order of the conversations, and which rows a dataset's num_samples takes. |
+
+<a id="credit-estimators"></a>
+
+## Credit estimators
+
+`environments[].credit` chooses how an entry's training groups turn rewards into advantages (experimental), with its options beside it (`credit_options`); an entry that sets none keeps the workflow's own credit. Its estimator runs once per group in the trainer, never in an evaluation. Core's estimators are below; a package an entry names may register others with `@credit_estimator`, and `module:Class` names one ([Write a credit estimator](../extending/credit-estimators.md)).
+
+| Estimator | What it does | Options |
+|---|---|---|
+| `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards (the group mean, or with the entry's `leave_one_out_baseline` the leave-one-out mean), value for value. An entry without `credit` gets the same credit from the workflow itself. | none |
+| `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, `policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the subagents'. Reads agents: the rollout workers tag each row with its agent. | [below](#keyed-options) |
+| `reverse_kl` | On-policy distillation: a frozen teacher (a `policies:` entry with `trainable: false`) scores every token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share the student's tokenizer. | [below](#reverse-kl-options) |
+
+<a id="keyed-options"></a>
+
+### `keyed`'s options
+
+`platoon.train.credit.keyed.KeyedOptions`: the keys of `credit_options` under `credit: keyed`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `key` | list[str] | `["task", "policy", "role"]` | What an agent's baseline is keyed by: one or more of task, policy, role and depth, each once. A group holds one task, so task alone keys every agent of the group together. |
+| `leave_one_out` | bool | `false` | Center each agent on the mean of the others of its key, not of all of them (an agent alone in its key gets 0). |
+
+<a id="reverse-kl-options"></a>
+
+### `reverse_kl`'s options
+
+`platoon.train.credit.reverse_kl.ReverseKLOptions`: the keys of `credit_options` under `credit: reverse_kl`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `teacher` | str | required | The frozen policy that scores the student's tokens: the id of a policies: entry with trainable: false. |
+| `kl_coef` | float | `1.0` | The weight of the reverse KL term in each token's advantage. |
+| `reward_coef` | float | `0.0` | The weight of the centered reward term (0: distillation alone). |

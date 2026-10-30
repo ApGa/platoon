@@ -4,7 +4,8 @@
 :class:`FakePolicy` (main, as the config declares it, over a model gateway that samples nothing), whose service hands
 out the test's training client and whose full saves are recorded by name, not written.  It records the steps the
 trainer logs (:class:`StepLog`).  Every rollout group of :class:`Workflow` is one datum with a nonzero advantage, so
-each step applies an optimizer update.
+each step applies an optimizer update.  :func:`checkpointing_trainer` is a trainer whose steps' saves a test drives
+itself, through tinker-cookbook, as a start's steps save.  :func:`draws_of` is the draws of a trainer's last start.
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
 from platoon.train.policy.checkpoints import SAVE_CHECKPOINT_TIMEOUT_S, Waiter
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, policy_specs
+from platoon.train.policy.spec import MAIN, PolicySpec, policy_specs
 from platoon.train.trainer.rl import PlatoonTinkerRLTrainer
+from platoon.train.trainer.run import TrainerRun
 from platoon.utils.stats_tracker import get as get_tracker
 
 
@@ -136,6 +138,15 @@ class FakeModelInfo:
     renderer_name: str = "r"
     renderer: Any = None
     tokenizer: Any = None
+
+
+def named_policy(policy_id: str, *, url: str | None = None) -> Policy:
+    """A trained policy ``policy_id`` of a run of several, on the service at ``url`` (None: the run's), over a model
+    gateway that samples nothing (:class:`FakeModelInfo`), whose ``llm.version`` is its version: for the tests of the
+    parts that read a policy's id, spec and version."""
+
+    info: Any = FakeModelInfo()
+    return Policy(PolicySpec(policy_id, model_name="m", renderer_name="r", tinker_base_url=url), info)
 
 
 class OneClientService:
@@ -272,9 +283,35 @@ def make_trainer(
     return trainer, saves, logged
 
 
+def draws_of(trainer: PlatoonTinkerRLTrainer) -> Any:
+    """The draws of the last start ``trainer`` ran (its rollout source, a ``RolloutSource``): its per-task statistics
+    (``recorder``), the dispatcher of its training groups (``dispatcher``) and its group admission rules
+    (``admissions``), each of which a test reads after a start that had it."""
+
+    assert trainer._rollouts is not None, "the trainer ran no start that opened its draws"
+    return trainer._rollouts
+
+
 def enter(trainer: PlatoonTinkerRLTrainer, stats_logger: Any) -> None:
     """What ``async with trainer:`` opens, without W&B or the run's sandbox labels: ``stats_logger`` and the train
     tracker."""
 
     trainer._stats_logger = stats_logger
     trainer._train_tracker = get_tracker("train")
+
+
+def checkpointing_trainer(
+    config: PlatoonTinkerRLTrainerConfig, training_client: Any
+) -> tuple[PlatoonTinkerRLTrainer, StepLog]:
+    """``(trainer, logged)``: the trainer of ``config``, entered as ``async with`` enters it (``logged`` is its stats
+    logger), whose steps save through a start of it, as ``train()`` records it, on a :class:`FakePolicy` whose training
+    client is ``training_client`` and whose full saves go through tinker-cookbook into the run's
+    ``checkpoints.jsonl``."""
+
+    logged = StepLog()
+    policies = fake_policies(config, OneClientService(training_client).service_client)
+    policies[policies.leader].training_client = training_client
+    trainer = PlatoonTinkerRLTrainer(config, task_ids_to_dataset(["train:0"]), policies=policies)
+    enter(trainer, logged)
+    trainer._run = TrainerRun(trainer)
+    return trainer, logged

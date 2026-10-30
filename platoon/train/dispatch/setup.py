@@ -2,8 +2,7 @@
 task group, its groups run by :mod:`platoon.train.dispatch.runner`.
 
 Each function here takes the start's rollout source (:class:`~platoon.train.dispatch.source.RolloutSource`), whose
-parts it reads and sets: the source calls them (its ``new_dispatcher`` and ``start``), and so do the rl trainer's
-methods of the same names, with its source.
+parts it reads and sets: the source calls them (its ``new_dispatcher`` and ``start``).
 """
 
 import asyncio
@@ -19,6 +18,7 @@ from platoon.train.dispatch import runner
 from platoon.train.dispatch.dispatcher import BoundDraw, Dispatcher
 from platoon.train.dispatch.permits import DrawLease, _rows
 from platoon.train.labels import dataset_labels, label_column
+from platoon.train.policy.spec import horizon_bound
 from platoon.train.sampler_runtime import SamplerSet, TaskPool
 from platoon.train.sampling import sampling_fingerprint
 from platoon.train.task_stats import next_start
@@ -57,7 +57,8 @@ def _dispatch(source: "RolloutSource", task_group: asyncio.TaskGroup, *, stop: a
 
     dispatcher = source.dispatcher
     assert dispatcher is not None and source.results is not None  # the start opened it; start() made the queue
-    dispatcher.bind(source.results)
+    # Its groups settle into the steps' queue; when the policies step independently, into the share ledger.
+    dispatcher.bind(source.ledger if source.ledger is not None else source.results)
     dispatcher.rolling = capabilities_of(source.workflow).runs_rollouts_on_lease  # rolling starts
     if dispatcher.permit_release == "rollout":
         logger.info(
@@ -77,9 +78,10 @@ def _dispatch(source: "RolloutSource", task_group: asyncio.TaskGroup, *, stop: a
 
 def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch: int, end_batch: int) -> Dispatcher:
     """The dispatcher of this start's training groups, from ``start_batch`` to ``end_batch``, over the run's order
-    (:func:`_samplers`), starting at the checkpoint's batch; and, for a run under a group admission rule, its rules
-    beside it (the source's ``admissions``, :class:`~platoon.train.admissions.AdmissionSet`), whose cap the dispatcher
-    counts its steps by."""
+    (:func:`_samplers`), starting at the checkpoint's batch, its horizon counting the smallest staleness bound of the
+    trained policies (:func:`~platoon.train.policy.spec.horizon_bound`), or each one's own when they step independently
+    (the source's ``horizons``); and, for a run under a group admission rule, its rules beside it (the source's
+    ``admissions``, :class:`~platoon.train.admissions.AdmissionSet`), whose cap the dispatcher counts its steps by."""
 
     config = source.config
     batch_size = config.train.batch_size
@@ -110,11 +112,13 @@ def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch:
         start = recorder.start
     else:  # the statistics did not start: number this start's draws as they would have
         start = next_start(read_checkpoint_records(source.run_dir))
+    independent: dict[str, Any] = {"horizons": source.horizons} if source.horizons is not None else {}
     return Dispatcher(
         rows=rows,
         samplers=samplers,
         batch_size=batch_size,
-        max_staleness=config.train.max_staleness,
+        # The smallest bound of the trained policies the agents sample: train.max_staleness with one policy.
+        max_staleness=horizon_bound(config),
         steps=max(0, end_batch - start_batch),
         limits=config.train.rollout_group_limits or {},
         labels=dataset_labels(tasks, column) if tasks is not None else (),
@@ -129,6 +133,7 @@ def _new_dispatcher(source: "RolloutSource", train_dataloader: Any, start_batch:
         step=start_batch,
         groups_per_step=source.admissions.cap if source.admissions is not None else None,
         permit_release=config.train.permit_release,
+        **independent,
     )
 
 

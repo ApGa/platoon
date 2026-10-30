@@ -21,6 +21,9 @@ from platoon.train import entry_settings
 from platoon.train import launch as train_module
 from platoon.train.components import ENVIRONMENT_COLUMN
 from platoon.train.dispatch.permits import DrawLease, PermitPool
+from platoon.train.policy.policy import Policy
+from platoon.train.policy.set import PolicySet
+from platoon.train.policy.spec import MAIN, PolicySpec
 from platoon.train.workers.protocol import PROTOCOL_VERSION, RolloutWorkerResponse
 from platoon.train.workflow import context as context_module
 from platoon.train.workflow import members as members_module
@@ -402,7 +405,8 @@ class _Trainer:
 
     def __init__(self, *, config, train_dataset, eval_dataset, train_order, train_sampling=None) -> None:
         self.config = config
-        self.model_info = SimpleNamespace(model_name="m", llm=SimpleNamespace(version=0))
+        self.model_info: Any = SimpleNamespace(model_name="m", llm=SimpleNamespace(version=0))
+        self.policies = PolicySet([Policy(PolicySpec(MAIN, model_name="m", renderer_name="r"), self.model_info)])
         self.run_log_path = str(Path(config.log_path, config.stats.experiment_name, config.stats.trial_name))
         _Trainer.built.append(self)
 

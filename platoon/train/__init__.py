@@ -2,13 +2,21 @@
 API, such as miles-tinker.
 
 ``platoon train`` starts training through :mod:`platoon.train.supervise` and :mod:`platoon.train.launch`, and one
-start of training is the trainer (:mod:`platoon.train.trainer`).  Each stage of a run has a package of its own:
+start of training is the trainer (:mod:`platoon.train.trainer`).  Each stage of a run has a package of its own
+(``docs/training-code.md`` maps them):
 
-- ``trainer``: one start of training: the training client, the train and evaluation loops, stopping;
-- ``step``: one training step: what it dequeues, the microbatch transforms, the update's metrics, what it logs;
-- ``dispatch``: what starts the training groups (RFC 0019, section 4), and what they settle into;
+- ``trainer``: the trainer API and the lifecycle every trainer's start goes through, the rl trainer, its training loop
+  and the state its loops share, signals and the watchdog;
+- ``policy``: one model that training samples and steps: its spec, its state, its training service and saves, and its
+  learner;
+- ``objectives``: what a policy's rows train under: the loss and its training metrics;
+- ``step``: one training step of the rl trainer: what it dequeues, the microbatch transforms, its metrics, what it
+  logs;
+- ``dispatch``: the run's draws (its rollout source): what starts the training groups (RFC 0019, section 4), the
+  rollout permits, and what the groups settle into;
 - ``workflow``: one group of rollouts (``GroupRolloutWorkflow`` and its parts);
-- ``credit``: the advantages a group's rollouts train with: its baselines and error-token filter;
+- ``credit``: the advantages a group's rollouts train with: its baselines and error-token filter, and the credit
+  estimators an environment entry may choose instead (``environments[].credit``);
 - ``workers``: process-per-rollout: the worker entrypoint, its supervisor and the protocol between them;
 - ``checkpoints``: what a full checkpoint saves, and how a start resumes from it;
 - ``evaluation``: evaluation during training.

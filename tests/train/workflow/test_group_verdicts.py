@@ -56,12 +56,12 @@ def _outcome(
     key: str | None = None,
     success: float | None = None,
     status: str | None = "scored",
-) -> output_module._SingleRolloutOutcome:
+) -> output_module.MemberOutcome:
     """One member: ``reward`` None for one that returned nothing (a dead worker); ``valid`` False for a root that
     ended untrainable; ``success`` the reward its environment scored, before any reward processor."""
 
     if reward is None:
-        return output_module._SingleRolloutOutcome(
+        return output_module.MemberOutcome(
             result=None, workload=RolloutWorkload(), observed=False, disposition="worker_crashed"
         )
     result = TrajectoryCollectionResult(
@@ -81,7 +81,7 @@ def _outcome(
         root_rewards_dict={},
         task_reward_valid=valid,
     )
-    return output_module._SingleRolloutOutcome(
+    return output_module.MemberOutcome(
         result=result,
         workload=RolloutWorkload(
             trajectories=1,
@@ -98,7 +98,7 @@ def _outcome(
 
 
 class _Workflow(group_module.GroupRolloutWorkflow):
-    def __init__(self, outcomes: list[output_module._SingleRolloutOutcome], **config) -> None:
+    def __init__(self, outcomes: list[output_module.MemberOutcome], **config) -> None:
         super().__init__(
             rollout_fn=None,
             get_task_fn=None,
@@ -112,7 +112,7 @@ class _Workflow(group_module.GroupRolloutWorkflow):
         return self.outcomes[rollout_number]
 
 
-def _run(outcomes: list[output_module._SingleRolloutOutcome], **config) -> output_module._TaskRolloutOutput:
+def _run(outcomes: list[output_module.MemberOutcome], **config) -> output_module.GroupOutput:
     return asyncio.run(_Workflow(outcomes, **config).arun_episode({"task_id": "t"}))
 
 
@@ -334,7 +334,7 @@ def test_a_group_whose_members_trained_different_keys_is_a_reward_key_mismatch_a
     after scoring) make a mismatch, not ``no_results``."""
 
     dead = [
-        output_module._SingleRolloutOutcome(result=None, workload=RolloutWorkload(), observed=True, reward_key=key)
+        output_module.MemberOutcome(result=None, workload=RolloutWorkload(), observed=True, reward_key=key)
         for key in ("reward/a", "reward/b")
     ]
     assert _run(dead).verdict == "reward_key_mismatch"
@@ -397,7 +397,7 @@ def test_the_error_filter_suppresses_only_errors_whose_centered_advantage_is_pos
     """The filter runs once the advantages are centered: the 0.2 member's error token is below the group's mean, so
     it keeps its (negative) advantage; the 1.0 member's is above it, and is masked out."""
 
-    def erring(reward: float) -> output_module._SingleRolloutOutcome:
+    def erring(reward: float) -> output_module.MemberOutcome:
         outcome = _outcome(reward)
         datum = outcome.result.datums[0]
         datum.loss_fn_inputs[ERROR_ACTION_MASK_KEY] = TensorData.from_torch(torch.tensor([0.0, 1.0, 0.0]))

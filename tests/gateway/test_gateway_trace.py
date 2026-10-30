@@ -15,7 +15,7 @@ from platoon.task import SubTask, Task
 from platoon.trajectory import ParentInfo
 from platoon.utils.critical_path import MODEL_CALL_SPANS_KEY
 from platoon.utils.generation import MODEL_GENERATIONS_KEY
-from platoon.utils.tinker_data_processing import get_train_data_for_trajectory_collection
+from platoon.utils.tinker_data_processing import AgentTag, get_train_data_for_trajectory_collection
 from platoon.utils.trajectory_status import trajectory_was_interrupted
 
 SYSTEM = {"role": "system", "content": "You are a helpful assistant."}
@@ -137,6 +137,38 @@ def test_a_step_annotated_exclude_from_training_contributes_no_datum(gateway, sa
     assert [(s.num_steps, s.is_root) for s in result.trajectory_stats] == [(2, True), (0, False)]
 
 
+def test_tagged_datums_name_the_agent_of_each_and_every_agent_of_the_tree(gateway, sampler):
+    """Under ``tag_datums`` (a credit estimator that reads agents), each datum names its trajectory, and each
+    trajectory its agent, role, parent, depth and reward; without it, the result carries no tags."""
+
+    root, helper, interactions, calls, helper_call = record_root_and_helper(gateway, sampler)
+    collection = build_trajectory_collection(
+        gateway.agents("rollout-7"), task=TASK, outcome=Outcome("scored", {"reward": 1.0})
+    ).to_dict()
+
+    def converted(**options):
+        return get_train_data_for_trajectory_collection(
+            trajectory_collection=collection,
+            interactions=interactions,
+            task_id="weather-1",
+            checkpoint_version=3,
+            **options,
+        )
+
+    tagged = converted(tag_datums=True)
+    assert tagged.datum_trajectories == ("root-trajectory", "root-trajectory", helper.trajectory_id)
+    assert tagged.agents == (
+        AgentTag("root-trajectory", root.agent_id, "policy", None, 0, 1.0),
+        AgentTag(helper.trajectory_id, helper.agent_id, "researcher", "root-trajectory", 1, 1.0),
+    )
+    assert "traj_depth" not in tagged.datums[0].loss_fn_inputs  # tags never reach the datums
+    plain = converted()
+    assert plain.agents is None and plain.datum_trajectories is None
+    assert [datum.loss_fn_inputs.keys() for datum in plain.datums] == [
+        datum.loss_fn_inputs.keys() for datum in tagged.datums
+    ]
+
+
 def test_trace_links_agents_calls_and_outcome(gateway, sampler):
     root, helper, interactions, calls, helper_call = record_root_and_helper(gateway, sampler)
     agents = gateway.close_rollout("rollout-7")
@@ -204,3 +236,50 @@ def test_trace_rejects_malformed_trees_and_outcomes(gateway, sampler):
         build_trajectory_collection([root], task=TASK, outcome=Outcome("graded"))
     with pytest.raises(ValueError, match="must carry a reward"):
         build_trajectory_collection([root], task=TASK, outcome=Outcome("scored"))
+
+
+def test_a_trajectory_that_records_no_agent_is_its_own_agent_and_an_interrupted_one_is_unscored():
+    """Under ``tag_datums``, a trajectory a rollout wrote outside the gateway (no agent in its misc) is its own agent,
+    of the root's default role; an interrupted one has no reward, which its rows never train as 0."""
+
+    from platoon.utils.tinker_data_processing import _agent_tag
+    from platoon.utils.trajectory_status import TRAJECTORY_CANCELLED_MISC_KEY
+
+    assert _agent_tag("t1", {"misc": {}, "parent_info": {"id": "t0"}}, 1, 0.5) == AgentTag(
+        "t1", "t1", "policy", "t0", 1, 0.5
+    )
+    cancelled = {"misc": {TRAJECTORY_CANCELLED_MISC_KEY: True, "agent": {"agent_id": "a", "role": "helper"}}}
+    assert _agent_tag("t2", cancelled, 1, 0.3) == AgentTag("t2", "a", "helper", None, 1, None)
+
+
+@pytest.mark.parametrize("verdict", ["judge_error", "unparseable", "pending", "verified", "parent_did_not_use"])
+def test_a_child_whose_verifier_gave_no_verdict_is_unscored_and_one_its_parent_did_not_use_keeps_its_reward(verdict):
+    """Under ``tag_datums``, a judged child whose verifier gave no verdict (a judge error, an unparseable or a pending
+    one) has no reward: its 0 is no score, which a credit estimator would count in a baseline.  A child its parent did
+    not use is left out of policy training too, but its verdict, and so its reward, stands."""
+
+    from platoon.harness import verify
+    from platoon.utils.tinker_data_processing import _agent_tag
+    from platoon.utils.trajectory_status import EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY
+
+    judgments = {
+        "judge_error": verify.judge_error_judgment("the verifier could not start"),
+        "unparseable": verify.normalize_judgment(
+            "no JSON here", verifier_trajectory_id="v", verifier_error_message=None, verifier_finished=True
+        ),
+        "pending": dict(verify.PENDING_JUDGMENT),
+        "verified": verify.normalize_judgment(
+            '{"status": "verified", "score": 1.0}',
+            verifier_trajectory_id="v",
+            verifier_error_message=None,
+            verifier_finished=True,
+        ),
+    }
+    judgment = judgments.get(verdict, judgments["verified"])
+    misc = {verify.SUBAGENT_REWARD_JUDGMENT_MISC_KEY: judgment, "agent": {"agent_id": "c", "role": "subagent"}}
+    if verdict != "verified":  # what record_judgment and the parent-usage judge mark
+        misc[EXCLUDE_FROM_POLICY_TRAINING_MISC_KEY] = True
+    reward = 1.0 if judgment["score"] else 0.0
+    tag = _agent_tag("t1", {"misc": misc, "parent_info": {"id": "t0"}}, 1, reward)
+    scored = verdict in ("verified", "parent_did_not_use")
+    assert tag == AgentTag("t1", "c", "subagent", "t0", 1, 1.0 if scored else None)

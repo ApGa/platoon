@@ -1,0 +1,16 @@
+# The same two policies, with the worker on a Tinker service of its own: for a backend that serves one model (or one
+# adapter) per service, such as a self-hosted service started for each policy on its own nodes. The job script that
+# starts the worker's service passes its URL:
+#
+#   export PYTHONPATH=$PWD/examples/subagents
+#   uv run platoon train examples/two-agent-lockstep/train-worker-service.yaml \
+#     policies.worker.tinker_base_url=http://<worker host>:<port>
+
+extends: train.yaml
+
+policies:
+  worker:
+    tinker_base_url: http://localhost:8001
+
+stats:
+  trial_name: delegator-and-worker-service

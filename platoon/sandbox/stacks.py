@@ -53,6 +53,15 @@ such as Harbor's collect hooks.  What such a rewrite acts on, a **reference** (:
 ``[scheme://][user@]<host>:<port>`` or ``scheme://<host>``, the host's name in any case, as host names resolve; a
 host's name alone (``-h postgres``) is none.
 
+**External services.**  A spec's ``externals`` are services the stack does not start, which run outside it on this
+host, such as a node service (:mod:`platoon.envs.harbor.node_services`): each one a Unix socket on this host that the
+stack's services reach by its name (and its aliases) at its port, as they reach a service of their own.  A pod relays
+the port to the socket and resolves the name to its loopback; a stack on this host's network relays a port of the host
+that it holds to the socket, and rewrites the references to it as to its own services.  A provider whose stacks reach
+them declares the ``externals`` capability (:data:`EXTERNALS`); one that cannot reach a host socket from a stack
+refuses a spec with externals (``ValueError``), and the Harbor service refuses such stacks on a provider that does not
+declare it, also one written before externals existed, which would start the stack without them.
+
 **Teardown.**  :meth:`Stack.stop` stops every service, then what the backend holds; its own task, and each service's
 stop, are cleanups that a stopping process lets finish (:func:`platoon.utils.stopping.let_finish`), inside the cleanup
 scope of the rollout that started them, so a rollout's permit comes back only once its stack is gone.
@@ -80,6 +89,8 @@ logger = logging.getLogger(__name__)
 
 #: The capability of a provider that runs stacks (``start_stack``).
 STACKS = "stacks"
+#: The capability of a provider whose stacks reach external services (a spec's ``externals``, the module docstring's).
+EXTERNALS = "externals"
 #: The service that is the agents' sandbox; every stack has it.
 MAIN = "main"
 #: The label of every sandbox of a stack: the stack's id; ``platoon.service`` names the service.
@@ -168,6 +179,17 @@ class Volume:
     fill: Callable[[Path], None] | None = None
 
 
+@dataclass(frozen=True)
+class ExternalService:
+    """A service of a stack that runs outside it on this host (the module docstring's external services): ``socket``,
+    the absolute path of a Unix socket on this host, which the stack's services reach at ``port`` by the service's name
+    and its ``aliases``."""
+
+    socket: str
+    port: int
+    aliases: tuple[str, ...] = ()
+
+
 @dataclass
 class ServiceSpec:
     """One service of a stack (the module docstring says what each field means)."""
@@ -199,11 +221,13 @@ class ServiceSpec:
 
 @dataclass
 class StackSpec:
-    """The services of a stack, ``main`` among them, its network, and the labels every service's sandbox carries."""
+    """The services of a stack, ``main`` among them, its network, the labels every service's sandbox carries, and the
+    services it reaches outside it (``externals``, by name)."""
 
     services: dict[str, ServiceSpec]
     network: StackNetwork = "egress"
     labels: dict[str, str] = field(default_factory=dict)
+    externals: dict[str, ExternalService] = field(default_factory=dict)
 
     def order(self) -> list[str]:
         """The services in an order that starts each after its dependencies (the spec's order where that allows), once
@@ -221,7 +245,8 @@ class StackSpec:
     def check(self) -> None:
         """Raise ``ValueError`` for a spec no stack can start: no ``main``, a dependency on a service it lacks, on
         itself or in a cycle, ``service_healthy`` on a service without a healthcheck, a network of a service it lacks,
-        or a listen variable for a port the service does not declare."""
+        a listen variable for a port the service does not declare, or an external service named like one of its own,
+        at a port one of them declares, or at a socket that is not an absolute path."""
 
         if MAIN not in self.services:
             raise ValueError(f"A stack needs a {MAIN!r} service, the agents' sandbox; it has {sorted(self.services)}")
@@ -251,6 +276,28 @@ class StackSpec:
                 )
         if cycle := dependency_cycle({name: set(service.depends_on) for name, service in self.services.items()}):
             raise ValueError(f"The services depend on one another in a cycle: {' -> '.join(cycle)}")
+        self._check_externals()
+
+    def _check_externals(self) -> None:
+        declared = {port: name for name, service in self.services.items() for port in service.ports}
+        names = {alias.lower() for service in self.services.values() for alias in service.aliases} | {
+            name.lower() for name in self.services
+        }
+        for name, external in self.externals.items():
+            if any(alias.lower() in names for alias in (name, *external.aliases)):
+                raise ValueError(f"The external service {name!r} is named like a service of the stack")
+            if not 0 < external.port < 65536:
+                raise ValueError(f"The external service {name!r} has no TCP port: {external.port!r}")
+            if external.port in declared:
+                raise ValueError(
+                    f"The external service {name!r} is reached at port {external.port}, which the service "
+                    f"{declared[external.port]!r} declares: a stack's services share one loopback in a pod"
+                )
+            if not os.path.isabs(external.socket):
+                raise ValueError(f"The external service {name!r} needs a socket's absolute path: {external.socket!r}")
+        ports = [external.port for external in self.externals.values()]
+        if len(ports) != len(set(ports)):
+            raise ValueError(f"Two external services of the stack are reached at one port: {sorted(ports)}")
 
     def init_jobs(self) -> frozenset[str]:
         """The services some service waits for to complete successfully: init jobs, which run to their end."""
@@ -908,6 +955,7 @@ def _exited(code: int | None) -> str:
 
 __all__ = [
     "CONDITIONS",
+    "EXTERNALS",
     "LOOPBACK",
     "LOOPBACK_HOSTS",
     "MAIN",
@@ -918,6 +966,7 @@ __all__ = [
     "Condition",
     "Dependency",
     "DrivenStack",
+    "ExternalService",
     "Healthcheck",
     "Reference",
     "RunMode",

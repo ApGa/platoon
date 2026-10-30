@@ -1,5 +1,6 @@
 """``agents.child_grading: env`` is refused where the child's forked session could not grade the child's own goal,
-and a verifier that sees no tools is reported.
+a verifier that sees no tools is reported, and a verifier's tools are limited by its spawner's and its own role's
+allowlists (``agents.roles.<role>.tools``), not by those of the child it judges.
 
 ``env`` grades a child by its forked session.  A task table has no grader.  On a ``shared`` fork (the default of
 every built-in service) the child's session is its parent's live env, which grades the child's goal only through
@@ -166,14 +167,25 @@ async def _spawn_one_verified(ctx: Any) -> AgentResult:
     return AgentResult("completed", final_message="child done")
 
 
-def _run_verified_child(specs: list[ToolSpec]) -> None:
+def _listing(listed: dict[str, list[str]]) -> Any:
+    """``_spawn_one_verified``, recording the names of the tools each agent lists, by its role."""
+
+    async def run(ctx: Any) -> AgentResult:
+        listed[ctx.role] = [tool.name for tool in await ctx.list_tools()]
+        return await _spawn_one_verified(ctx)
+
+    return run
+
+
+def _run_verified_child(
+    specs: list[ToolSpec], *, role_tools: dict[str, list[str]] | None = None, fn: Any = _spawn_one_verified
+) -> None:
     gateway = ModelGateway(sampler=None, renderer=_Renderer(), tokenizer=None, model_name="toy")  # type: ignore[arg-type]
+    gateway.limit_tools(role_tools or {})
     runtime = InlineRuntime(gateway=gateway, base_url=None, agents=AgentTreeConfig(child_grading="verifier"))
     root = gateway.open_agent(rollout_id="r", trajectory_id="root", interactions={}, max_steps=50)
     session = _Session(task=Task(goal="root"), specs=specs)
-    harness = FunctionHarness(
-        name="verified", version="1", runtime="inline", executes_model_code=False, fn=_spawn_one_verified
-    )
+    harness = FunctionHarness(name="verified", version="1", runtime="inline", executes_model_code=False, fn=fn)
     ctx = InlineAgentContext(runtime, root, task=session.task, session=session, harness=harness, instruction="root")
     asyncio.run(ctx.agents.spawn("child", max_steps=3))
 
@@ -199,3 +211,32 @@ def test_a_verifier_with_a_read_only_tool_is_not_reported(monkeypatch, caplog):
         _run_verified_child([look])
 
     assert not [record for record in caplog.records if "see no tools" in record.getMessage()]
+
+
+NOTE = ToolSpec("note", "Write a note.", {"type": "object", "properties": {}})  # not read-only
+LOOK = ToolSpec("look", "Look at the state.", {"type": "object", "properties": {}}, read_only=True)
+
+
+def test_a_verifier_s_tools_are_not_limited_by_the_role_of_the_child_it_judges(monkeypatch):
+    monkeypatch.setattr(agents_module, "_WARNED_TOOLLESS_VERIFIERS", set())
+    listed: dict[str, list[str]] = {}
+
+    _run_verified_child([NOTE, LOOK], role_tools={"subagent": ["note"], "verifier": ["look"]}, fn=_listing(listed))
+
+    # The child may only note; its verifier, opened under it with read-only access, looks all the same.
+    assert listed == {"subagent": ["note"], "verifier": ["look"]}
+
+
+def test_a_verifier_whose_roles_leave_it_no_tool_is_reported_with_what_they_allow(monkeypatch, caplog):
+    monkeypatch.setattr(agents_module, "_WARNED_TOOLLESS_VERIFIERS", set())
+    listed: dict[str, list[str]] = {}
+
+    with caplog.at_level(logging.WARNING, logger="platoon.harness.agents"):
+        _run_verified_child([NOTE, LOOK], role_tools={"policy": ["note"], "verifier": ["look"]}, fn=_listing(listed))
+
+    assert listed == {"subagent": ["note"], "verifier": []}  # the root's list (its role, policy) holds below it
+    [warning] = [record.getMessage() for record in caplog.records if "see no tools" in record.getMessage()]
+    assert (
+        "see no tools with read_only access and the tools their roles allow (policy: note; verifier: look)" in warning
+    )
+    assert warning.endswith("or other tools (agents.roles.<role>.tools)")

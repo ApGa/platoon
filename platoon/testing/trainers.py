@@ -1,19 +1,31 @@
-"""The conformance check of a trainer (RFC 0021): :func:`check_trainer`.
+"""The conformance check of a trainer (RFC 0021): :func:`check_trainer`; and the fake Tinker service it runs on, for a
+test of a run of one's own (:func:`fake_tinker_service`).
 
 It runs the trainer through RFC 0021's lifecycle: built from its setup, entered with ``async with``, and run (``platoon
 train`` itself still builds the rl trainer with its constructor and calls its ``train()``, which runs the same
 lifecycle).  It runs on CPU: on a fake Tinker service (:class:`FakePolicyService`), whose training clients step nothing
 and save to ``tinker://`` paths of their own while the run's ``checkpoints.jsonl`` gets its rows as in a real run, under
-a model gateway that samples nothing, and, for a trainer that rolls out (``needs().rollouts``), over 16 training tasks
-with a workflow whose every group is one datum with a nonzero advantage.  It is made of named checks (:data:`CHECKS`),
-run on three starts:
+a model gateway that samples nothing and renders with :func:`~platoon.testing.toy_renderer`, and, for a trainer that
+rolls out (``needs().rollouts``), over 16 training tasks with a workflow whose every group is one datum with a nonzero
+advantage.  A run is as long as ``train.max_training_steps`` says, or, for a trainer whose options say how long it
+trains, as long as the options that ``options_for_steps`` gives say.  It is made of named checks (:data:`CHECKS`), run
+on five starts:
 
 - ``trains``: a fresh run of two steps saves its launch checkpoint at step 0 and its final one at step 2, each row with
   the run's counters, its policy version and optimizer steps never going back;
 - ``interrupts``: a run of four steps that a stop request reaches in its third optimizer step (``SIGUSR2``, which
   ``platoon train`` passes on to the start it runs) ends at a step boundary, and saves ``<step>_interrupted`` there;
 - ``resumes``: the next start resumes from that row: its launch checkpoint has the row's step, policy version and
-  optimizer steps, and it trains to the run's end, whose final row holds every key the interrupted row held.
+  optimizer steps, and it trains to the run's end, whose final row holds every key the interrupted row held;
+- ``runs step hooks``: a fresh run of two steps with a step hook of the check's own, which adds one optimizer update
+  at each step's end: the hook hears the launch, then each step's end in order (drain, update, published), platoon
+  counts its update, each step publishes once, one version more than the step before, and the run's optimizer steps
+  count the hook's updates;
+- ``keeps steps whole``: a run whose stop request comes inside step 1, after the step's own updates, as that hook
+  drains and waits, interruptibly: a trainer whose steps are atomic (``needs().atomic_steps``, RFC 0021's rule 10)
+  stops there and saves no checkpoint of the step its own updates opened (``<step>_interrupted`` when they sent
+  nothing); one whose steps are not ends the step first, as the rl trainer always did, and saves
+  ``000002_interrupted`` at the next step's boundary.
 
 The experimental trainer API (``platoon.experimental``) can change in a minor release, and this check changes with it.
 """
@@ -23,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,40 +47,57 @@ if TYPE_CHECKING:
     from platoon.train.trainer.api import Trainer
 
 # The checks, by name, in the order they run.
-CHECKS = ("trains", "interrupts", "resumes")
+CHECKS = ("trains", "interrupts", "resumes", "runs step hooks", "keeps steps whole")
 # The run's counters, which every row of checkpoints.jsonl holds.
 COUNTERS = ("batch", "wandb_run_id", "policy_version", "optimizer_steps")
 # The optimizer step in which the interrupted start's stop request comes.
 STOP_AT = 3
+# How long the check's step hook waits, interruptibly, after the stop it asks for inside a step: a trainer whose steps
+# are atomic stops in the wait, one whose steps are not ends the step after it.
+STOP_WAIT_S = 0.5
 _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1, signal.SIGUSR2)
 
 
-def check_trainer(trainer: type[Trainer], *, options: Any = None) -> None:
+def check_trainer(
+    trainer: type[Trainer], *, options: Any = None, options_for_steps: Callable[[int], Any] | None = None
+) -> None:
     """Check a trainer class against RFC 0021's lifecycle (:data:`CHECKS`); raise ``AssertionError`` naming every
-    check it fails, with what it saw.  ``options`` are the trainer's options, as its setup gives them.  It installs
-    the signal handlers a start installs, and puts back the ones it found; call it outside a running event loop."""
+    check it fails, with what it saw.  ``options`` are the trainer's options, as its setup gives them; for a trainer
+    whose options say how long it trains (sft's ``max_training_steps``), ``options_for_steps(steps)`` gives those of a
+    run of ``steps`` steps instead.  It installs the signal handlers a start installs, and puts back the ones it
+    found; call it outside a running event loop."""
 
     from platoon.utils.scratch import temporary_directory
 
+    def options_of(steps: int) -> Any:
+        return options_for_steps(steps) if options_for_steps is not None else options
+
     with temporary_directory(prefix="platoon-check-trainer-") as directory, _restored_signals():
-        failures = _run_checks(trainer, options, Path(directory))
+        failures = _run_checks(trainer, options_of, Path(directory))
     if failures:
         lines = [f"{name}: {what}" for name, found in failures.items() for what in found]
         name = getattr(trainer, "__qualname__", repr(trainer))
         raise AssertionError(f"trainer {name} fails {len(failures)} check(s):\n  " + "\n  ".join(lines))
 
 
-def _run_checks(trainer: type[Trainer], options: Any, directory: Path) -> dict[str, list[str]]:
-    """Each check's problems, by name; the checks after one whose start fails do not run."""
+def _run_checks(trainer: type[Trainer], options_of: Callable[[int], Any], directory: Path) -> dict[str, list[str]]:
+    """Each check's problems, by name; the checks after one whose start fails do not run.  ``options_of(steps)``
+    gives the trainer's options for a run of ``steps`` steps."""
 
     failures: dict[str, list[str]] = {}
-    fresh = _start(trainer, options, directory / "fresh", steps=2)
+    fresh = _start(trainer, options_of(2), directory / "fresh", steps=2)
     failures.update(_found("trains", fresh, _trains))
-    stopped = _start(trainer, options, directory / "resumed", steps=4, stop_at=STOP_AT)
+    stopped = _start(trainer, options_of(4), directory / "resumed", steps=4, stop_at=STOP_AT)
     failures.update(_found("interrupts", stopped, _interrupts))
     if "interrupts" not in failures:
-        resumed = _start(trainer, options, directory / "resumed", steps=4)
+        resumed = _start(trainer, options_of(4), directory / "resumed", steps=4)
         failures.update(_found("resumes", resumed, lambda rows: _resumes(stopped.rows, rows)))
+    probe = _Probe()
+    hooked = _start(trainer, options_of(2), directory / "hooked", steps=2, probe=probe)
+    failures.update(_found("runs step hooks", hooked, lambda rows: _runs_hooks(probe, fresh.rows, rows)))
+    atomic, stopper = _needs(trainer, options_of(4)).atomic_steps, _Probe(stop_in=1)
+    whole = _start(trainer, options_of(4), directory / "whole", steps=4, probe=stopper)
+    failures.update(_found("keeps steps whole", whole, lambda rows: _keeps_steps_whole(atomic, stopper, rows)))
     return failures
 
 
@@ -113,6 +142,55 @@ def _resumes(before: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[s
     return problems
 
 
+def _runs_hooks(probe: _Probe, fresh: list[dict[str, Any]], rows: list[dict[str, Any]]) -> list[str]:
+    """That the probe heard the launch, then each step's end in order, each step publishing once, one version more
+    than the step before, and that the run's optimizer steps count its updates."""
+
+    if not any(heard[0] == "update" for heard in probe.heard):
+        return ["its steps never ran the step hooks: end each step with run.end_step"]
+    problems = _counted(rows)
+    launch, version = probe.heard[0], None
+    if launch[:2] != ("published", "launch"):
+        problems.append(f"the hooks first heard {launch}, not the launch")
+    else:
+        version = launch[3]
+    expected = []
+    for step in (0, 1):
+        version = None if version is None else version + 1
+        expected += [("drain", step), ("update", step, 1), ("published", "step", step, version)]
+    if probe.heard[1:] != expected:
+        problems.append(f"the hooks heard {probe.heard[1:]}, not {expected}")
+    if fresh and rows and rows[-1].get("optimizer_steps") != fresh[-1].get("optimizer_steps", 0) + 2:
+        problems.append(
+            f"its final row counts {rows[-1].get('optimizer_steps')} optimizer steps: the hook's 2 updates are not "
+            f"counted beside the {fresh[-1].get('optimizer_steps')} of a run without it"
+        )
+    return problems
+
+
+def _keeps_steps_whole(atomic: bool, probe: _Probe, rows: list[dict[str, Any]]) -> list[str]:
+    """That a stop as the probe drains step 1 saves no checkpoint of the step when the trainer's steps are atomic and
+    its own updates opened it (``000001_interrupted`` when they sent nothing), and ``000002_interrupted`` when its steps
+    are not atomic: the step ends first."""
+
+    names = _names(rows)
+    if probe.own_updates is None:
+        return [f"its step 1 never drained its hooks: it saved {names}"]
+    if atomic and probe.own_updates:
+        if names != ["recovery-000000"]:
+            return [
+                f"its steps are atomic, but a stop as step 1 drained its hooks, after the step's own "
+                f"{probe.own_updates} update(s), saved {names}, not the launch checkpoint alone: a step is open once "
+                "it sends training work (run.learner's open it; work sent by hand sets run.clock.step_open)"
+            ]
+    elif atomic:
+        if names != ["recovery-000000", "000001_interrupted"]:
+            return [f"a stop inside step 1, which sent no training work, saved {names}, not 000001_interrupted"]
+    elif names != ["recovery-000000", "000002_interrupted"]:
+        return [f"a stop inside step 1 saved {names}, not 000002_interrupted: its steps are not atomic, so it ends"]
+    return []
+
+
 def _counted(rows: list[dict[str, Any]]) -> list[str]:
     """That each row holds the run's counters, its policy version and optimizer steps never going back."""
 
@@ -141,13 +219,22 @@ class _Start:
     error: BaseException | None
 
 
-def _start(trainer: type[Trainer], options: Any, root: Path, *, steps: int, stop_at: int | None = None) -> _Start:
+def _start(
+    trainer: type[Trainer],
+    options: Any,
+    root: Path,
+    *,
+    steps: int,
+    stop_at: int | None = None,
+    probe: _Probe | None = None,
+) -> _Start:
     """One start of the trainer, built from its setup and run, on a fake service that raises a stop request in its
-    ``stop_at``-th optimizer step; the rows it added to the run's checkpoints.jsonl."""
+    ``stop_at``-th optimizer step, with ``probe`` among its step hooks (registered after its own, in its ``check``);
+    the rows it added to the run's checkpoints.jsonl."""
 
     from platoon.train.components import task_ids_to_dataset
     from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
-    from platoon.train.policy.spec import policy_specs
+    from platoon.train.policy.spec import agent_bindings, policy_specs
     from platoon.train.trainer.api import TaskSources, TrainerSetup, Workflows
     from platoon.utils.config import build_config
 
@@ -159,6 +246,7 @@ def _start(trainer: type[Trainer], options: Any, root: Path, *, steps: int, stop
     setup = TrainerSetup(
         config=config,
         policy_specs=policy_specs(config),
+        agents=agent_bindings(config),
         options=options,
         tasks=TaskSources(train_dataset=task_ids_to_dataset([f"task-{index}" for index in range(16)]))
         if rolls_out
@@ -166,12 +254,38 @@ def _start(trainer: type[Trainer], options: Any, root: Path, *, steps: int, stop
         workflow_builder=lambda policies: Workflows(_OneDatumGroups(), None),
     )
     error = None
-    with _faked(FakePolicyService(stop_at=stop_at)):
+    with fake_tinker_service(stop_at=stop_at):
         try:
-            asyncio.run(_run(trainer.from_setup(setup)))
+            built = trainer.from_setup(setup)
+            if probe is not None:
+                _register_after_check(built, probe)
+            asyncio.run(_run(built))
         except Exception as exc:  # noqa: BLE001 - a check reports what failed
             error = exc
     return _Start(rows=_rows(run_dir)[before:], error=error)
+
+
+def _needs(trainer: type[Trainer], options: Any) -> Any:
+    """What the trainer asks of a run of the check's config."""
+
+    from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+    from platoon.utils.config import build_config
+
+    return trainer.needs(build_config(PlatoonTinkerRLTrainerConfig, _settings(Path("unused"), 2)), options)
+
+
+def _register_after_check(trainer: Any, probe: _Probe) -> None:
+    """Register ``probe`` with the trainer's run as its ``check`` ends, after the trainer's own hooks, to update the
+    policy the run trains."""
+
+    check = trainer.check
+
+    def checked(run: Any) -> None:
+        check(run)
+        probe.policy = run.policies.leader
+        run.hooks.register(probe)
+
+    trainer.check = checked
 
 
 async def _run(trainer: Any) -> None:
@@ -217,9 +331,23 @@ def _restored_signals() -> Generator[None]:
 
 
 @contextmanager
+def fake_tinker_service(*, stop_at: int | None = None) -> Generator[FakePolicyService]:
+    """A fake Tinker service on CPU in place of the real one for the ``with`` block, which yields it
+    (:class:`FakePolicyService`, which records what it was sent): ``tinker.ServiceClient`` opens it, each policy's
+    model gateway samples nothing and renders with :func:`~platoon.testing.toy_renderer`, and the signal handlers a
+    start installs are put back after the block.  ``stop_at``: the optimizer step in which it asks the run to stop.
+    A test runs ``platoon train`` (``platoon.cli.main``) or a trainer in it, as :func:`check_trainer` does."""
+
+    service = FakePolicyService(stop_at=stop_at)
+    with _restored_signals(), _faked(service):
+        yield service
+
+
+@contextmanager
 def _faked(service: FakePolicyService) -> Generator[None]:
     """``service`` in place of the Tinker service, and a model gateway that samples nothing in place of the one a
-    trainer registers for its policy."""
+    trainer registers for its policy and of the one it opens for each other policy, whose sampling client is the
+    service's (it scores, :meth:`FakePolicyService.create_sampling_client`)."""
 
     import tinker
 
@@ -228,6 +356,7 @@ def _faked(service: FakePolicyService) -> Generator[None]:
     with (
         mock.patch.object(tinker, "ServiceClient", service.service_client),
         mock.patch.object(set_module, "register_tinker_llm", _registered),
+        mock.patch.object(set_module, "open_tinker_llm", _opened),
     ):
         yield
 
@@ -245,9 +374,43 @@ def _registered(model_name: str, renderer_name: str, **kwargs: Any) -> Any:
     )
 
 
+def _opened(model_name: str, renderer_name: str, **kwargs: Any) -> Any:
+    """Another policy's model info, as :func:`_registered`'s, on a session of its own on the (fake) service at its
+    ``base_url``, whose sampling client of its model (or of the sampler ``model_path`` names) it samples."""
+
+    import tinker
+
+    session = tinker.ServiceClient(base_url=kwargs.get("base_url"))
+    info = _registered(model_name, renderer_name, **kwargs)
+    info.llm.sampling_client = session.create_sampling_client(
+        base_model=model_name, model_path=kwargs.get("model_path")
+    )
+    return info
+
+
 class _FakeLLM:
+    """A policy's model gateway that samples nothing: it counts the policy's versions, and renders with the toy
+    renderer (``qwen3_instruct`` over the toy tokenizer), which a trainer or a step hook that renders reads."""
+
+    context_window_length: int | None = None
+    sample_timeout_seconds: float | None = None
+
     def __init__(self, model_name: str) -> None:
         self.model_name, self.version = model_name, 0
+        self.sampling_client: Any = None
+        self.gateway = _FakeGateway()
+
+    @property
+    def renderer(self) -> Any:
+        from platoon.testing.tokenizer import toy_renderer
+
+        return toy_renderer()
+
+    @property
+    def tokenizer(self) -> Any:
+        from platoon.testing.tokenizer import toy_tokenizer
+
+        return toy_tokenizer()
 
     def set_version(self, version: int) -> None:
         self.version = version
@@ -257,21 +420,60 @@ class _FakeLLM:
             self.version += 1
 
 
-class FakePolicyService:
-    """A Tinker service on CPU, for one start: its training clients step nothing and save to ``tinker://fake/...``
-    paths, while ``tinker_cookbook`` records each full save in the run's ``checkpoints.jsonl`` as it does for a real
-    service.  ``stop_at``: the optimizer step, counted over the start, in which it raises ``SIGUSR2``, the stop request
-    ``platoon train`` passes on.  ``calls`` lists what was asked of it, in order."""
+class _FakeGateway:
+    """A fake policy's model gateway: it samples nothing, and records the policies it is asked to serve to the agents
+    of other roles (``served``)."""
 
-    def __init__(self, *, stop_at: int | None = None) -> None:
+    def __init__(self) -> None:
+        self.served: list[tuple[str, Any, Any]] = []
+
+    def serve_policies(self, default: str, *, runtimes: Any, roles: Any) -> None:
+        self.served.append((default, runtimes, roles))
+
+
+class FakePolicyService:
+    """A Tinker service on CPU, for one start: its training clients step nothing and save to ``tinker://<run>/...``
+    paths, each client its own training run (``name`` for the first, ``<name>-2`` for the second, and so on), while
+    ``tinker_cookbook`` records each full save in the run's ``checkpoints.jsonl`` as it does for a real service, and its
+    sampling clients score every token at :data:`SCORED_LOGPROB`.  ``stop_at``: the optimizer step, counted over the
+    start, in which it raises ``SIGUSR2``, the stop request ``platoon train`` passes on.  ``calls`` lists what was asked
+    of it, in order; ``losses`` the loss of each forward_backward, ``datums`` every datum sent to it, ``adam`` the Adam
+    parameters of each optimizer step, ``deleted`` the checkpoint paths its REST client deleted (the recovery
+    pruning's), ``sessions`` the ``base_url`` of each session opened on it (``tinker.ServiceClient``),
+    ``training_clients`` each training client it opened, with what it was sent and how often it stepped, and ``scored``
+    every sequence its sampling clients scored, with the model or sampler that scored it."""
+
+    def __init__(self, *, stop_at: int | None = None, name: str = "fake") -> None:
         self.stop_at = stop_at
+        self.name = name
         self.optimizer_steps = 0
         self.calls: list[str] = []
+        self.losses: list[str] = []
+        self.datums: list[Any] = []
+        self.adam: list[Any] = []
+        self.deleted: list[str] = []
+        self.sessions: list[str | None] = []
+        self.training_clients: list[_FakeTrainingClient] = []
+        self.scored: list[tuple[str, list[int]]] = []
 
     def service_client(self, **kwargs: Any) -> FakePolicyService:
-        """``tinker.ServiceClient(base_url=...)``: this service."""
+        """``tinker.ServiceClient(base_url=...)``: a session on this service."""
+
+        self.sessions.append(kwargs.get("base_url"))
+        return self
+
+    def create_rest_client(self) -> FakePolicyService:
+        """The service's REST client: this service."""
 
         return self
+
+    async def delete_checkpoint_from_tinker_path_async(self, path: str) -> None:
+        self.deleted.append(path)
+
+    def create_sampling_client(self, base_model: str | None = None, model_path: str | None = None) -> _Scorer:
+        """A sampling client of ``base_model`` (or of the sampler ``model_path`` names), which scores."""
+
+        return _Scorer(self, model_path or base_model or "")
 
     async def create_lora_training_client_async(self, base_model: str, rank: int = 32, **kwargs: Any) -> Any:
         return self._open(f"create_lora_training_client {base_model}")
@@ -284,7 +486,27 @@ class FakePolicyService:
 
     def _open(self, call: str) -> _FakeTrainingClient:
         self.calls.append(call)
-        return _FakeTrainingClient(self)
+        opened = len(self.training_clients)
+        client = _FakeTrainingClient(self, self.name if not opened else f"{self.name}-{opened + 1}")
+        self.training_clients.append(client)
+        return client
+
+
+# The logprob a fake service's sampling client gives every token it scores.
+SCORED_LOGPROB = -1.0
+
+
+class _Scorer:
+    """A fake service's sampling client: it scores each sequence's tokens at :data:`SCORED_LOGPROB` (the first token,
+    which has no logprob, at None)."""
+
+    def __init__(self, service: FakePolicyService, model: str) -> None:
+        self.service, self.model = service, model
+
+    async def compute_logprobs_async(self, prompt: Any) -> list[float | None]:
+        tokens = prompt.to_ints()
+        self.service.scored.append((self.model, tokens))
+        return [None] + [SCORED_LOGPROB] * (len(tokens) - 1)
 
 
 class _Done:
@@ -298,14 +520,22 @@ class _Done:
 
 
 class _FakeTrainingClient:
-    def __init__(self, service: FakePolicyService) -> None:
-        self.service = service
+    """A fake service's training client: its own training run (``run``, which names its saves' paths), the datums it
+    was sent and the optimizer steps it took."""
+
+    def __init__(self, service: FakePolicyService, run: str) -> None:
+        self.service, self.run = service, run
+        self.datums: list[Any] = []
+        self.optimizer_steps = 0
 
     async def forward_backward_async(self, datums: list[Any], loss_fn: str, loss_fn_config: Any = None) -> _Done:
         import tinker
         import torch
 
         self.service.calls.append(f"forward_backward {len(datums)}")
+        self.service.losses.append(loss_fn)
+        self.service.datums += datums
+        self.datums += datums
         outputs = [
             {"logprobs": tinker.TensorData.from_torch(torch.zeros(len(datum.model_input.to_ints())))}
             for datum in datums
@@ -315,17 +545,19 @@ class _FakeTrainingClient:
     async def optim_step_async(self, params: Any) -> _Done:
         service = self.service
         service.optimizer_steps += 1
+        self.optimizer_steps += 1
         service.calls.append("optim_step")
+        service.adam.append(params)
         if service.optimizer_steps == service.stop_at:
             signal.raise_signal(signal.SIGUSR2)
         return _Done(SimpleNamespace(metrics={}))
 
     async def save_state_async(self, name: str, ttl_seconds: int | None = None) -> _Done:
         self.service.calls.append(f"save_state {name}")
-        return _Done(SimpleNamespace(path=f"tinker://fake/weights/{name}"))
+        return _Done(SimpleNamespace(path=f"tinker://{self.run}/weights/{name}"))
 
     async def save_weights_for_sampler_async(self, name: str, ttl_seconds: int | None = None) -> _Done:
-        return _Done(SimpleNamespace(path=f"tinker://fake/sampler_weights/{name}"))
+        return _Done(SimpleNamespace(path=f"tinker://{self.run}/sampler_weights/{name}"))
 
     async def save_weights_and_get_sampling_client_async(self) -> str:
         self.service.calls.append("save_weights_and_get_sampling_client")
@@ -353,3 +585,59 @@ class _OneDatumGroups:
                 },
             )
         ]
+
+
+class _Probe:
+    """The check's step hook: it records what it hears, in order, and adds one optimizer update of the run's policy
+    (``policy``) at each step's end, one datum under a cross-entropy objective of its own (``end.train``).
+    ``stop_in``: the step in whose drain it notes the step's own updates (``own_updates``), asks for a stop
+    (``SIGUSR2``) and waits, interruptibly, for :data:`STOP_WAIT_S`."""
+
+    name = "platoon_check"
+
+    def __init__(self, *, stop_in: int | None = None) -> None:
+        self.stop_in = stop_in
+        self.policy = "main"
+        self.heard: list[tuple[Any, ...]] = []
+        self.own_updates: int | None = None
+
+    async def drain(self, end: Any) -> None:
+        self.heard.append(("drain", end.step))
+        if end.step == self.stop_in:
+            self.own_updates = sum(end.step_updates.values())
+            signal.raise_signal(signal.SIGUSR2)
+            await end.wait(asyncio.sleep(STOP_WAIT_S), name="the check's stop", interruptible=True)
+
+    async def update(self, end: Any) -> None:
+        before = end.hook_updates[self.policy]
+        await end.train(self.policy, [_probe_datum()], objective=_ProbeObjective())
+        self.heard.append(("update", end.step, end.hook_updates[self.policy] - before))  # as platoon counts it
+
+    async def published(self, end: Any) -> None:
+        # Its policy's version, when it published (in a run of several trained policies, the others' are not its).
+        version = [published for policy, published in end.published.items() if policy == self.policy]
+        self.heard.append(("published", end.kind, end.step, *version))
+
+
+class _ProbeObjective:
+    """Cross entropy, which the fake service takes as any loss."""
+
+    loss_fn = "cross_entropy"
+    loss_fn_config: dict[str, Any] = {}
+    side_channels: frozenset[str] = frozenset()
+
+    def metrics(self, originals: list[Any], result: Any) -> dict[str, float]:
+        return {}
+
+
+def _probe_datum() -> Any:
+    """One datum of three tokens, the last two trained."""
+
+    import tinker
+    import torch
+
+    inputs = {"target_tokens": torch.tensor([2, 3, 4]), "weights": torch.tensor([0.0, 1.0, 1.0])}
+    return tinker.Datum(
+        model_input=tinker.ModelInput.from_ints([1, 2, 3]),
+        loss_fn_inputs={key: tinker.TensorData.from_torch(value) for key, value in inputs.items()},
+    )

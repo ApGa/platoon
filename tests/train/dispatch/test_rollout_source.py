@@ -1,7 +1,8 @@
 """The run's training draws (RFC 0021, ``RolloutSource``): a trainer other than rl trains on the run's rollouts through
 ``run.rollouts()`` and passes the trainer conformance check, its draws taking part in every full checkpoint and taken up
-on resume, the horizon moving on with its steps, its takes ending on a stop request, and the run closing its draws; the
-rl trainer's draws are the run's too, through its methods; each policy's version, as the source and the dispatcher read
+on resume, the horizon moving on with its steps, its takes ending on a stop request, and the run closing its draws; its
+rollout workers given each sampler the run publishes, and a frozen policy's binding once, which never trains; the rl
+trainer's draws are the run's too, through its methods; each policy's version, as the source and the dispatcher read
 them; and the workflow's setup (``WorkflowSetup``), which ``platoon train`` builds a workflow class with."""
 
 from __future__ import annotations
@@ -22,11 +23,12 @@ from platoon.train import launch
 from platoon.train.checkpoints import saving
 from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig
 from platoon.train.dispatch import runner
-from platoon.train.dispatch.settled import _Settled, _settled
+from platoon.train.dispatch.settled import SettledGroup, as_settled_group
 from platoon.train.dispatch.source import RolloutSource
+from platoon.train.objectives.policy_gradient import PolicyGradient
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, PolicySpec, policy_specs
+from platoon.train.policy.spec import MAIN, AgentBindings, PolicySpec, policy_specs
 from platoon.train.step.collect import StepDispatch
 from platoon.train.task_records import TaskRecorder
 from platoon.train.task_stats import read_events
@@ -43,9 +45,10 @@ _SETTINGS, _RUN, _GROUPS = checks._settings, checks._run, checks._OneDatumGroups
 class _Drawing(px.TrainerBase):
     """A trainer of its own that trains on the run's rollouts without the rl trainer, as RFC 0021's S4 sketches one:
     it draws the start's groups through the run's rollout source, taking them until the run's shutdown request, and
-    each step is one optimizer step on the fake service over the step's groups, published as a new version.  It
-    records each start's draws as they opened, with the groups the resume took up (``opened``); its running groups feed
-    ``watchdog`` when one is set; with ``direct``, a step dequeues its groups from the source's queue itself."""
+    each step is one optimizer step on the fake service over the step's groups, sent by hand (so the step says it is
+    open), which its end publishes as a new version.  It records each start's draws as they opened, with the groups the
+    resume took up (``opened``); its running groups feed ``watchdog`` when one is set; with ``direct``, a step dequeues
+    its groups from the source's queue itself."""
 
     opened: ClassVar[list[tuple[RolloutSource, int]]] = []
     watchdog: ClassVar[Any] = None
@@ -76,22 +79,22 @@ class _Drawing(px.TrainerBase):
     async def _step(self, run: TrainerRun) -> None:
         groups = await self._take(run.config.train.batch_size, run.shutdown)
         policy = run.policies[run.policies.leader]
-        rows = [datum for group in groups for datum in px.rows_by_policy(group.rollout, policy.id)[policy.id]]
+        rows = [datum for group in groups for datum in px.rows_by_policy(group.output, policy.id)[policy.id]]
         client: Any = policy.training_client  # the fake service's
+        run.clock.step_open = True
         await (await client.forward_backward_async(rows, "cispo")).result_async()
         await (await client.optim_step_async(None)).result_async()
         policy.optimizer_steps += 1
         self.source.committed([group.key for group in groups])
-        policy.info.llm.update_sampling_client(await policy.save_for_sampler())
-        run.clock.advance(consumed=self.source)
+        await run.end_step()  # the step hooks, the publication, the horizon of the run's draws
 
-    async def _take(self, n: int, stop: asyncio.Event) -> list[_Settled]:
+    async def _take(self, n: int, stop: asyncio.Event) -> list[SettledGroup]:
         if not self.direct:
             return await self.source.take(n, stop=stop)
         source: Any = self.source
         groups = []
         for _ in range(n):  # as a step that reads the source's queue itself, the rl trainer's, does
-            groups.append(_settled(await source.results.get()))
+            groups.append(as_settled_group(await source.results.get()))
             source.dispatcher.dequeued()
         return groups
 
@@ -121,14 +124,15 @@ def _start(
     train: dict[str, Any] | None = None,
     workflow: Any = None,
     timeout: float = 30.0,
+    config: dict[str, Any] | None = None,
 ) -> Any:
-    """One start of ``trainer`` under the trainer check's harness, with ``train`` laid over its ``train.*`` settings
-    and ``workflow`` (a class) in place of its one-datum groups; a start still running ``timeout`` seconds after it
-    began ends with ``TimeoutError``."""
+    """One start of ``trainer`` under the trainer check's harness, with ``train`` laid over its ``train.*`` settings,
+    ``config`` over its others, and ``workflow`` (a class) in place of its one-datum groups; a start still running
+    ``timeout`` seconds after it began ends with ``TimeoutError``."""
 
     def settings(directory: Path, count: int) -> dict[str, Any]:
         given = _SETTINGS(directory, count)
-        return {**given, "train": {**given["train"], **(train or {})}}
+        return {**given, **(config or {}), "train": {**given["train"], **(train or {})}}
 
     monkeypatch.setattr(checks, "_settings", settings)
     monkeypatch.setattr(checks, "_OneDatumGroups", workflow or _GROUPS)
@@ -154,6 +158,113 @@ def _fresh_drawing(monkeypatch):
 
 def test_a_trainer_that_draws_through_the_run_s_rollout_source_passes_the_trainer_check():
     check_trainer(_Drawing)
+
+
+class _Binding(_GROUPS):
+    """One-datum groups whose rollout workers are handed each sampler the run publishes: ``bound`` keeps each one's
+    version."""
+
+    bound: ClassVar[list[int]] = []
+
+    def publish_model_binding(self, sampling_client: Any, version: int) -> None:
+        self.bound.append(version)
+
+
+class _Unbound(_Binding):
+    """Groups in rollout workers (``rollout_isolation: process``), whose binding cannot be published."""
+
+    rollout_isolation = "process"
+
+    def publish_model_binding(self, sampling_client: Any, version: int) -> None:
+        raise FileNotFoundError("the binding file")
+
+
+def test_the_run_gives_the_rollout_workers_of_the_draws_it_opened_each_sampler_it_publishes(tmp_path, monkeypatch):
+    monkeypatch.setattr(_Binding, "bound", [])
+    assert _start(monkeypatch, tmp_path, _Drawing, steps=2, workflow=_Binding).error is None
+    assert _Binding.bound == [0, 1, 2]  # the launch's first sampler, before any group starts, then each step's
+
+    # The first is required: a worker in a process of its own cannot start without it.
+    unbound = _start(monkeypatch, tmp_path / "unbound", _Drawing, steps=2, workflow=_Unbound)
+    assert isinstance(unbound.error, FileNotFoundError) and [row["name"] for row in unbound.rows] == ["recovery-000000"]
+
+
+class _BindingPolicies(_GROUPS):
+    """One-datum groups whose rollout workers are handed each binding the run publishes, of each policy they sample:
+    ``bound`` keeps each one's policy and version."""
+
+    bound: ClassVar[list[tuple[str, int]]] = []
+
+    def publish_model_binding(self, sampling_client: Any, version: int, *, policy: str = MAIN) -> None:
+        self.bound.append((policy, version))
+
+
+class _Hearing(px.StepHookBase):
+    """A step hook that hears what the launch and each step's end published, and asks for a learner of the frozen
+    policy as it updates (``refused``: why it got none)."""
+
+    name = "hearing"
+
+    def __init__(self) -> None:
+        self.heard: list[tuple[str, dict[str, int]]] = []
+        self.refused: list[str] = []
+
+    async def update(self, end: px.StepEnd) -> None:
+        try:
+            end.learner("judge", objective=PolicyGradient("cispo", {}))
+        except ValueError as exc:
+            self.refused.append(str(exc))
+
+    async def published(self, end: px.StepEnd) -> None:
+        self.heard.append((end.kind, dict(end.published)))
+
+
+class _DrawingBesideAJudge(_Drawing):
+    """A trainer of its own whose agents of role ``judge`` sample a frozen policy, ``judge``, beside main, which it
+    trains, with a step hook (``hearing``); before its steps it asks the run for the judge's learner and publication
+    (``refused``: why it got neither)."""
+
+    hearing: ClassVar[_Hearing] = _Hearing()
+    refused: ClassVar[list[str]] = []
+
+    def check(self, run: TrainerRun) -> None:
+        self.policies.agents = AgentBindings(MAIN, roles={"judge": "judge"})
+        run.hooks.register(self.hearing)
+
+    async def ready(self, run: TrainerRun) -> None:
+        await super().ready(run)
+        try:
+            run.learner("judge")
+        except ValueError as exc:
+            self.refused.append(str(exc))
+        try:
+            await run.publish(["judge"])
+        except ValueError as exc:
+            self.refused.append(str(exc))
+
+
+def test_a_frozen_policy_s_binding_is_given_once_and_it_never_trains_or_publishes(tmp_path, monkeypatch):
+    monkeypatch.setattr(_BindingPolicies, "bound", [])
+    monkeypatch.setattr(_DrawingBesideAJudge, "hearing", _Hearing())
+    monkeypatch.setattr(_DrawingBesideAJudge, "refused", [])
+    judge = {"model_name": "judge-model", "renderer_name": "fake-renderer", "trainable": False}
+    start = _start(
+        monkeypatch,
+        tmp_path,
+        _DrawingBesideAJudge,
+        steps=2,
+        workflow=_BindingPolicies,
+        config={"policies": {"judge": judge}},
+    )
+
+    assert start.error is None
+    # The launch gives the workers main's first sampler and the judge's, once, before any group starts; each step then
+    # main's alone, as the hooks hear: the judge keeps the sampler it serves.
+    assert _BindingPolicies.bound == [(MAIN, 0), ("judge", 0), (MAIN, 1), (MAIN, 2)]
+    hearing = _DrawingBesideAJudge.hearing
+    assert hearing.heard == [("launch", {MAIN: 0}), ("step", {MAIN: 1}), ("step", {MAIN: 2})]
+    assert len(hearing.refused) == 2 and all("'judge' trains no update" in text for text in hearing.refused)
+    assert [text.split(":")[0] for text in _DrawingBesideAJudge.refused] == ["policy 'judge' is frozen"] * 2
 
 
 def test_its_draws_take_part_in_every_full_checkpoint_and_a_resume_takes_them_up(tmp_path, monkeypatch):
@@ -262,18 +373,19 @@ def test_only_a_trainer_that_rolls_out_has_the_run_s_draws(tmp_path):
 
 
 class _RLRecording(PlatoonTinkerRLTrainer):
-    """An rl trainer that records each of its methods of the start's draws as the start calls it, and whether its draws
-    are the run's."""
+    """An rl trainer that records each step of the start's draws as the start takes it, and whether its draws are the
+    run's."""
 
     calls: ClassVar[list[str]] = []
-    SEAMS = (
-        "_begin_task_records",
-        "_training_tasks",
-        "_new_dispatcher",
-        "_task_records_started",
-        "_checkpoint_state",
-        "_restore_dispatch",
-        "_dispatch",
+    # The draws' steps of opening, starting, saving and taking up the draws, as the run's rollout source has them.
+    STEPS = (
+        "begin_task_records",
+        "training_tasks",
+        "new_dispatcher",
+        "started",
+        "checkpoint_state",
+        "restore",
+        "start",
     )
 
     async def prepare(self, run: TrainerRun, start: Any) -> px.StepPlan:
@@ -283,26 +395,26 @@ class _RLRecording(PlatoonTinkerRLTrainer):
 
 
 def _recorded(name: str) -> Any:
-    seam = getattr(PlatoonTinkerRLTrainer, name)
+    step = getattr(RolloutSource, name)
 
     def recorded(self: Any, *args: Any, **kwargs: Any) -> Any:
         _RLRecording.calls.append(name)
-        return seam(self, *args, **kwargs)
+        return step(self, *args, **kwargs)
 
     return recorded
 
 
-def test_the_rl_trainer_s_draws_are_the_run_s_and_each_of_their_steps_goes_through_its_methods(tmp_path, monkeypatch):
+def test_the_rl_trainer_s_draws_are_the_run_s_rollout_source_as_any_trainer_s(tmp_path, monkeypatch):
     monkeypatch.setattr(_RLRecording, "calls", [])
-    for name in _RLRecording.SEAMS:
-        monkeypatch.setattr(_RLRecording, name, _recorded(name))
+    for name in _RLRecording.STEPS:
+        monkeypatch.setattr(RolloutSource, name, _recorded(name))
     stopped = _start(monkeypatch, tmp_path, _RLRecording, stop_at=checks.STOP_AT)
     resumed = _start(monkeypatch, tmp_path, _RLRecording)
 
     assert stopped.error is None and resumed.error is None
-    assert set(_RLRecording.calls) == {*_RLRecording.SEAMS, "the run's draws: True"}
-    # Each start's statistics, dispatcher and task samplers read the trainer's tasks, as its loop does.
-    assert _RLRecording.calls.count("_training_tasks") >= 3 * 2
+    assert set(_RLRecording.calls) == {*_RLRecording.STEPS, "the run's draws: True"}
+    # Each start's statistics and task samplers read the trainer's tasks through its draws.
+    assert _RLRecording.calls.count("training_tasks") >= 2 * 2
 
 
 def _policy(version: int) -> Policy:
@@ -353,10 +465,10 @@ class _Recorder:
 
 def test_a_commit_gives_each_group_the_fate_the_step_decided_else_consumed_or_failed():
     groups = {
-        (0, 0): _Settled(None, None, ["datum"], "record-0", (0, 0)),
-        (0, 1): _Settled(None, None, ["datum"], "record-1", (0, 1)),
-        (0, 3): _Settled(None, None, ["datum"], "record-3", (0, 3)),
-        (0, 4): _Settled(None, None, None, None, (0, 4)),  # failed, kept after the statistics stopped: no record
+        (0, 0): SettledGroup(None, None, ["datum"], "record-0", (0, 0)),
+        (0, 1): SettledGroup(None, None, ["datum"], "record-1", (0, 1)),
+        (0, 3): SettledGroup(None, None, ["datum"], "record-3", (0, 3)),
+        (0, 4): SettledGroup(None, None, None, None, (0, 4)),  # failed, kept after the statistics stopped: no record
     }
     committed: list[Any] = []
     source, recorder = _source(), _Recorder()
@@ -378,7 +490,7 @@ def test_a_commit_gives_each_group_the_fate_the_step_decided_else_consumed_or_fa
 
 
 def test_a_step_tells_its_draws_what_it_committed_and_without_a_dispatcher_only_their_statistics():
-    groups = {(0, 0): _Settled(None, None, ["datum"], "record-0", (0, 0))}
+    groups = {(0, 0): SettledGroup(None, None, ["datum"], "record-0", (0, 0))}
     told: list[Any] = []
     source, recorder = _source(), _Recorder()
     dispatcher: Any = SimpleNamespace(
@@ -491,10 +603,10 @@ def test_the_environments_packages_and_label_column_reach_the_run_s_workflow(tmp
         workflow_kwargs={},
         eval_workflow_kwargs={},
     )
-    info = _setup().policies[MAIN]
+    policies = PolicySet([Policy(PolicySpec(MAIN, model_name="m", renderer_name="r"), _setup().policies[MAIN])])
     for phase in ("train", "eval"):
         setup = launch._workflow_setup(
-            phase, config, components, info, {}, {"packages": ("acme",), "label_by": "suite"}
+            phase, config, components, policies, {}, {"packages": ("acme",), "label_by": "suite"}
         )
         built = launch._built(GroupRolloutWorkflow, setup)
         assert (setup.packages, built.packages, built.label_by) == (("acme",), ("acme",), "suite")

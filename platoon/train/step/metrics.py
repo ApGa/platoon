@@ -15,8 +15,8 @@ valid rollout (``slowest_pass_rate``) against that of its others (``others_pass_
 often, so a cut of slow rollouts keeps a sample that leans the way that gap does.  A run without a straggler policy logs
 none of them.
 
-The step itself, ``TrainStep`` in :mod:`platoon.train.trainer.loops`, writes its metrics through these, then exports
-them with the run's counters and logs them.
+The step itself, :class:`~platoon.train.step.step.TrainStep`, writes its metrics through these, then exports them
+with the run's counters and logs them.
 """
 
 from collections import Counter
@@ -161,13 +161,13 @@ def record_batch_counts(tracker: StatsTracker, tally: "StepTally", state: "Train
 
     tracker.scalar(
         **{
-            "batch/groups_dequeued": float(tally.total_tasks),
+            "batch/groups_dequeued": float(tally.groups_dequeued),
             "batch/stale_groups": float(tally.stale_groups),
             "batch/groups_without_stats": float(tally.groups_without_stats),
             "batch/optimizer_updates": float(tally.optimizer_steps),
             "batch/skipped_optimizer": float(tally.optimizer_steps == 0),
             "policy/version": float(state.model_info.llm.version),
-            "optim/updates_total": float(getattr(state, "optimizer_steps", 0)),
+            "optim/updates_total": float(state.optimizer_steps),
         }
     )
 

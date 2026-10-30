@@ -54,6 +54,12 @@ class Watchdog:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
+    @property
+    def running(self) -> bool:
+        """Whether it watches: started, and not stopped since."""
+
+        return self._running
+
     def heartbeat(self):
         """Call this periodically to indicate the process is making progress."""
         with self._lock:
@@ -146,7 +152,8 @@ def _setup_signal_handlers(trainer: "TrainerBase", shutdown_event: asyncio.Event
     """Set up signal handlers for graceful shutdown.
 
     First Ctrl+C (or SIGTERM): Sets shutdown_event. The train loop stops at the next step boundary (a batch
-    that has applied an update finishes first) and ``train`` saves ``<step>_interrupted``.
+    that has applied an update finishes first) and the run saves ``<step>_interrupted`` (``TrainerRun``'s save at
+    exit).
     Second Ctrl+C: Forces immediate exit.
 
     SIGUSR2 and SIGUSR1 are what ``platoon train`` passes on to a start it supervises

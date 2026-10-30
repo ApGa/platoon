@@ -9,11 +9,12 @@ import pytest
 import tinker
 import torch
 from fakes.config import make_config
-from fakes.loop import loop_state, loop_trainer, run_train_loop
-from fakes.trainer import TrainingClient, make_trainer
+from fakes.loop import loop_state, loop_trainer, run_train_loop, saves_of
+from fakes.trainer import TrainingClient, checkpointing_trainer
 from tinker_cookbook import checkpoint_utils
 
 from platoon.train.checkpoints import resume as resume_module
+from platoon.train.checkpoints.saving import _save_checkpoint_and_get_sampling_client
 from platoon.train.step.batch_transforms import has_zero_objective
 
 
@@ -87,14 +88,14 @@ def test_zero_nonzero_zero_updates_only_once(filter_zero):
     )
     assert shared.train_step == 23  # dataset consumption is independent
     assert shared.model_info.llm.version == 5
-    assert shared.sampling_client_step == 5
-    assert shared.clock.updated.sets == 3
+    assert shared.clock.updated.sets == 3 + 1  # each step's end, and the loops' stop
     assert shared.optimizer_steps == 5
     assert len(shared.training_client.forward_backwards) == 1
     assert shared.training_client.optim_steps == 1
-    assert trainer._save_checkpoint_and_get_sampling_client.await_count == 1
-    save = trainer._save_checkpoint_and_get_sampling_client.await_args.kwargs
-    assert (save["i_batch"], save["policy_version"], save["optimizer_steps"]) == (21, 5, 5)
+    saves = saves_of(trainer)  # only the step that updated published, after batch 21 (recovery_every: 1)
+    assert saves == ["recovery-000022"]
+    saved = saves.loop_states["recovery-000022"]
+    assert (saved["batch"], saved["policy_version"], saved["optimizer_steps"]) == (22, 5, 5)
     assert [r["train/batch/optimizer_updates"] for r in logs] == [0, 1, 0]
     assert [r["train/policy/version"] for r in logs] == [4, 5, 5]
     assert [r["train/batch/stale_groups"] for r in logs] == [0, 0, 0]
@@ -103,9 +104,10 @@ def test_zero_nonzero_zero_updates_only_once(filter_zero):
 def test_a_step_that_updates_hands_the_loops_the_sampling_client_it_saved():
     """The evaluation loop and the next step's binding sample the policy the step published."""
 
-    trainer, shared, _logs = run_batches([[datum(1.0)]])
+    _trainer, shared, _logs = run_batches([[datum(1.0)]])
 
-    assert shared.sampling_client is trainer._save_checkpoint_and_get_sampling_client.return_value
+    # The sampler of the recovery checkpoint the step saved (recovery_every: 1), from the training client.
+    assert shared.sampling_client == "sampler:tinker://m/sampler_weights/recovery-000001"
 
 
 class _SlowClient(TrainingClient):
@@ -167,11 +169,6 @@ def test_resume_policy_counters_are_independent_with_legacy_fallback():
 
 
 def test_recovery_checkpoint_persists_actual_counters(tmp_path):
-    trainer, _saves, logged = make_trainer(
-        make_config(log_path=str(tmp_path), stats={"experiment_name": "x", "trial_name": "y"})
-    )
-    logged.wandb_run_id = "run"
-    Path(trainer.run_log_path).mkdir(parents=True)
     state_path = "tinker://m/weights/recovery-000021"
     sampler_path = "tinker://m/sampler_weights/recovery-000021"
     client = SimpleNamespace(
@@ -187,8 +184,13 @@ def test_recovery_checkpoint_persists_actual_counters(tmp_path):
         ),
         create_sampling_client=Mock(return_value=object()),
     )
+    config = make_config(log_path=str(tmp_path), stats={"experiment_name": "x", "trial_name": "y"})
+    trainer, logged = checkpointing_trainer(config, client)
+    logged.wandb_run_id = "run"
+    Path(trainer.run_log_path).mkdir(parents=True)
     asyncio.run(
-        trainer._save_checkpoint_and_get_sampling_client(
+        _save_checkpoint_and_get_sampling_client(
+            trainer,
             client,
             i_batch=20,
             save_every=100,

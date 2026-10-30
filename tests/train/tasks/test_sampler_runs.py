@@ -22,7 +22,7 @@ import pytest
 from fakes.config import mixture_config
 from fakes.runs import RecordingClient
 from fakes.tinker_service import FakeTinkerService, make_service_trainer
-from fakes.trainer import datum, interrupt_at, make_trainer
+from fakes.trainer import datum, draws_of, interrupt_at, make_trainer
 
 from platoon.train import dataloader as dataloader_module
 from platoon.train.auto import AutoDataset
@@ -173,7 +173,7 @@ def test_at_k_the_groups_started_and_not_consumed_never_exceed_k_plus_one_batche
 
     assert logged == list(range(1, 11))
     assert max(ahead) <= (k + 1) * 3
-    assert trainer._dispatcher.peak == (k + 1) * 3
+    assert draws_of(trainer).dispatcher.peak == (k + 1) * 3
     assert sorted(position for step in client.steps for position in step) == list(range(30))
 
 
