@@ -213,10 +213,12 @@ platoon.experimental.CreditEstimatorBase.__init__: def __init__(setup: CreditSet
 platoon.experimental.CreditEstimatorBase.assign: async def assign(group: CreditGroup) -> None
 platoon.experimental.CreditEstimatorBase.assign_timeout_seconds: constant float = 600.0
 platoon.experimental.CreditEstimatorBase.check: staticmethod def check(options: Any, ctx: CreditCheckContext) -> None
+platoon.experimental.CreditEstimatorBase.credits_single_members: constant bool = False
 platoon.experimental.CreditEstimatorBase.needs_agents: constant bool = False
 platoon.experimental.CreditEstimatorBase.options_schema: constant NoneType = None
 platoon.experimental.CreditGroup: @dataclass class CreditGroup
 platoon.experimental.CreditGroup.agents: def agents() -> list[AgentRun]
+platoon.experimental.CreditGroup.columns: field Mapping[str, str] = <factory dict>
 platoon.experimental.CreditGroup.entry: field str | None
 platoon.experimental.CreditGroup.label: field str | None
 platoon.experimental.CreditGroup.members: field list[MemberRollout]
@@ -228,6 +230,7 @@ platoon.experimental.CreditGroup.task_id: field str
 platoon.experimental.CreditGroup.versions: field Mapping[PolicyId, int]
 platoon.experimental.CreditSetup: @dataclass(frozen=True) class CreditSetup
 platoon.experimental.CreditSetup.entry: field str
+platoon.experimental.CreditSetup.max_staleness: field Mapping[PolicyId, int | None] = <factory dict>
 platoon.experimental.CreditSetup.name: field str
 platoon.experimental.CreditSetup.policies: field tuple[PolicyId, ...]
 platoon.experimental.CreditSetup.policy_views: field Mapping[PolicyId, PolicyView] = <factory dict>
@@ -570,6 +573,7 @@ platoon.experimental.TrainingSample.role: field str | None = None
 platoon.experimental.TrainingSample.set_advantage: def set_advantage(value: float) -> None
 platoon.experimental.TrainingSample.set_advantages: def set_advantages(values: torch.Tensor | Sequence[float]) -> None
 platoon.experimental.TrainingSample.trajectory_id: field str | None = None
+platoon.experimental.TrainingSample.version: field int | None = None
 platoon.experimental.WorkflowCapabilities: @dataclass(frozen=True) class WorkflowCapabilities
 platoon.experimental.WorkflowCapabilities.applies_credit: field bool = False
 platoon.experimental.WorkflowCapabilities.applies_entry_settings: field bool = False

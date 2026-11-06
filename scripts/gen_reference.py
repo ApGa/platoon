@@ -10,7 +10,7 @@
   default and description.
   It ends with core's task samplers, the levels each serves, and ``pass_rate``'s options, core's group admission
   rules, with ``informative``'s options, core's trainers, with the options of each that takes some, and core's
-  credit estimators, with ``keyed``'s options.
+  credit estimators, with the options of each that takes some.
 * ``api.md``: every name ``platoon`` exports (``platoon.__all__``), with its signature and docstring.
 * ``experimental.md``: every name ``platoon.experimental`` exports, the same way.
 
@@ -711,6 +711,16 @@ CREDIT_ESTIMATOR_TEXT: dict[str, str] = {
     "token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher "
     "logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share "
     "the student's tokenizer.",
+    "running": "Each scored agent's rows centered on running statistics of the groups that settled before it sampled, "
+    "for groups of one rollout: `clip((reward - baseline) / scale)`, the baseline its stratum's decayed mean (the "
+    "task's values of the `strata` columns) shrunk toward its parent stratum's, the scale a decayed root mean square, "
+    "both read as they were at the version the agent sampled at, and a negative reward never above 0. Reads agents.",
+}
+# The sections of the option classes an estimator's options hold, below its own: what each is.
+NESTED_OPTION_TEXT: dict[str, str] = {
+    "RunningPriors": "the keys of `credit_options.priors` under `credit: running`, or of the YAML or JSON file it "
+    "names: where the statistics start, each prior as `weight` samples, which decay as samples do.",
+    "StratumPrior": "each item of `priors.strata`: one stratum's prior mean reward.",
 }
 
 
@@ -718,8 +728,14 @@ def _credit_estimators(links: Mapping[type, str]) -> list[str]:
     from platoon.train.credit.keyed import KeyedOptions
     from platoon.train.credit.registry import BUILTIN_CREDIT_ESTIMATORS
     from platoon.train.credit.reverse_kl import ReverseKLOptions
+    from platoon.train.credit.running import RunningOptions, RunningPriors, StratumPrior
 
-    schemas: dict[str, type] = {"keyed": KeyedOptions, "reverse_kl": ReverseKLOptions}
+    # Each estimator's options class, then the option classes they hold, each with a section of its own.
+    schemas: dict[str, tuple[type, ...]] = {
+        "keyed": (KeyedOptions,),
+        "reverse_kl": (ReverseKLOptions,),
+        "running": (RunningOptions, RunningPriors, StratumPrior),
+    }
     lines = [
         "",
         '<a id="credit-estimators"></a>',
@@ -742,21 +758,33 @@ def _credit_estimators(links: Mapping[type, str]) -> list[str]:
             )
         options = f"[below](#{name.replace('_', '-')}-options)" if name in schemas else "none"
         lines.append(f"| `{name}` | {cell(CREDIT_ESTIMATOR_TEXT[name])} | {options} |")
-    for name, schema in schemas.items():
-        lines += [
-            "",
-            f'<a id="{name.replace("_", "-")}-options"></a>',
-            "",
-            f"### `{name}`'s options",
-            "",
-            f"`{schema.__module__}.{schema.__qualname__}`: the keys of `credit_options` under `credit: {name}`.",
-            "",
-            "| Key | Type | Default | Description |",
-            "|---|---|---|---|",
+    for name, (schema, *nested) in schemas.items():
+        anchors = {cls: re.sub(r"(?<!^)(?=[A-Z])", "-", cls.__name__).lower() for cls in nested}
+        held = {**links, **{cls: f"[`{cls.__name__}`](#{anchors[cls]})" for cls in nested}}
+        sections = [
+            (
+                f"{name.replace('_', '-')}-options",
+                f"### `{name}`'s options",
+                schema,
+                f"the keys of `credit_options` under `credit: {name}`.",
+            ),
+            *((anchors[cls], f"#### `{cls.__name__}`", cls, NESTED_OPTION_TEXT[cls.__name__]) for cls in nested),
         ]
-        for item in config_fields(schema):
-            type_text = _config_type_text(item.annotation, links).replace("|", "\\|")
-            lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
+        for section, title, cls, text in sections:
+            lines += [
+                "",
+                f'<a id="{section}"></a>',
+                "",
+                title,
+                "",
+                f"`{cls.__module__}.{cls.__qualname__}`: {text}",
+                "",
+                "| Key | Type | Default | Description |",
+                "|---|---|---|---|",
+            ]
+            for item in config_fields(cls):
+                type_text = _config_type_text(item.annotation, held).replace("|", "\\|")
+                lines.append(f"| `{item.name}` | {type_text} | {item.default} | {cell(item.doc)} |")
     return lines
 
 

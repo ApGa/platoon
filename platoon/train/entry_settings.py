@@ -390,13 +390,15 @@ def largest_staleness(config: Any) -> tuple[int | None, str]:
 
 def warnings(config: Any, settings: Mapping[str, EntrySettings]) -> list[str]:
     """What a training config's entry settings may get wrong without being wrong, one line each: an entry whose groups
-    have one rollout, which trains nothing under the group baselines; an entry that raises its staleness bound (the
-    sign of a slow entry) without a limit on its label; an entry's rollout setting that evaluation's section
-    overrides for its evaluation rollouts; for the default label column, a ``train.max_concurrent_rollouts`` that
-    the capped labels' groups can fill (:func:`permit_warnings`; another column's, once the tasks are listed,
+    have one rollout, which trains nothing under the group baselines (unless its credit estimator credits groups of one
+    member, ``credits_single_members``, as ``running`` does); an entry that raises its staleness bound (the sign of a
+    slow entry) without a limit on its label; an entry's rollout setting that evaluation's section overrides for its
+    evaluation rollouts; for the default label column, a ``train.max_concurrent_rollouts`` that the capped labels'
+    groups can fill (:func:`permit_warnings`; another column's, once the tasks are listed,
     :func:`listed_permit_warnings`); and a group admission rule under a loss whose objective is not zero at zero
     advantages (:func:`platoon.train.admissions.loss_warnings`)."""
 
+    from platoon.train.credit.runtime import credits_single_members
     from platoon.utils.config import given_mapping
 
     found = []
@@ -409,7 +411,8 @@ def warnings(config: Any, settings: Mapping[str, EntrySettings]) -> list[str]:
         own = settings.get(label)
         if own is None:
             continue
-        if "group_size" in entry.workflow_config and own.train.group_size == 1:
+        single = "group_size" in entry.workflow_config and own.train.group_size == 1
+        if single and not credits_single_members(getattr(entry, "credit", None)):
             found.append(
                 f"environments[{label}].workflow_config.group_size is 1: a group of one rollout has a zero advantage "
                 "under the group baselines and trains nothing, unless a workflow subclass computes its own"

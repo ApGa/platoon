@@ -24,6 +24,7 @@ from platoon.train.policy.spec import (
     PolicySpec,
     failure_note,
     horizon_bound,
+    own_staleness_bounds,
     policy_specs,
     trained_policies,
 )
@@ -157,6 +158,12 @@ def test_the_horizon_counts_the_smallest_bound_of_the_trained_policies(run_bound
     assert horizon_bound(loaded) == horizon
     alone = config(train={**SETTINGS["train"], "max_staleness": run_bound})
     assert horizon_bound(alone) == run_bound  # one policy: train.max_staleness, as before
+
+
+def test_a_trained_policy_with_a_bound_of_its_own_is_named_with_it():
+    # Its rows of every entry are judged by it; main's always by their entry's, so main is never named.
+    assert own_staleness_bounds(config(**worker(max_staleness=5))) == {"worker": 5}
+    assert own_staleness_bounds(config(**worker())) == {} == own_staleness_bounds(config())
 
 
 def test_keep_recovery_must_span_each_trained_policy_s_own_bound():

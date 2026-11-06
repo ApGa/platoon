@@ -4,6 +4,34 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
+## Unreleased
+
+### New features
+
+- **Credit for groups of one rollout (experimental): `credit: running`.** Under the group baselines a group of one
+  rollout centers its root on its own reward, so the root never trains. `running` credits each scored agent of such
+  groups against decayed statistics of the entry's groups that settled before the agent began sampling, as REINFORCE++
+  does with the statistics of a batch: `clip((reward - baseline) / scale, -clip, clip)`, the baseline its stratum's
+  decayed mean reward (its task's values of the `strata` columns, such as a Harbor task's index fields) shrunk toward
+  its parent stratum's (`shrink`), the scale a decayed root mean square of the residuals, at least 0.1, both read as
+  they were when the agent's policy reached the version the agent sampled at, and a negative reward never above 0
+  (`cap_penalties`). Each role of each policy has statistics of its own. A sample counts at full weight when its group
+  settles, and its weight halves every `half_life` versions of its policy; `priors` seed the statistics, inline or from
+  a YAML or JSON file relative to the config file, and without them agents train at 0 until 32 samples settled. The
+  statistics reach back as far as the entry's rows may be old, so `running` needs a staleness bound
+  (`train.max_staleness`, or the entry's), and a config without one is refused. They are the estimator's state, which
+  each full checkpoint saves with the groups it keeps: the oldest statistics a read may need and the settles since. The
+  step logs `credit/running/*`, and an entry of groups of one under `running` is not warned of ([Credit groups of one
+  rollout](docs/how-to/train-and-eval.md#credit-groups-of-one-rollout-experimental)). `running` is now one of core's
+  names: a package that registered an estimator under it must rename it.
+- **What a credit estimator sees (experimental).** Each row's `TrainingSample.version`: the version of its policy it
+  was sampled at, the oldest its own model calls sampled, whatever `train.stale_filter` is, or its rollout's when one
+  of them recorded none. `CreditGroup.columns`: the task's own columns, as text, such as a Harbor task's index fields.
+  `CreditSetup.max_staleness`: how many of its own versions old each policy's rows of the entry may be and still train.
+  And `credits_single_members`, a class flag (False on `CreditEstimatorBase`): an estimator that can give a group of
+  one member advantages of its own sets it, and the warning that an entry's groups of one rollout train nothing leaves
+  out the entries it credits ([Write a credit estimator](docs/extending/credit-estimators.md)).
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

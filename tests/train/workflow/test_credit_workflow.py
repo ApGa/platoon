@@ -3,9 +3,10 @@ over the group, within its time limit, tags the rows of an estimator that reads 
 checkpoint keeps whole), whatever order the estimator leaves the members in, and refuses rows without tags; its
 requests ask the workers for tags (protocol 3) only then; a subclass with credit hooks of its own keeps them, unless it
 declares that it applies credit; the run settles a stateful estimator as it files each group and saves its state with
-the groups a checkpoint keeps; an estimator sees the run's policies and each one's version; and an estimator that
-raises, in assign or in settle, or runs out of time, stops the run with an error that names it, while a policy's failed
-scoring fails only its group."""
+the groups a checkpoint keeps; an estimator sees the run's policies and each one's version, the task's own columns
+(which ``credit: running`` keys its baselines by, a dataset loader's as a Harbor task's) and the version each row was
+sampled at, whatever the stale filter; and an estimator that raises, in assign or in settle, or runs out of time,
+stops the run with an error that names it, while a policy's failed scoring fails only its group."""
 
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from platoon.train.credit.api import CreditEstimatorBase, CreditGroup, CreditSet
 from platoon.train.credit.group import GroupCredit
 from platoon.train.credit.keyed import Keyed, KeyedOptions
 from platoon.train.credit.registry import workflow_problems
+from platoon.train.credit.running import Running, RunningOptions, RunningPriors, StratumPrior
 from platoon.train.credit.runtime import CreditEstimatorError, settle_credit
 from platoon.train.dispatch import runner
 from platoon.train.dispatch.settled import carries_datums, emptied
@@ -110,12 +112,15 @@ def _workflow(estimator: Any = None, workflow_cls: type = GroupRolloutWorkflow, 
     return workflow
 
 
-def _run(workflow: Any, results: Sequence[TrajectoryCollectionResult]) -> Any:
+def _run(workflow: Any, results: Sequence[TrajectoryCollectionResult], row: dict | None = None) -> Any:
+    """Run a group of task row ``row`` (by default task ``task``, with no columns of its own) whose members return
+    ``results``."""
+
     async def single(data: dict, rollout_number: int) -> TrajectoryCollectionResult:
         return results[rollout_number]
 
     workflow.arun_episode_single = single
-    return asyncio.run(workflow.arun_episode({"task_id": "task"}))
+    return asyncio.run(workflow.arun_episode(row or {"task_id": "task"}))
 
 
 def _action_values(datums: Sequence[tinker.Datum]) -> list[float]:
@@ -367,6 +372,90 @@ def test_a_tagged_output_is_kept_whole_by_a_checkpoint():
         (s.policy, s.member, s.agent_id, s.role, s.trajectory_id, s.depth) for s in output.samples
     ]
     assert _action_values(rows_by_policy(decoded, MAIN)[MAIN]) == _action_values(rows_by_policy(output, MAIN)[MAIN])
+
+
+class _Sees(CreditEstimatorBase):
+    """Keeps each group it credits, to read what it saw."""
+
+    needs_agents = True
+
+    def __init__(self, setup: CreditSetup, options: Any = None) -> None:
+        super().__init__(setup, options)
+        self.groups: list[CreditGroup] = []
+
+    async def assign(self, group: CreditGroup) -> None:
+        self.groups.append(group)
+
+
+def test_an_estimator_sees_the_task_s_own_columns_as_text():
+    estimator = _Sees(_SETUP)
+    row = {
+        "task_id": "task",
+        "domain": "chemistry",
+        "difficulty": 3,
+        "hard": True,
+        "share": 0.5,
+        "tags": ["a", "b"],  # not a scalar
+        "notes": "",  # empty
+        "other": None,  # another entry's column, in a mixture's dataset
+        "_platoon_environment": "default",  # platoon's own
+    }
+    _run(_workflow(estimator), [_rollout(1.0, 0.0), _rollout(0.0, 0.0)], row)
+    _run(_workflow(estimator), [_rollout(1.0, 0.0), _rollout(0.0, 0.0)])
+
+    assert [group.columns for group in estimator.groups] == [
+        {"domain": "chemistry", "difficulty": "3", "hard": "true", "share": "0.5"},
+        {},
+    ]
+
+
+def _versioned(result: TrajectoryCollectionResult, carried: int, own: tuple[int, ...]) -> TrajectoryCollectionResult:
+    """``result`` whose datums carry its rollout's version ``carried``, and whose own versions are ``own``."""
+
+    for datum in result.datums:
+        datum.loss_fn_inputs["checkpoint_version"] = TensorData.from_torch(torch.tensor([carried]))
+    result.own_versions = own
+    return result
+
+
+def _carried(samples: Sequence[Any]) -> list[int]:
+    return [int(sample.datum.loss_fn_inputs["checkpoint_version"].to_torch().item()) for sample in samples]
+
+
+@pytest.mark.parametrize("stale_filter", ["group", "datum"])
+def test_each_row_carries_the_version_its_own_calls_sampled_whatever_the_stale_filter(stale_filter):
+    estimator = _Sees(_SETUP)
+    workflow = _workflow(estimator)
+    workflow.stale_filter = stale_filter
+    _run(workflow, [_versioned(_rollout(1.0, 0.0), 2, (3, 5)), _versioned(_rollout(0.0, 0.0), 2, (4, 4))])
+
+    [group] = estimator.groups
+    assert [sample.version for sample in group.samples()] == [3, 5, 4, 4]
+    # What the stale filter judges them by: under group their rollout's, under datum their own.
+    assert _carried(group.samples()) == ([2, 2, 2, 2] if stale_filter == "group" else [3, 5, 4, 4])
+
+
+def test_rows_whose_own_versions_do_not_match_them_carry_the_version_their_datums_carry():
+    estimator = _Sees(_SETUP)
+    _run(_workflow(estimator), [_versioned(_rollout(1.0, 0.0), 2, (3,)), _versioned(_rollout(0.0, 0.0), 2, ())])
+
+    [group] = estimator.groups
+    assert [sample.version for sample in group.samples()] == [2, 2, 2, 2]
+
+
+@pytest.mark.parametrize(("difficulty", "advantage"), [(3, 0.5 - 2 / 3), (4, 0.5)])
+def test_running_keys_its_baselines_by_a_column_of_tasks_that_are_no_harbor_tasks(difficulty, advantage):
+    # A dataset loader's integer column, which the row holds as it loaded it: the stratum reads it as text. The prior
+    # of difficulty 3 is 1 at weight 16, shrunk toward the root's 0 at weight 8; difficulty 4 has none: the root's.
+    priors = RunningPriors(mean=0.0, scale=1.0, strata=[StratumPrior(["3"], 1.0)])
+    estimator = Running(_SETUP, RunningOptions(strata=["difficulty"], priors=priors))
+    output = _run(
+        _workflow(estimator, group_size=1), [_rollout(0.5, 0.5)], {"task_id": "task", "difficulty": difficulty}
+    )
+
+    assert isinstance(output, PolicyGroupOutput)
+    assert _action_values(rows_by_policy(output, MAIN)[MAIN]) == pytest.approx([advantage, advantage])
+    assert report_of(output).verdict == "trained" and output.credit is not None  # a group of one trains, and settles
 
 
 # --- the worker requests ---------------------------------------------------------------------------------------------

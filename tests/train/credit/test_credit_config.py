@@ -1,23 +1,32 @@
 """The keys of credit (RFC 0021, section 6): each environment entry's ``credit`` and ``credit_options``.  What loads and
 what is refused, with its message, when the config loads or where the estimators resolve (``run_components``, as
-``platoon train`` and ``platoon config validate`` run it); ``lock.json``'s records, only for entries that set one; and
-the workflows ``platoon train`` builds: the training workflow credits each such entry's groups with its estimator, the
-evaluation's never."""
+``platoon train`` and ``platoon config validate`` run it), ``running``'s priors file relative to the config file
+included; ``lock.json``'s records, only for entries that set one; and the workflows ``platoon train`` builds: the
+training workflow credits each such entry's groups with its estimator, the evaluation's never."""
 
 from __future__ import annotations
 
+import logging
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import yaml
 from fakes.launch import built_workflows
 
+from platoon import registry as registry_module
 from platoon.envs.named import FORBIDDEN_KEYS
 from platoon.extensions import run_components
 from platoon.task import Task
-from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.train import launch
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig, WorkflowConfig
+from platoon.train.credit.api import PolicyView
 from platoon.train.credit.keyed import Keyed, KeyedOptions
+from platoon.train.credit.registry import REGISTRY_KIND, CreditChoice, build_entry_credit
+from platoon.train.credit.running import Running, RunningOptions, RunningPriors, StratumPrior
+from platoon.train.policy.spec import MAIN
 from platoon.utils.config import ConfigError, resolve_config
 
 HERE = __name__
@@ -55,12 +64,12 @@ def _entry(name: str, **fields: Any) -> dict[str, Any]:
     }
 
 
-def _load(tmp_path: Path, *environments: dict[str, Any]) -> Any:
+def _load(tmp_path: Path, *environments: dict[str, Any], **train: Any) -> Any:
     path = tmp_path / "train.yaml"
     path.write_text(
         yaml.safe_dump(
             {
-                "train": {"model_name": "m", "renderer_name": "r", "batch_size": 4, "max_training_steps": 3},
+                "train": {"model_name": "m", "renderer_name": "r", "batch_size": 4, "max_training_steps": 3, **train},
                 "eval": {"every": 0},
                 "watchdog": {"enabled": False},
                 "log_path": str(tmp_path / "logs"),
@@ -77,8 +86,8 @@ def _refused(tmp_path: Path, *environments: dict[str, Any]) -> list[str]:
     return error.value.problems
 
 
-def _resolution(tmp_path: Path, *environments: dict[str, Any]) -> list[str]:
-    config = _load(tmp_path, *environments)
+def _resolution(tmp_path: Path, *environments: dict[str, Any], **train: Any) -> list[str]:
+    config = _load(tmp_path, *environments, **train)
     with pytest.raises(ConfigError) as error:
         run_components(config)
     return error.value.problems
@@ -106,11 +115,111 @@ def test_a_named_environment_cannot_choose_the_credit():
         ({"credit": "group", "credit_options": {"leave_one_out": True}}, "takes no options"),
         ({"credit": f"{HERE}:Refusing", "credit_options": {"key": ["depth"]}}, "trains no subagents to key on depth"),
         ({"credit": f"{HERE}:tasks"}, "is not a credit estimator: a class with async assign(group)"),
+        (
+            {"credit": "running", "credit_options": {"strata": ["task_id"]}},
+            "environments.0.credit_options.strata: task_id is platoon's own column, not one of the task's",
+        ),
+        (
+            {"credit": "running", "credit_options": {"priors": {"mean": 0, "scale": -1}}},
+            "environments.0.credit_options.priors: scale: a finite number above 0, got -1",
+        ),
     ],
 )
 def test_what_does_not_resolve_or_take_its_options_stops_the_run_with_its_path(tmp_path, fields, says):
     problems = _resolution(tmp_path, _entry("a", **fields))
     assert any(says in problem for problem in problems), problems
+
+
+def test_running_s_priors_file_is_relative_to_the_config_file_and_lock_json_records_what_it_holds(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "priors").mkdir()
+    (tmp_path / "priors" / "base.yaml").write_text(
+        "mean: -0.25\nscale: 0.5\nstrata: [{stratum: [masked], mean: 0.1}]\n"
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)  # the working directory has no priors/base.yaml
+    options = {"strata": ["kind"], "priors": "priors/base.yaml"}
+    config = _load(tmp_path, _entry("solo", credit="running", credit_options=options), max_staleness=2)
+
+    assert config.environments[0].credit_options["priors"] == str(tmp_path / "priors" / "base.yaml")
+    [record] = [record for record in run_components(config) if record["kind"] == "credit"]
+    assert record["resolved"] == "platoon.train.credit.running:Running"
+    assert record["options"]["solo"]["priors"] == {
+        "mean": -0.25,
+        "scale": 0.5,
+        "weight": 16.0,
+        "strata": [{"stratum": ["masked"], "mean": 0.1}],
+    }
+    train, _ = built_workflows(config)
+    estimator = train.entry_credit["solo"]
+    assert isinstance(estimator, Running) and estimator.options.priors == RunningPriors(
+        mean=-0.25, scale=0.5, strata=[StratumPrior(["masked"], 0.1)]
+    )
+    assert estimator.setup.max_staleness == {MAIN: 2}  # how old its rows may be: how far back its statistics reach
+
+
+def test_running_needs_the_entry_s_rows_to_have_a_staleness_bound(tmp_path):
+    [problem] = _resolution(tmp_path, _entry("solo", credit="running"))
+    assert problem.startswith("environments.0.credit: running: it reads each agent's statistics as they were when")
+    assert problem.endswith("set train.max_staleness (how many policy versions old a rollout may be and still train)")
+    config = _load(tmp_path, _entry("solo", credit="running"), max_staleness=0)
+    assert [record["ref"] for record in run_components(config) if record["kind"] == "credit"] == ["running"]
+
+
+def test_each_estimator_is_built_with_the_staleness_bound_of_each_policy_s_rows_of_its_entry():
+    # Main's rows take the entry's bound; another policy's its own, when it has one (policies.<id>.max_staleness).
+    choices = {label: CreditChoice(label, "running", Running, RunningOptions()) for label in ("quick", "slow")}
+    settings = {
+        "quick": SimpleNamespace(train=WorkflowConfig(group_size=1), max_staleness=2),
+        "slow": SimpleNamespace(train=WorkflowConfig(group_size=1), max_staleness=6),
+    }
+    views = {policy: PolicyView(policy) for policy in (MAIN, "worker", "helper")}
+    built = build_entry_credit(choices, settings, views, {"worker": 4})
+    assert {label: estimator.setup.max_staleness for label, estimator in built.items()} == {
+        "quick": {MAIN: 2, "worker": 4, "helper": 2},
+        "slow": {MAIN: 6, "worker": 4, "helper": 6},
+    }
+
+
+_OF_ONE = """
+import platoon.experimental as px
+
+
+@px.credit_estimator("acme-of-one")
+class OfOne(px.CreditEstimatorBase):
+    credits_single_members = True
+
+    async def assign(self, group):
+        pass
+"""
+
+
+def test_a_start_reads_the_flag_of_an_estimator_its_entry_s_package_registers_before_it_warns(
+    tmp_path, monkeypatch, caplog
+):
+    # A supervised start trains in a fresh process, where nothing imported the entries' packages before platoon
+    # train's checks: the group-of-one warning reads the flag of the estimator that the entry's package registers.
+    monkeypatch.setattr(registry_module, "_REGISTRIES", {**registry_module._REGISTRIES})
+    registry_module._REGISTRIES.pop(REGISTRY_KIND, None)
+    package = f"acme_of_one_{tmp_path.name.replace('-', '_')}"
+    (tmp_path / f"{package}.py").write_text(_OF_ONE)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    entry = _entry("solo", package=package, credit="acme-of-one", workflow_config={"group_size": 1})
+    config = _load(tmp_path, entry)
+    assert package not in sys.modules
+    try:
+        with caplog.at_level(logging.WARNING, logger="platoon.train.entry_settings"):
+            launch._check_environments(config)
+    finally:
+        sys.modules.pop(package, None)
+    assert not [record for record in caplog.records if "group_size is 1" in record.getMessage()]
+
+
+def test_a_priors_file_that_is_not_there_stops_the_run_as_the_config_loads(tmp_path):
+    [problem] = _refused(tmp_path, _entry("solo", credit="running", credit_options={"priors": "missing.yaml"}))
+    assert problem.startswith(f"environments.0.credit_options.priors: missing.yaml names {tmp_path / 'missing.yaml'}")
 
 
 def test_lock_json_records_each_estimator_with_its_entries_and_options_and_none_without_one(tmp_path):

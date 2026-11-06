@@ -46,9 +46,10 @@ DEFAULT_ASSIGN_TIMEOUT_SECONDS = 600.0
 @dataclass(eq=False)
 class TrainingSample:
     """One row to train (``datum``), with who produced it: the policy that sampled it and trains on it, the member of
-    the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked
-    for agents (``needs_agents``), the agent, its role, its trajectory and its depth in the agent tree.  It lives in
-    the trainer process only: what reaches the training service is the datum."""
+    the group whose rollout it is (its place among the members that returned a result), when the estimator asked for
+    agents (``needs_agents``), the agent, its role, its trajectory and its depth in the agent tree, and the version of
+    its policy that sampled it (``version``).  It lives in the trainer process only: what reaches the training service
+    is the datum."""
 
     datum: tinker.Datum
     policy: PolicyId
@@ -57,6 +58,16 @@ class TrainingSample:
     role: str | None = None
     trajectory_id: str | None = None
     depth: int | None = None
+    # The version of its policy the row was sampled at: the oldest its own model calls sampled, whatever
+    # train.stale_filter is, or its rollout's when one of them recorded none.  A row built without one reads the version
+    # its datum carries (its checkpoint_version); None when it carries none.
+    version: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.version is None:
+            carried = self.datum.loss_fn_inputs.get("checkpoint_version")
+            values = list(carried.data) if carried is not None else []  # flat, whatever its shape ([1], or [])
+            self.version = int(values[0]) if values else None
 
     @property
     def advantages(self) -> torch.Tensor:
@@ -186,9 +197,10 @@ class CreditGroup:
     """One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its
     environment entry, the entry's training settings (``settings``), the members that returned a result, in the group's
     order, the run's policies (``policies``, each as an estimator may read it), each policy's version when ``assign``
-    began (``versions``; it does not move during the call, although the policies may publish meanwhile), and where the
+    began (``versions``; it does not move during the call, although the policies may publish meanwhile), where the
     group's own statistics go (``stats``: in a training group the ``DeferredStats`` that the step that consumes the
-    group records, outside one the stats tracker; an estimator's metrics belong under ``credit/``)."""
+    group records, outside one the stats tracker; an estimator's metrics belong under ``credit/``), and the task's own
+    columns (``columns``)."""
 
     task_id: str
     label: str | None
@@ -198,6 +210,10 @@ class CreditGroup:
     policies: Mapping[PolicyId, PolicyView]
     versions: Mapping[PolicyId, int]
     stats: DeferredStats | StatsTracker
+    # The task's own columns, by name, each as text as a label reads it: the columns of its dataset row (a Harbor
+    # task's index fields, a dataset loader's columns) but platoon's own (task_id, and those whose names start with
+    # _platoon), and none whose value is empty or not a scalar.
+    columns: Mapping[str, str] = field(default_factory=dict)
 
     def samples(self) -> list[TrainingSample]:
         """Every row of the group, member by member, each member's in its order."""
@@ -227,6 +243,10 @@ class CreditSetup:
     # Each policy as the estimator may read it (its renderer, its tokenizer, its scores), by id: what an estimator that
     # scores with another policy (a teacher) reads it from.  Empty outside a run (a test's setup).
     policy_views: Mapping[PolicyId, PolicyView] = field(default_factory=dict)
+    # How many of its own versions old each policy's rows of the entry may be and still train, by id: the stale
+    # filter's bound on them (the policy's own max_staleness, else the entry's, else train.max_staleness; main's
+    # always the entry's), None for no bound.  Empty outside a run (a test's setup): no bound is known.
+    max_staleness: Mapping[PolicyId, int | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -247,10 +267,11 @@ class CreditEstimator(Protocol):
     ``needs_agents``: True when it reads the group's agents (``MemberRollout.agents``) and the rows' tags; the rollout
     workers then tag each row with its agent (worker protocol 3).  Optional: ``settle(group)``, synchronous, the one
     place where an estimator with state changes it; ``state()`` and ``load_state(state)``, which give and take that
-    state as JSON data; and ``assign_timeout_seconds``, how long ``assign`` may take on one group
-    (:data:`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit).  An estimator that raises in any of them, or
-    whose ``assign`` runs out of time, stops the run with an error that names it, its entry and the group; but a
-    policy's failed scoring that its ``assign`` lets through (:class:`ScoringFailed`) fails only the group."""
+    state as JSON data; ``assign_timeout_seconds``, how long ``assign`` may take on one group
+    (:data:`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit); and ``credits_single_members``, a bool, True
+    when it can give a group of one member advantages other than 0 (False without it).  An estimator that raises in any
+    of them, or whose ``assign`` runs out of time, stops the run with an error that names it, its entry and the group;
+    but a policy's failed scoring that its ``assign`` lets through (:class:`ScoringFailed`) fails only the group."""
 
     needs_agents: ClassVar[bool]
 
@@ -274,6 +295,9 @@ class CreditEstimatorBase:
     # How long ``assign`` may take on one group, in seconds, before the run stops with an error that names the
     # estimator; None: no limit.  An estimator that calls a service may set it, from its options say, in ``__init__``.
     assign_timeout_seconds: float | None = DEFAULT_ASSIGN_TIMEOUT_SECONDS
+    # Whether it can give a group of one member advantages other than 0, as a running baseline across groups can: the
+    # warning that an entry's groups of one rollout train nothing leaves out an entry it credits.
+    credits_single_members: ClassVar[bool] = False
 
     def __init__(self, setup: CreditSetup, options: Any = None) -> None:
         """Keep what the estimator is built with: ``setup`` (:class:`CreditSetup`) and ``options``, parsed against

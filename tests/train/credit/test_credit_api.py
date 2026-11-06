@@ -5,6 +5,8 @@ back, and the error that stops the run when one of them raises."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -15,16 +17,27 @@ from tinker import TensorData
 
 from platoon import registry as registry_module
 from platoon.extensions import ExtensionError
+from platoon.registry import import_from_string
 from platoon.train.config_defs import WorkflowConfig
-from platoon.train.credit.api import CreditGroup, TrainingSample
+from platoon.train.credit.api import CreditEstimatorBase, CreditGroup, TrainingSample
 from platoon.train.credit.group import GroupCredit
 from platoon.train.credit.keyed import Keyed
-from platoon.train.credit.registry import REGISTRY_KIND, credit_estimator, estimator_problem, resolve_credit_estimator
+from platoon.train.credit.registry import (
+    BUILTIN_CREDIT_ESTIMATORS,
+    CORE_PATH_OPTIONS,
+    CORE_SINGLE_MEMBER_CREDIT,
+    REGISTRY_KIND,
+    credit_estimator,
+    credit_path_options,
+    estimator_problem,
+    resolve_credit_estimator,
+)
 from platoon.train.credit.runtime import (
     CREDIT_KEY,
     Credit,
     CreditEstimatorError,
     credit_states,
+    credits_single_members,
     load_credit_states,
     settle_credit,
 )
@@ -61,6 +74,16 @@ def test_set_advantage_sets_the_action_tokens_and_leaves_the_others():
     assert sample.advantages.dtype == torch.float32
 
 
+def test_a_row_built_without_its_version_reads_the_one_its_datum_carries():
+    sample = _sample([0.0, 1.0], [0.0, 1.0])
+    assert sample.version is None  # its datum carries none
+    sample.datum.loss_fn_inputs["checkpoint_version"] = TensorData.from_torch(torch.tensor([7]))
+    assert TrainingSample(sample.datum, "main", 0).version == 7
+    assert TrainingSample(sample.datum, "main", 0, version=5).version == 5
+    sample.datum.loss_fn_inputs["checkpoint_version"] = TensorData.from_torch(torch.tensor(9))  # a datum of its own
+    assert TrainingSample(sample.datum, "main", 0).version == 9
+
+
 def test_set_advantages_takes_one_value_per_target_token_and_sets_the_action_tokens_only():
     sample = _sample([0.0, 1.0, 1.0, 0.0], [0.0, 1.0, 1.0, 0.0])
     sample.set_advantages([9.0, 0.25, 0.75, 9.0])
@@ -76,7 +99,64 @@ def test_core_names_resolve_to_core_s_estimators():
     assert resolve_credit_estimator("group") is GroupCredit
     assert resolve_credit_estimator("keyed") is Keyed
     assert resolve_credit_estimator("reverse_kl").__name__ == "ReverseKL"
+    assert resolve_credit_estimator("running").__name__ == "Running"
     assert GroupCredit.needs_agents is False and Keyed.needs_agents is True
+
+
+@pytest.mark.parametrize(("name", "single"), [("running", True), ("group", False), ("keyed", False), ("", False)])
+def test_whether_an_estimator_credits_groups_of_one_is_its_class_s_flag(name, single, registry):
+    assert credits_single_members(name) is single
+    assert CreditEstimatorBase.credits_single_members is False
+    credit_estimator("acme-of-one")(type("OfOne", (_ByEntry,), {"credits_single_members": True}))
+    assert credits_single_members("acme-of-one") is True
+    assert credits_single_members("acme-unregistered") is False  # a package's, before it is imported
+    assert credits_single_members(f"{__name__}:_ByEntry") is False
+    assert credits_single_members("acme_never_imported.credit:OfOne") is False  # not imported to read a flag
+    assert "acme_never_imported" not in sys.modules
+
+
+def test_the_registry_s_tables_say_what_core_s_estimators_say_of_themselves():
+    for name, reference in BUILTIN_CREDIT_ESTIMATORS.items():
+        cls = import_from_string(reference)
+        schema = getattr(cls, "options_schema", None)
+        assert (
+            CORE_PATH_OPTIONS.get(name, ()) == tuple(getattr(schema, "path_options", ())) == credit_path_options(name)
+        )
+        flag = getattr(cls, "credits_single_members", False)  # False without it (group's class has none)
+        assert (name in CORE_SINGLE_MEMBER_CREDIT) is flag is credits_single_members(name)
+
+
+_LOADING_IMPORTS_NO_ESTIMATOR = """
+import sys
+
+from platoon.train.credit.registry import credit_path_options
+from platoon.train.credit.runtime import credits_single_members
+
+answers = [credit_path_options(name) for name in ("running", "keyed")]
+answers += [credits_single_members(name) for name in ("running", "keyed", "group", "reverse_kl")]
+loaded = sorted(name for name in sys.modules if name.split(".")[0] in {"tinker", "torch"} or name.startswith(
+    ("platoon.train.credit.group", "platoon.train.credit.keyed", "platoon.train.credit.running",
+     "platoon.train.credit.reverse_kl")
+))
+print(answers, loaded)
+sys.exit(0 if answers == [("priors",), (), True, False, False, False] and not loaded else 1)
+"""
+
+
+def test_reading_core_s_answers_imports_no_estimator():
+    """What a config's loading asks of core's estimators (their path options, their flag) imports none of them, nor
+    Tinker or torch, which they import."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _LOADING_IMPORTS_NO_ESTIMATOR], capture_output=True, text=True, timeout=600
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("name", ["running", "Running"])
+def test_running_is_core_s_name(name, registry):
+    with pytest.raises(ValueError, match="is core's"):
+        credit_estimator(name)
 
 
 @pytest.mark.parametrize("name", ["gae", "GAE"])
@@ -139,6 +219,10 @@ class _HalfState(_ByEntry):
         return {}
 
 
+class _OfOneByName(_ByEntry):
+    credits_single_members = "yes"
+
+
 @pytest.mark.parametrize(
     ("cls", "problem"),
     [
@@ -146,6 +230,7 @@ class _HalfState(_ByEntry):
         (_NoFlag, "its needs_agents is no bool"),
         (_AsyncSettle, "its settle(group) is no synchronous method"),
         (_HalfState, "one of state() and load_state(state) without the other"),
+        (_OfOneByName, "its credits_single_members is no bool"),
     ],
 )
 def test_what_is_no_estimator_is_refused_with_why(cls, problem):

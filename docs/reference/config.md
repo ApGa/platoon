@@ -173,8 +173,8 @@ entry's `package` registers.
 | `task_sampler_options` | dict[str, Any] | `{}` | Options of the entry's task_sampler, checked against its options when the config loads (pass_rate's: explore, max_draws_per_epoch, max_outstanding_per_task, candidates, seed); `uniform` takes none. |
 | `group_admission` | str \| None | `null` | Which of the entry's settled training groups count toward the batch (experimental; null: the run's, `train.group_admission`, with its options): `all`, `informative`, a name the entry's `package` registers with `@group_admission`, or `module:Class`. Once any entry's rule is not `all`, every entry's groups are counted as train.group_admission says (a stale or failed group of an entry at `all` no longer counts toward the batch), and train.refill's cap is the run's. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
 | `group_admission_options` | dict[str, Any] | `{}` | Options of the entry's own group_admission, which they go with (an entry that sets none inherits the run's rule and options); `all` takes none. |
-| `credit` | str \| None | `null` | How the entry's training groups turn rewards into advantages (experimental; null: the workflow's own credit, each rollout's datums centered on the group's completed-root baseline): `group` (that credit, as an estimator), `keyed` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), a name the entry's `package` registers with `@credit_estimator`, or `module:Class`. Its estimator runs once per group in the trainer, never in an evaluation. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
-| `credit_options` | dict[str, Any] | `{}` | Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key, leave_one_out); `group` takes none. |
+| `credit` | str \| None | `null` | How the entry's training groups turn rewards into advantages (experimental; null: the workflow's own credit, each rollout's datums centered on the group's completed-root baseline): `group` (that credit, as an estimator), `keyed` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), `reverse_kl` (on-policy distillation from a frozen teacher), `running` (each agent centered on running statistics of the groups that settled before it, for groups of one rollout), a name the entry's `package` registers with `@credit_estimator`, or `module:Class`. Its estimator runs once per group in the trainer, never in an evaluation. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
+| `credit_options` | dict[str, Any] | `{}` | Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key, leave_one_out; running's: strata, priors, ...); `group` takes none. `running`'s `priors` may name a YAML or JSON file, relative to the config file that names it. |
 | `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's own training settings, laid over `train.workflow_config` for its training groups: the keys that act on one group or one rollout (EntryWorkflowSettings), such as `group_size`, `min_successful_group_size`, `leave_one_out_baseline` and `rollout_config.max_steps`. A key it leaves out keeps the run's; `null` unsets it. Its rollout settings are also its evaluation's defaults, below the phase's section (eval.workflow_config, inference.workflow), and `eval_overrides.workflow_config` sets what its evaluation rollouts change. `platoon config show` prints each entry's effective settings and where each came from. |
 | `max_staleness` | int \| None | `null` | How many policy versions old the entry's training groups may be and still train (null: the run's, `train.max_staleness`): the stale filter's bound for its groups. At least the run's, which stays the bound on how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning keeps the checkpoints within the largest bound of the run and its entries. |
 | `success_threshold` | float | `1.0` | The lowest reward that counts a training rollout of the entry as a pass, in the per-task statistics and their metrics (platoon.train.task_stats), judged as platoon eval judges success: on the reward the entry's environment scored, before any reward processor. A partial-credit environment sets its own. |
@@ -877,6 +877,7 @@ long, and how each conversation is cut and which of its turns train.
 | `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards (the group mean, or with the entry's `leave_one_out_baseline` the leave-one-out mean), value for value. An entry without `credit` gets the same credit from the workflow itself. | none |
 | `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, `policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the subagents'. Reads agents: the rollout workers tag each row with its agent. | [below](#keyed-options) |
 | `reverse_kl` | On-policy distillation: a frozen teacher (a `policies:` entry with `trainable: false`) scores every token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share the student's tokenizer. | [below](#reverse-kl-options) |
+| `running` | Each scored agent's rows centered on running statistics of the groups that settled before it sampled, for groups of one rollout: `clip((reward - baseline) / scale)`, the baseline its stratum's decayed mean (the task's values of the `strata` columns) shrunk toward its parent stratum's, the scale a decayed root mean square, both read as they were at the version the agent sampled at, and a negative reward never above 0. Reads agents. | [below](#running-options) |
 
 <a id="keyed-options"></a>
 
@@ -900,3 +901,42 @@ long, and how each conversation is cut and which of its turns train.
 | `teacher` | str | required | The frozen policy that scores the student's tokens: the id of a policies: entry with trainable: false. |
 | `kl_coef` | float | `1.0` | The weight of the reverse KL term in each token's advantage. |
 | `reward_coef` | float | `0.0` | The weight of the centered reward term (0: distillation alone). |
+
+<a id="running-options"></a>
+
+### `running`'s options
+
+`platoon.train.credit.running.RunningOptions`: the keys of `credit_options` under `credit: running`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `strata` | list[str] | `[]` | The task columns the baselines are kept by, coarsest first, each once: columns of the entry's tasks, such as a Harbor task's index fields or a dataset loader's columns (not task_id, nor a column of platoon's own). Empty: one baseline for every sample. |
+| `priors` | [`RunningPriors`](#running-priors) \| str \| None | `null` | Where the statistics start: the priors (mean, scale, weight, strata), or the path of a YAML or JSON file that holds them, relative to the config file. None: none, and an agent trains at 0 until the statistics it reads hold 32 settled samples. |
+| `half_life` | float | `4.0` | How many policy versions a settled sample's weight in the baselines takes to halve; in the scale, twice as many. |
+| `shrink` | float | `8.0` | How many samples a stratum's parent's baseline weighs as in the stratum's (0: none, a stratum's own mean). |
+| `clip` | float | `3.0` | The largest advantage, in either sign. |
+| `cap_penalties` | bool | `true` | A negative reward never gets a positive advantage, whatever its stratum's baseline. |
+
+<a id="running-priors"></a>
+
+#### `RunningPriors`
+
+`platoon.train.credit.running.RunningPriors`: the keys of `credit_options.priors` under `credit: running`, or of the YAML or JSON file it names: where the statistics start, each prior as `weight` samples, which decay as samples do.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `mean` | float | required | The prior mean reward of every sample: the root stratum's. |
+| `scale` | float | required | The prior root mean square of the residuals: the scale the first advantages are divided by. |
+| `weight` | float | `16.0` | How many samples each prior weighs as; it decays as samples do. |
+| `strata` | list[[`StratumPrior`](#stratum-prior)] | `[]` | The prior mean rewards of strata, each once. |
+
+<a id="stratum-prior"></a>
+
+#### `StratumPrior`
+
+`platoon.train.credit.running.StratumPrior`: each item of `priors.strata`: one stratum's prior mean reward.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `stratum` | list[str \| int \| float \| bool] | required | The stratum: its values of the strata columns, in order, as many as one or more of them ([masked], or [masked, numeric] for the stratum below it), each as the task's column holds it (a string, a number or a boolean: 3 is the column's 3, true its true). |
+| `mean` | float | required | Its prior mean reward. |

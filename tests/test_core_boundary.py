@@ -111,3 +111,54 @@ def test_importing_the_old_tinker_package_loads_no_trainer():
         timeout=600,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+_CREDIT_CONFIG_CHECK = """
+import sys
+import tempfile
+from pathlib import Path
+
+import yaml
+
+from platoon.train import entry_settings
+from platoon.train.config_defs import PlatoonTinkerRLTrainerConfig
+from platoon.utils.config import resolve_config
+
+directory = Path(tempfile.mkdtemp())
+single = {"group_size": 1}
+entries = [
+    {"name": "keyed", "credit": "keyed", "credit_options": {"key": ["task"]}, "workflow_config": single},
+    {"name": "running", "credit": "running", "credit_options": {"strata": ["kind"]}, "workflow_config": single},
+]
+path = directory / "train.yaml"
+path.write_text(
+    yaml.safe_dump(
+        {
+            "train": {"model_name": "m", "renderer_name": "r", "max_staleness": 2},
+            "eval": {"every": 0},
+            "log_path": str(directory / "logs"),
+            "environments": [{"dataset_loader": "x:y", "rollout": "x:y", **entry} for entry in entries],
+        }
+    )
+)
+config = resolve_config(path, [], PlatoonTinkerRLTrainerConfig).config
+warned = [line.split(".")[0] for line in entry_settings.warnings(config, entry_settings.entry_settings(config))]
+estimators = {f"platoon.train.credit.{name}" for name in ("group", "keyed", "running", "reverse_kl")}
+heavy = sorted(name for name in sys.modules if name.split(".")[0] in {"tinker", "torch"} or name in estimators)
+print(warned, heavy)
+sys.exit(0 if warned == ["environments[keyed]"] and not heavy else 1)
+"""
+
+
+def test_loading_a_config_that_names_core_s_credit_estimators_imports_none_of_them():
+    """A training config whose entries name core's credit estimators, with options, loads and gives its entries'
+    warnings (an entry in groups of one, unless its estimator credits them) without importing any estimator, nor
+    Tinker or torch, which they import: ``platoon config`` runs without the ``tinker`` extra."""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", _CREDIT_CONFIG_CHECK],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
