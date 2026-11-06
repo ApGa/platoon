@@ -190,7 +190,7 @@ List the episode programs an environment's `program:` can name, with the distrib
 platoon program show NAME
 ```
 
-Show one episode program: its reference, source, distribution and docstring.
+Show one episode program: its reference, source, distribution, root role (when it declares one) and docstring.
 
 **Arguments**:
 

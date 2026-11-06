@@ -1,5 +1,6 @@
 """A gateway that serves several policies (``ModelGateway.serve_policies``): each agent samples one policy for its whole
-life, the default for a root agent and its role's for a child, and its calls render, sample and parse in that policy's
+life, its role's (a root agent's too, opened with its entry's root role), else the default, which a root agent of the
+role ``policy`` samples whatever that role is bound to, and its calls render, sample and parse in that policy's
 runtime, with that policy's tokenizer.  Converted with the rollout's policies, only the trained policy's agents make
 datums, each stamped with its own policy's version, while the frozen policy's agents keep their rewards and tags."""
 
@@ -70,12 +71,12 @@ def chat(gateway: ModelGateway, agent, text: str):
 def test_each_agent_samples_its_role_s_policy_for_life(served):
     gateway, main_policy, helper_policy = served
     interactions: dict = {}
-    root = gateway.open_agent(rollout_id="r", trajectory_id="root", interactions=interactions, role="counter")
+    root = gateway.open_agent(rollout_id="r", trajectory_id="root", interactions=interactions)
     counter = gateway.open_subagent(root, role="counter", goal="count")
     other = gateway.open_subagent(root, role="subagent", goal="other")
     minted = gateway.mint_subagent(root, role="counter")
 
-    # A root agent samples the default, whatever its role; a child its role's, else the default.
+    # A root agent of the role policy samples the default; a child its role's, else the default.
     assert [agent.policy for agent in (root, counter, other, minted)] == ["main", "helper", "main", "helper"]
     replies = [chat(gateway, agent, f"{WORD} please") for agent in (root, counter, other, minted)]
 
@@ -89,6 +90,38 @@ def test_each_agent_samples_its_role_s_policy_for_life(served):
     assert all(word in call.prompt.to_ints() for call in helper_policy.calls)
     assert all(word not in call.prompt.to_ints() for call in main_policy.calls)
     assert gateway.budget_stop(counter).model == "helper-model"
+
+
+def test_a_root_of_a_bound_role_samples_that_role_s_policy_and_a_root_of_the_role_policy_the_default(served):
+    """A root opened with its entry's root role samples, for its whole life, the policy its role is bound to, renders
+    with that policy's tokenizer and is recorded under it; a root of an unbound role samples the default, and so does
+    a root of the role policy, whatever that role is bound to: such a binding reaches only a subagent of the role."""
+
+    gateway, main_policy, helper_policy = served
+    # agents.roles.policy.policy: helper, beside the fixture's counter.
+    gateway.serve_policies(
+        "main", runtimes={"helper": gateway.runtime("helper")}, roles={"counter": "helper", "policy": "helper"}
+    )
+    interactions: dict = {}
+    counter = gateway.open_agent(rollout_id="r", trajectory_id="counter", interactions=interactions, role="counter")
+    unbound = gateway.open_agent(rollout_id="s", trajectory_id="unbound", interactions=interactions, role="solver")
+    plain = gateway.open_agent(rollout_id="t", trajectory_id="plain", interactions=interactions)
+    minted = gateway.mint_subagent(plain, role="policy")
+
+    assert [agent.role for agent in (counter, unbound, plain, minted)] == ["counter", "solver", "policy", "policy"]
+    assert [agent.policy for agent in (counter, unbound, plain, minted)] == ["helper", "main", "main", "helper"]
+    replies = [chat(gateway, agent, f"{WORD} please") for agent in (counter, unbound, plain, minted)]
+    assert [reply.model for reply in replies] == ["helper-model", "main-model", "main-model", "helper-model"]
+    assert [interactions[reply.call_id].policy for reply in replies] == ["helper", "main", "main", "helper"]
+    word = helper_policy.tokenizer.convert_tokens_to_ids(WORD)
+    assert len(helper_policy.calls) == 2 and all(word in call.prompt.to_ints() for call in helper_policy.calls)
+    assert len(main_policy.calls) == 2
+    collection = build_trajectory_collection(gateway.agents("r"), task=TASK, outcome=Outcome("scored", {"reward": 1}))
+    assert collection.trajectories["counter"].misc["agent"] == {
+        "agent_id": counter.agent_id,
+        "role": "counter",
+        "policy": "helper",
+    }
 
 
 def test_a_gateway_of_one_policy_records_no_policy(make_gateway, sampler):

@@ -4,8 +4,9 @@ A run's config may give an agent role a list of tool names, each a name or an ``
 matched case-sensitively against the names agents see: an env's tools, and those the tool plane serves from a task's
 MCP servers (``<server>__<tool>``, :func:`platoon.envs.harbor.session.task_tool_name`).  The gateway holds the lists
 by role (``ModelGateway.limit_tools``), and gives each agent it opens its role's (:func:`allowlists_of`; the root
-agent's role is ``policy``) on top of its parent's: an agent under a limited one never sees more than its parent, as
-with tool access.  A role without a list keeps every tool, and an empty list allows none.
+agent's role is its entry's root role, ``policy`` without one) on top of its parent's: an agent under a limited one
+never sees more than its parent, as with tool access.  A role without a list keeps every tool, and an empty list
+allows none.
 
 The tool plane (:mod:`platoon.gateway.mcp`) applies them where it lists and where it runs an agent's calls, for MCP
 clients and inline harnesses alike: a listing holds only the tools that every allowlist of the agent allows

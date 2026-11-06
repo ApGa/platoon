@@ -895,7 +895,8 @@ agents:
 ```
 
 - **Which agent samples which policy.** The root agent samples `agents.policy`, `main` without it (a policy the run
-  trains). An agent its harness or program opens with a role (`ctx.agents.spawn(..., role=...)`, `POST
+  trains), unless its entry gives it a role of its own ([below](#give-an-entrys-root-agent-a-role-experimental)). An
+  agent its harness or program opens with a role (`ctx.agents.spawn(..., role=...)`, `POST
   /v1/platoon/agents {"role": ...}`, an episode program's judge) samples that role's policy for its whole life, and
   `agents.policy` when `agents.roles` names none for its role. A request never
   picks a policy, and only text crosses between policies: each agent renders, samples and parses with its own policy's
@@ -914,14 +915,68 @@ agents:
   `agents.policy`; roles bound to several policies beside a workflow that cannot bind them (`binds_policies`, which
   `GroupRolloutWorkflow` declares); and either key under `trainer: sft`, which rolls nothing out. A frozen policy that
   no agent samples and no entry's `credit_options` names is only warned of, and so is a policy bound to the role
-  `policy`, the root agent's, which the root never samples.
-- **What a resume checks.** A run with `policies:` or `agents:` records each policy's model, renderer and whether it
-  trains, a frozen one's `load_checkpoint_path`, and each role's policy, in its `identity.json`, never a URL: a resume
-  that adds or removes a policy, changes one of those, or binds a role elsewhere stops with exit code 78, naming each
-  change; one that reaches the services at new URLs resumes. A run without either key writes and checks what it always
-  did.
+  `policy`, the role of a root whose entry names none, which such a root never samples.
+- **What a resume checks.** A run that declares `policies:` or binds a role to a policy records each policy's model,
+  renderer and whether it trains, a frozen one's `load_checkpoint_path`, each role's policy, and, when some entry's
+  root takes another role than `policy`, every entry's root role, in its `identity.json`, never a URL: a resume that
+  adds or removes a policy, changes one of those, binds a role elsewhere or gives the roots of an entry the run has
+  another role stops with exit code 78, naming each change; one that reaches the services at new URLs resumes, and so
+  does one that adds or drops entries. A run that recorded no root role refuses an entry whose root takes another role
+  than `policy`: its record cannot tell an entry that joins the run from one whose roots change role. Any other run,
+  such as one whose `agents:` only limits tools, writes and checks what it always did, whatever its root roles.
 - **What a program reads.** Each `TinkerLLMInteraction` of an agent tree names the policy that sampled it (`policy`,
   None in a run of one policy), so a program that trains on its agents' interactions keeps the frozen policies' apart.
+
+### Give an entry's root agent a role (experimental)
+
+An entry's root agent takes the role `policy`, so it samples `agents.policy`. An entry may give its root another role,
+`agents.root_role`, whose binding then chooses the policy the root samples and whose `tools` it may call: the roots of
+one entry may sample a frozen policy while another entry's train, as a frozen control arm beside a trained one, or an
+evaluation entry's roots may sample a frozen judge, through a role of their own bound to it, on items whose verdicts
+are known.
+
+```yaml
+policies:
+  generator: {model_name: <base model>, renderer_name: <renderer>, trainable: false}
+agents:
+  roles:
+    generator: {policy: generator}              # the roots of the entries whose root role is generator
+environments:
+  - name: author
+    service: ...
+    harness: ...
+    agents: {root_role: generator}              # its roots sample the frozen generator, its subagents main
+  - name: solve
+    service: ...
+    harness: ...
+    agents: {root_role: solver}                 # unbound: its roots sample agents.policy, their rows tagged solver
+```
+
+- **Which role a root takes.** Its entry's `agents.root_role`, else the one its episode program declares
+  (`@pt.program(name, root_role=...)`), else `policy`; an entry that sets `root_role: policy` overrides its program's.
+  An entry whose harness is a TOML spec may set it too: it is the one `agents` setting that applies to a spec.
+- **Which policy the root samples.** Its role's (`agents.roles.<role>.policy`), else `agents.policy`, for its whole
+  life, and its role's `tools` limit it as they limit every agent of the role. A root of the role `policy` samples
+  `agents.policy` whatever `agents.roles.policy` says, as before. The config binds each role to its policy: a program
+  names a role, never a policy, and a request never picks either. A root bound to a frozen policy makes no rows,
+  while the trained agents under it train; `agents.policy` itself may not be frozen.
+- **What carries the role.** The root's trajectory records it (`misc.agent.role`), its rows are tagged with it for a
+  credit estimator that reads agents (`keyed` on `role`), and a harness and a program read it (`ctx.role`,
+  `ep.root.role`).
+- **What loading checks.** A `root_role` that is no non-empty name is refused (exit 78), and so is `verifier` or
+  `judge`, the roles of the agents platoon opens to judge others, which never train: a root that judges takes a role
+  of its own, bound to the judge's policy. So is a run in which only roots sample and none samples `agents.policy`,
+  which would train nothing: every entry's root takes a role bound to another policy, and every entry sets
+  `agents.max_depth: 0`. A root role that `agents.roles` does not name but that looks like a misspelling of a role it
+  names, or of platoon's own (`generater` beside `generator`), is warned of, since its roots would sample
+  `agents.policy`; `platoon config validate --no-resolve` reads only the root roles entries name, not their programs'.
+- **What a resume checks.** A run that records its policies (above) records the root role of each entry, its
+  program's included, so each entry's program is resolved when the run starts, and one that does not resolve stops the
+  start (exit 78), where before only its rollouts failed. A resume that gives the roots of an entry the run has another
+  role stops with exit code 78; entries may join the run or leave it, and the record takes up those that join, so that
+  a later resume checks them too.
+- **What stays as it was.** An entry that names no root role, with a program that declares none, sends every rollout
+  request as before: its route leaves the key out.
 
 ## Train several policies in lockstep (experimental)
 
@@ -973,7 +1028,7 @@ policy on its own clock](#step-each-policy-on-its-own-clock-experimental)):
   agent of its role ran) does not step and keeps its sampler and version, and the step's metrics record it
   (`train/policies/<id>/batch/skipped_optimizer`).
 - **Publishing.** Each policy that stepped publishes its new sampler and counts one more version of its own; the
-  rollout workers get it through that policy's binding file. The root agents' policy (`agents.policy`) may be any
+  rollout workers get it through that policy's binding file. The agents' default policy (`agents.policy`) may be any
   trained policy; its binding is the workers' default.
 - **Step hooks.** A [step hook](../extending/step-hooks.md) may update any trained policy: `end.train(policy, ...)`
   and `end.learner(policy, ...)` go through that policy's own learner, its metrics under its prefix
@@ -1140,12 +1195,13 @@ agents:
 - **Which agents it limits.** Every agent opened with the role: a child its harness spawns
   (`ctx.agents.spawn(..., role=...)`, whose role is `subagent` unless it says otherwise), mints (`POST
   /v1/platoon/agents {"role": ...}`) or its program opens (a `judge`, a `verifier`), and the root agent when the list
-  is under its role, `policy`. An agent under a limited one keeps that limit, besides its own role's: a child never
-  sees more tools than its parent, as with tool access (`agents.child_access`). A verifier (`child_grading:
-  verifier`) is the exception, as for its access (`agents.verifier.access`): it runs under the child it judges, but
-  is limited by the lists of the agent that spawned that child and its own role's, `verifier`, not by the child's. A
-  role may give `tools` alone: its agents sample `agents.policy` (`main` without it), as a role `agents.roles`
-  leaves out does.
+  is under its role: `policy`, or its entry's root role ([Give an entry's root agent a
+  role](#give-an-entrys-root-agent-a-role-experimental)). An agent under a limited one keeps that limit, besides its
+  own role's: a child never sees more tools than its parent, as with tool access (`agents.child_access`). A verifier
+  (`child_grading: verifier`) is the exception, as for its access (`agents.verifier.access`): it runs under the child
+  it judges, but is limited by the lists of the agent that spawned that child and its own role's, `verifier`, not by
+  the child's. A role may give `tools` alone: its agents sample `agents.policy` (`main` without it), as a role
+  `agents.roles` leaves out does.
 - **Where it holds.** In every listing of tools an agent gets (`ctx.list_tools()`, MCP `tools/list`), after its tool
   access level, and where the gateway runs a call (`ctx.call_tool()`, MCP `tools/call`), so that a harness that calls
   a tool its listing does not hold is refused too. A call to another tool comes back to the agent as an error result

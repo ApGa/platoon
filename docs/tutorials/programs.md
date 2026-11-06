@@ -246,6 +246,12 @@ returns `reward/success` would undo the shaping.
   `program: name@version`; and an installed package can declare a `platoon.programs` entry point named after the
   program instead, which platoon imports when a config names it ([Publish an extension
   package](../extending/publish-a-package.md#step-5-declare-the-entry-points)).
+- **The root's role** (experimental). `@pt.program(name, root_role="generator")` gives the root agent of the
+  program's episodes (`ep.root`, which `ep.run()` runs) that role, and so its policy and its tools, for its whole
+  life, unless the entry names its own (`agents.root_role`). The config binds the role to a policy
+  (`agents.roles.<role>.policy`), and without a binding the root samples `agents.policy`; without either setting the
+  root's role is `policy`. Any role will do but `verifier` and `judge`, the roles of the agents platoon opens to judge
+  others ([Give an entry's root agent a role](../how-to/train-and-eval.md#give-an-entrys-root-agent-a-role-experimental)).
 
 ## Next steps
 

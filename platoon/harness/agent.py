@@ -41,6 +41,11 @@ CallKind = Literal["policy", "aux", "judge"]
 CALL_KINDS: tuple[CallKind, ...] = ("policy", "aux", "judge")
 CALL_KIND_HEADER = "X-Platoon-Call-Kind"
 TOOL_ACCESS_LEVELS: tuple[ToolAccess, ...] = ("full", "no_terminal", "read_only")
+# The role of a rollout's root agent when neither its environment entry nor its episode program names one
+# (``environments[].agents.root_role``, ``@pt.program(root_role=...)``).  A root of this role samples the run's default
+# policy whatever the role bindings say (``platoon.gateway.ModelGateway.serve_policies``); a root of another role
+# samples that role's.
+ROOT_ROLE = "policy"
 
 
 @dataclass(frozen=True)
@@ -209,7 +214,8 @@ class AgentContext(Protocol):
     parent_agent_id: str | None
     # Depth in the agent tree; the root is 0.
     depth: int
-    # The agent's role: ``policy`` for the root, the ``role`` its spawn named for a child (default ``subagent``).
+    # The agent's role: for the root, its environment entry's root role (``agents.root_role``, else its program's),
+    # ``policy`` without one; for a child, the ``role`` its spawn named (default ``subagent``).
     role: str
     # The task the agent works on.
     task: Task

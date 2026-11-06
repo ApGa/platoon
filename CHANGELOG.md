@@ -4,6 +4,36 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
+## Unreleased
+
+### New features
+
+- **A root role per environment entry (experimental): `environments[].agents.root_role`.** An entry's root agent took
+  the role `policy` and sampled `agents.policy`, whatever its entry; now an entry may give its root another role, and an
+  episode program may declare the role of its roots (`@pt.program(name, root_role=...)`), which an entry's own
+  `root_role` overrides. The role chooses, for the root's whole life, the policy it samples
+  (`agents.roles.<role>.policy`, else `agents.policy`) and the tools it may call (`agents.roles.<role>.tools`), and it
+  is recorded on the root's trajectory and its rows' tags (`misc.agent.role`, `keyed` credit on `role`, `ctx.role`,
+  `ep.root.role`). The config still binds each role to its policy, and a request still never picks one. So a root may
+  now sample a frozen policy through a role bound to it, for a frozen control arm beside a trained one, or an evaluation
+  entry that runs a frozen judge on known items: its rows make no datums, while the trained agents under it train
+  (`agents.policy` itself may not be frozen, as before). A root of the role `policy` samples `agents.policy` whatever
+  `agents.roles.policy` says, as before. No root takes `verifier` or `judge`, the roles of the agents platoon opens to
+  judge others, which never train: a root that judges takes a role of its own, bound to the judge's policy. An entry
+  whose harness is a TOML spec may set `root_role` too, the one `agents` setting that applies to a spec. Loading, and
+  `platoon config validate`, refuse a run in which only roots sample and none samples `agents.policy` (every entry's
+  root of a role bound to another policy, with `agents.max_depth: 0`), and warn of a root role that looks like a
+  misspelling of a role `agents.roles` names or of platoon's own. In a run that records its policies in `identity.json`
+  (one that declares `policies:` or binds a role to a policy), the record holds every entry's root role when some root
+  takes another role than `policy`: a resume that gives the roots of an entry the run has another role stops with exit
+  code 78, naming it, while entries may still join the run (which the record then takes up) or leave it; one that adds
+  an entry whose root takes another role to a run that recorded none stops too, since the record cannot tell it from a
+  change. Such a run resolves each entry's program when it starts, for the role it declares, so a program that does not
+  resolve now stops the start (exit 78), where before only its rollouts failed ([Give an entry's root agent a
+  role](docs/how-to/train-and-eval.md#give-an-entrys-root-agent-a-role-experimental)). A config that names no root role,
+  with programs that declare none, runs as before, request for request: a route leaves an unset `root_role` out, and
+  `identity.json` gains no key.
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

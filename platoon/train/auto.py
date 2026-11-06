@@ -954,7 +954,8 @@ def harness_setting_problems(
 
     * on ``service: table`` (tasks with no tools and no grader) every rollout is ``invalid`` (``self_grade``);
     * a ``program`` other than ``single``, and ``agents`` settings, never apply (``agents.max_depth: 0``, which says
-      that no agent spawns, is consistent with a spec, and its other ``agents`` settings are moot);
+      that no agent spawns, is consistent with a spec, and its other ``agents`` settings are moot), but for
+      ``agents.root_role``, the role its root agent takes as any root does;
     * without ``[mcp]`` it reaches the env's tools only from inside a task sandbox, so on a service without one
       (``table``, ``python://``, ``ors+http(s)://``), or placed ``local``, it cannot act on the environment: every
       rollout scores 0 (``no_submit``), or on Harbor the task's tests grade a sandbox it never acted in.
@@ -1002,10 +1003,13 @@ def harness_setting_problems(
                 f"{where}: program {environment.program!r} never runs: harness {names} is a TOML harness spec, which "
                 "runs as one agent with no episode program; use a function harness, or the default program (single)"
             )
-        if environment.agents != AgentTreeConfig() and environment.agents.max_depth != 0:  # 0: no subagents, as here
+        # A spec's root takes its role as any root does (agents.root_role); agents.max_depth: 0 says that no agent
+        # spawns, as here.
+        subagents = replace(environment.agents, root_role=None)
+        if subagents != AgentTreeConfig() and subagents.max_depth != 0:
             problems.append(
                 f"{where}: agents settings never apply: harness {names} is a TOML harness spec, which cannot spawn "
-                "subagents; use a function harness, or leave agents out"
+                "subagents; use a function harness, or leave out every agents setting but root_role"
             )
     if len(specs) < len(harnesses):  # a function harness, which may spawn subagents
         problem = _env_child_grading_problem(environment)

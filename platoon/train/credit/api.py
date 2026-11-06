@@ -102,7 +102,7 @@ class TrainingSample:
 @dataclass
 class AgentRun:
     """One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role
-    (``policy`` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it
+    (the root's: its entry's root role, ``policy`` without one; a child's: the role it was minted with), the policy it
     samples, its depth in the tree, its reward and its rows.  ``reward`` is its trajectory's processed reward, as the
     converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a
     child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score.  An

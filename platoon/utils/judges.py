@@ -29,6 +29,10 @@ from platoon.utils.trajectory_status import SUBAGENT_REWARD_VERIFIER_TASK_MISC_K
 JUDGE_ROLE = "judge"
 # The role of a verifier agent (``platoon.harness.verify.VERIFIER_ROLE``).
 VERIFIER_ROLE = "verifier"
+# The roles of the agents platoon opens to judge other agents: they never train, a judge leaves no trajectory, and
+# evaluation reports count them apart from the policy's agents (:func:`is_judge_trajectory`), so no root agent takes
+# one (``environments[].agents.root_role``, ``@pt.program(root_role=...)``).
+JUDGING_ROLES = (VERIFIER_ROLE, JUDGE_ROLE)
 
 JUDGES_MISC_KEY = "judges"
 CHILD_GRADING_MISC_KEY = "child_grading"
@@ -99,6 +103,7 @@ __all__ = [
     "JUDGES_OFF",
     "JUDGES_REFUSED_MISC_KEY",
     "JUDGE_ROLE",
+    "JUDGING_ROLES",
     "VERIFIER_ROLE",
     "grading_fallback",
     "is_judge_trajectory",

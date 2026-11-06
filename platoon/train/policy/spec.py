@@ -1,9 +1,9 @@
 """A policy as the config declares it (:class:`PolicySpec`), the run's policies as its config declares them
-(:func:`policy_specs`), which policy each agent samples (:class:`AgentBindings`, :func:`agent_bindings`) and which
-tools each agent role may call (:func:`role_tools`), the bound the dispatcher's horizon counts (:func:`horizon_bound`),
-how the trained policies step (:data:`Stepping`, :func:`steps_independently`), and what loading refuses of them
-(:func:`policy_problems`, and :func:`workflow_problems` against the run's workflow class) or warns of
-(:func:`policy_warnings`).  Imports no Tinker.
+(:func:`policy_specs`), which policy each agent samples (:class:`AgentBindings`, :func:`agent_bindings`, and the role
+of each entry's root agent, :func:`root_roles`) and which tools each agent role may call (:func:`role_tools`), the
+bound the dispatcher's horizon counts (:func:`horizon_bound`), how the trained policies step (:data:`Stepping`,
+:func:`steps_independently`), and what loading refuses of them (:func:`policy_problems`, and :func:`workflow_problems`
+against the run's workflow class) or warns of (:func:`policy_warnings`).  Imports no Tinker.
 
 ``main`` is the policy ``train:`` declares: each field of its spec keeps its ``train.*`` name, so that one vocabulary
 names a policy wherever it is declared.  ``policies:`` declares the run's others under the same names (RFC 0021): ones
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Literal
 
 from platoon.train import task_stats
-from platoon.utils.judges import JUDGE_ROLE, VERIFIER_ROLE
+from platoon.utils.judges import JUDGE_ROLE, JUDGING_ROLES, VERIFIER_ROLE
 from platoon.utils.role_tools import unmatched
 
 if TYPE_CHECKING:
@@ -175,8 +175,10 @@ def _declared(config: Any) -> Mapping[PolicyId, Any]:
 
 @dataclass(frozen=True)
 class AgentBindings:
-    """Which policy each agent samples, for its whole life (``agents:``): the root agent samples ``default``; an agent
-    opened with a role samples that role's policy (``roles``), else ``default``.  A request never picks a policy."""
+    """Which policy each agent samples, for its whole life (``agents:``): an agent opened with a role samples that
+    role's policy (``roles``), else ``default``, and so does a root agent opened with its environment entry's root role
+    (``environments[].agents.root_role``); a root agent of the role ``policy``, which an entry's root takes without a
+    root role, samples ``default`` whatever ``roles`` says.  A request never picks a policy."""
 
     default: PolicyId = MAIN
     roles: Mapping[str, PolicyId] = field(default_factory=dict, hash=False)
@@ -195,6 +197,33 @@ def agent_bindings(config: Any) -> AgentBindings:
         default=getattr(agents, "policy", None) or MAIN,
         roles={role: bound.policy for role, bound in _roles(config).items() if bound.policy is not None},
     )
+
+
+def root_roles(config: Any, *, programs: bool = True, strict: bool = False) -> dict[str, str]:
+    """The role of each environment entry's root agent, by entry label, ``policy`` (:data:`ROOT_ROLE`) included: its
+    ``agents.root_role``, else, with ``programs``, the one its program declares (``@pt.program(root_role=...)``,
+    :func:`~platoon.train.components.entry_root_role`), which resolving the program may import; none for a config
+    built without ``environments``.  A program that does not resolve declares none here, or, ``strict``, raises
+    :class:`~platoon.utils.config.ConfigError`, naming the entry and why."""
+
+    from platoon.train.components import entry_root_role
+
+    roles = {}
+    for environment in getattr(config, "environments", None) or ():
+        try:
+            role = entry_root_role(environment, programs=programs)
+        except Exception as exc:  # noqa: BLE001 - whatever resolving the program raised
+            if strict:
+                from platoon.utils.config import ConfigError
+
+                raise ConfigError(
+                    f"environments[{environment.label}].program: {environment.program!r} does not resolve "
+                    f"({type(exc).__name__}: {exc}), so the run cannot record the role it declares for the entry's "
+                    "root agents (identity.json), and its rollouts could not run it"
+                ) from exc
+            role = None
+        roles[environment.label] = role or ROOT_ROLE
+    return roles
 
 
 def role_tools(config: Any) -> dict[str, tuple[str, ...]]:
@@ -246,7 +275,9 @@ def horizon_bound(config: Any) -> int | None:
 
 # A policy's id: a lowercase letter, then lowercase letters, digits, ``_`` and ``-``, 32 characters at most.
 POLICY_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
-# The root agent's role (the gateway's AgentSession.role), whose agent samples agents.policy whatever agents.roles says.
+# The role of a root agent whose environment entry and program name none (environments[].agents.root_role), as
+# platoon.harness.agent.ROOT_ROLE, which this module does not import: such a root samples agents.policy whatever
+# agents.roles says.
 ROOT_ROLE = "policy"
 # The roles platoon's own code opens agents with: the root agent's, that of a child a harness spawns unless it names
 # another (ctx.agents.spawn), a verifier's and a judge's.  A harness may mint agents of any other role.
@@ -258,8 +289,9 @@ def policy_problems(config: Any) -> list[str]:
     (:data:`POLICY_ID`) or that names ``main``, which ``train:`` declares; a trained policy's keys on a frozen policy,
     and an optimizer state to load without the checkpoint it is in (:func:`_entry_problems`); an agent role, or the
     agents' default, bound to a policy the run does not declare; a role's ``tools`` that is no list of names or
-    patterns; a frozen policy as the agents' default, which the root agent samples; and a policy the run trains that no
-    agent samples, which no row would ever train (:func:`_unsampled_problems`)."""
+    patterns; a frozen policy as the agents' default, which root agents sample (a root samples a frozen policy only
+    through its entry's root role, bound to it, :func:`root_roles`); and a policy the run trains that no agent samples,
+    which no row would ever train (:func:`_unsampled_problems`)."""
 
     problems = []
     declared = _declared(config)
@@ -284,8 +316,10 @@ def policy_problems(config: Any) -> list[str]:
         problems.append(f"agents.policy: {default!r} is not a policy of the run ({', '.join(sorted(known))})")
     elif default is not None and default in declared and not getattr(declared[default], "trainable", True):
         problems.append(
-            f"agents.policy: {default!r} is frozen, and the root agent samples a policy the run trains: name main or a "
-            "policy the run trains, and bind a role to the frozen one (agents.roles.<role>.policy) instead"
+            f"agents.policy: {default!r} is frozen, and the agents' default, which the root agents sample, is a policy "
+            "the run trains: name main or a policy the run trains, and bind a role to the frozen one "
+            "(agents.roles.<role>.policy) instead, which an entry's root agent may take (environments[].agents."
+            "root_role)"
         )
     for role, bound in _roles(config).items():
         if not isinstance(role, str) or not role:
@@ -342,8 +376,9 @@ def _entry_problems(where: str, policy: Any) -> list[str]:
 
 def _unsampled_problems(config: Any) -> list[str]:
     """A policy the run trains that no agent samples (``agents.policy``, ``agents.roles.<role>.policy``): no row would
-    ever train it, yet every checkpoint would save it.  ``main`` is unsampled only beside an ``agents.policy`` that
-    names another policy."""
+    ever train it, yet every checkpoint would save it.  ``main`` is unsampled beside an ``agents.policy`` that names
+    another policy; and the agents' default is when only root agents sample, each of a role bound to another policy
+    (:func:`_roots_sample_elsewhere`)."""
 
     agents = agent_bindings(config)
     sampled = set(agents.sampled())
@@ -354,6 +389,13 @@ def _unsampled_problems(config: Any) -> list[str]:
             "declares, which the run trains, so no row would ever train it: bind the agents of a role to main "
             "(agents.roles.<role>.policy: main)"
         )
+    if _roots_sample_elsewhere(config, agents):
+        problems.append(
+            f"agents.policy: no agent samples {agents.default}, the agents' default, which the run trains: every "
+            "entry's root agent takes a role bound to another policy (environments[].agents.root_role) and spawns no "
+            "agent (agents.max_depth: 0), so no row would ever train it: give an entry's root a role that samples "
+            f"{agents.default}, or let its agents spawn subagents"
+        )
     problems.extend(
         f"policies.{policy}: the run trains it, and no agent samples it, so no row would ever train it: bind the "
         f"agents of a role to it (agents.roles.<role>.policy: {policy}), or set policies.{policy}.trainable: false"
@@ -361,6 +403,21 @@ def _unsampled_problems(config: Any) -> list[str]:
         if getattr(declared, "trainable", True) and policy not in sampled
     )
     return problems
+
+
+def _roots_sample_elsewhere(config: Any, agents: AgentBindings) -> bool:
+    """Whether only root agents sample, and none samples the agents' default: every entry names a root role
+    (``agents.root_role``) that ``agents.roles`` binds to another policy, and sets ``agents.max_depth: 0``, under
+    which no agent spawns.  The root role an entry's program declares is not read: loading imports no program."""
+
+    environments = getattr(config, "environments", None) or ()
+    roles = root_roles(config, programs=False)
+    return bool(environments) and all(
+        environment.agents.max_depth == 0
+        and roles[environment.label] != ROOT_ROLE
+        and agents.roles.get(roles[environment.label], agents.default) != agents.default
+        for environment in environments
+    )
 
 
 def _tools_problems(role: str, tools: Any) -> list[str]:
@@ -434,14 +491,16 @@ def workflow_problems(config: Any, workflow_cls: Any, reference: str) -> list[st
     ]
 
 
-def policy_warnings(config: Any) -> list[str]:
+def policy_warnings(config: Any, *, resolve: bool = True) -> list[str]:
     """What loading warns of the config's ``policies:`` and ``agents:``, one line each: a frozen policy that no agent
     samples and no entry's ``credit_options`` names (a teacher's), which the run opens and never uses; a policy
-    bound to the role ``policy``, the root agent's, which the root never samples (it samples ``agents.policy``); a
-    role that looks like a misspelling of one of :data:`PLATOON_ROLES` (:func:`_role_typos`); a role's tool pattern
-    that matches no tool of the run's environments, when each declares its tools up front (:func:`_tool_warnings`);
-    and, stepping independently, a trained policy that saves no full checkpoint before the run's end
-    (:func:`_unsaved_policies`)."""
+    bound to the role ``policy``, which a root agent of that role never samples (it samples ``agents.policy``); a
+    role that looks like a misspelling of one of :data:`PLATOON_ROLES` (:func:`_role_typos`), and an entry's root
+    role that looks like a misspelling of a role ``agents.roles`` names or of platoon's (:func:`_root_role_typos`); a
+    role's tool pattern that matches no tool of the run's environments, when each declares its tools up front
+    (:func:`_tool_warnings`); and, stepping independently, a trained policy that saves no full checkpoint before the
+    run's end (:func:`_unsaved_policies`).  The entries' root roles include those their programs declare, which
+    resolving the programs may import, unless ``resolve`` is false (``platoon config validate --no-resolve``)."""
 
     agents = agent_bindings(config)
     used = set(agents.sampled())
@@ -455,25 +514,62 @@ def policy_warnings(config: Any) -> list[str]:
     ]
     if agents.roles.get(ROOT_ROLE, agents.default) != agents.default:
         lines.append(
-            f"agents.roles.{ROOT_ROLE}.policy: the root agent's role is {ROOT_ROLE}, and the root samples "
-            f"agents.policy ({agents.default}) whatever its role: only a subagent minted with the role {ROOT_ROLE} "
-            "samples this policy"
+            f"agents.roles.{ROOT_ROLE}.policy: {ROOT_ROLE} is the root agent's role unless its entry names another "
+            f"(environments[].agents.root_role), and a root of the role {ROOT_ROLE} samples agents.policy "
+            f"({agents.default}) whatever agents.roles says: only a subagent minted with the role {ROOT_ROLE} samples "
+            "this policy; to have a root sample it, name another role as its entry's root_role and bind that role to it"
         )
-    return [*lines, *_role_typos(config), *_tool_warnings(config), *_unsaved_policies(config)]
+    roots = root_roles(config, programs=resolve)
+    return [
+        *lines,
+        *_role_typos(config, roots),
+        *_root_role_typos(config, agents, roots),
+        *_tool_warnings(config),
+        *_unsaved_policies(config),
+    ]
 
 
-def _role_typos(config: Any) -> list[str]:
-    """A role of ``agents.roles`` that is none of :data:`PLATOON_ROLES` but close to one (``subagents``): its settings
-    reach only the agents a harness mints with that very name, so it is likely misspelled."""
+def _role_typos(config: Any, roots: Mapping[str, str]) -> list[str]:
+    """A role of ``agents.roles`` that is none of :data:`PLATOON_ROLES`, nor an entry's root role (``roots``, by entry
+    label), but close to one of :data:`PLATOON_ROLES` (``subagents``): its settings reach only the agents a harness
+    mints with that very name, so it is likely misspelled."""
 
     lines = []
+    taken = set(roots.values())
     for role in _roles(config):
-        if not isinstance(role, str) or role in PLATOON_ROLES:
+        if not isinstance(role, str) or role in PLATOON_ROLES or role in taken:
             continue
         if close := difflib.get_close_matches(role.lower(), PLATOON_ROLES, n=1, cutoff=0.8):
             lines.append(
                 f"agents.roles.{role}: platoon opens no agent of this role, so its settings reach only the agents a "
                 f"harness mints with it; did you mean {close[0]!r}?"
+            )
+    return lines
+
+
+def _root_role_typos(config: Any, agents: AgentBindings, roots: Mapping[str, str]) -> list[str]:
+    """An entry's root role (``roots``, by entry label: its own, else its program's) that ``agents.roles`` does not
+    name but that is close to a role a root may take, one ``agents.roles`` names or one of :data:`PLATOON_ROLES` but
+    ``verifier`` and ``judge`` (``generater`` beside ``generator``): its root samples ``agents.policy``, with every
+    tool, so the role is likely misspelled."""
+
+    named = [role for role in _roles(config) if isinstance(role, str)]
+    candidates = [role for role in dict.fromkeys([*named, *PLATOON_ROLES]) if role not in JUDGING_ROLES]
+    lines = []
+    for environment in getattr(config, "environments", None) or ():
+        role = roots.get(environment.label, ROOT_ROLE)
+        if role in named or role in PLATOON_ROLES:
+            continue
+        if close := difflib.get_close_matches(role, candidates, n=1, cutoff=0.8):
+            where, whose = (
+                ("agents.root_role", "")
+                if environment.agents.root_role is not None
+                else ("program", f", the root role program {environment.program!r} declares")
+            )
+            lines.append(
+                f"environments[{environment.label}].{where}: agents.roles names no role {role!r}{whose}, so this "
+                f"entry's root agents sample agents.policy ({agents.default}) and may call every tool; did you mean "
+                f"{close[0]!r}?"
             )
     return lines
 

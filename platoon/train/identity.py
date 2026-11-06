@@ -2,20 +2,24 @@
 
 A run directory holds one run: its checkpoints, rollouts and metrics.  A resume that trains another model, or that
 would move tasks between training and evaluation, would mix two runs in one directory and one curve.  So the first
-start of a run writes ``identity.json`` into its directory: the model and the renderer, in a run that declares
-``policies:`` or ``agents:`` the table of its policies (each one's model, renderer and whether it trains, and a frozen
-one's ``load_checkpoint_path``, the sampler it serves), which policy each agent role samples and, when its trained
-policies step each on its own clock, ``stepping: independent`` (absent: lockstep), and for each
-environment entry with a hold-out (``service_kwargs.holdout``) the rule, the dataset and the held-out tasks, refused
-ones included, as the service records them (``split_record``).  The table records no service URL, so a resume may
-reach its services elsewhere.  A start that resumes (its directory holds a checkpoint to resume from) compares its own
-with it after the tasks are listed, before the training service is opened, and stops with a configuration error (exit
-78) when:
+start of a run writes ``identity.json`` into its directory: the model and the renderer; in a run that declares
+``policies:`` or binds an agent role to a policy, the table of its policies (each one's model, renderer and whether it
+trains, and a frozen one's ``load_checkpoint_path``, the sampler it serves), which policy each agent role samples, the
+role of every entry's root agent when some entry's root takes another role than ``policy`` (``root_roles``; its
+program is resolved for the role it declares, and one that does not resolve stops the start) and, when its trained
+policies step each on its own clock, ``stepping: independent`` (absent: lockstep); and for each environment entry with
+a hold-out (``service_kwargs.holdout``) the rule, the dataset and the held-out tasks, refused ones included, as the
+service records them (``split_record``).  The table records no service URL, so a resume may reach its services
+elsewhere.  A start that resumes (its directory holds a checkpoint to resume from) compares its own with it after the
+tasks are listed, before the training service is opened, and stops with a configuration error (exit 78) when:
 
 - the model or the renderer is another;
 - a policy was added or removed, or one's model, renderer, training or sampler changed, or a role samples another
-  policy (each named, with the field that changed), or the trained policies step otherwise (``train.stepping``: a
-  lockstep resume would ignore what each policy consumed on its own clock, and train it again);
+  policy, or the root agents of an entry the run has take another role (each named, with the field that changed), or
+  the trained policies step otherwise (``train.stepping``: a lockstep resume would ignore what each policy consumed on
+  its own clock, and train it again); an entry may join the run or leave it, but in a run that recorded no root role
+  one whose root takes another role than ``policy`` is refused, since the record cannot tell it from an entry whose
+  roots changed role;
 - a task the run held out would now train;
 - a task is now held out that was not, a hold-out added to a running run included.
 
@@ -23,7 +27,8 @@ The refused start records why in its ``lock.json`` (``resume_refused``).  A refu
 task (the hold-out walks over refused tasks too): the resume goes on, and logs the held-out tasks that left the
 evaluation or joined it again, and those that only left the selection.  A start without a checkpoint writes the file
 afresh, and a resume of a run that has none (started before platoon wrote it) writes it then, unless the run has a
-hold-out now, which it may not add.
+hold-out now, which it may not add.  A resume that adds entries to a run that records root roles adds theirs to the
+file, so that a later resume checks them too.
 """
 
 from __future__ import annotations
@@ -39,10 +44,12 @@ from typing import Any
 from platoon.train.components import split_task_id
 from platoon.train.policy.spec import (
     MAIN,
+    ROOT_ROLE,
     AgentBindings,
     PolicySpec,
     agent_bindings,
     policy_specs,
+    root_roles,
     steps_independently,
 )
 from platoon.utils.config import ConfigError, update_run_lock
@@ -70,9 +77,10 @@ def check_training_run(config: Any, run_dir: str | os.PathLike[str], train_datas
 
 
 def run_identity(config: Any, environments: Sequence[Any]) -> dict[str, Any]:
-    """What ``identity.json`` records of a training config: ``model``, ``renderer``, and ``environments``, each entry
-    with a hold-out by its label.  The services of those entries are built to ask for their record, after the tasks
-    were listed with the same settings."""
+    """The identity of a start of a training config, which ``identity.json`` records (:func:`_recorded`): ``model``,
+    ``renderer``, its policy table (:func:`policy_table`), and ``environments``, each entry with a hold-out by its
+    label.  The services of those entries are built to ask for their record, after the tasks were listed with the same
+    settings."""
 
     from platoon.envs.service import get_service
 
@@ -95,18 +103,24 @@ def run_identity(config: Any, environments: Sequence[Any]) -> dict[str, Any]:
 
 
 def policy_table(config: Any) -> dict[str, Any]:
-    """What ``identity.json`` records of the run's policies, in a run that declares ``policies:`` or ``agents:``
-    (nothing in any other, whose identity stays as it was): each policy's record by id (``policies``,
-    :func:`_policy_record`), the agents' default policy and each role's (``agents``), and ``stepping: independent``
-    when its trained policies step each on its own clock (:func:`~platoon.train.policy.spec.steps_independently`)."""
+    """This start's table of the run's policies, in a run that declares ``policies:`` or binds an agent role to a
+    policy (nothing in any other, whose identity stays as it was): each policy's record by id (``policies``,
+    :func:`_policy_record`); the agents' default policy, each role's and the role of each entry's root agent, by entry
+    label (``agents``: ``policy``, ``roles``, and ``root_roles`` in a config with entries,
+    :func:`~platoon.train.policy.spec.root_roles`, for which each entry's program is resolved: one that does not
+    resolve raises :class:`ConfigError`); and ``stepping: independent`` when its trained policies step each on its own
+    clock (:func:`~platoon.train.policy.spec.steps_independently`).  ``identity.json`` leaves ``root_roles`` out when
+    every entry's root takes the role ``policy`` (:func:`_recorded`).  A run that records no table records no root
+    roles either: its one policy is every root's, whatever the root's role."""
 
     agents = agent_bindings(config)
     declared = getattr(config, "policies", None) or {}
     if not declared and agents == AgentBindings():
         return {}
+    roots = root_roles(config, strict=True)
     return {
         "policies": {spec.id: _policy_record(spec) for spec in policy_specs(config).values()},
-        "agents": {"policy": agents.default, "roles": dict(agents.roles)},
+        "agents": {"policy": agents.default, "roles": dict(agents.roles), **({"root_roles": roots} if roots else {})},
         **({"stepping": "independent"} if steps_independently(config) else {}),
     }
 
@@ -130,7 +144,8 @@ def check_run_identity(
     run_dir: str | os.PathLike[str], identity: Mapping[str, Any], train_ids: Mapping[str, Iterable[str]]
 ) -> None:
     """Write ``identity`` into ``run_dir``, or, when the run resumes, refuse a start whose identity moved (see the
-    module docstring).  ``train_ids`` are the task ids each entry trains on now, by label.
+    module docstring), and add to the run's record the root roles of the entries that join it
+    (:func:`_with_joined_entries`).  ``train_ids`` are the task ids each entry trains on now, by label.
 
     Raises :class:`~platoon.utils.config.ConfigError`, after recording the refusal in ``lock.json``.
     """
@@ -156,6 +171,8 @@ def check_run_identity(
         logger.info("%s", note)
     if previous is None:
         _write(path, identity)
+    elif (joined := _with_joined_entries(previous, identity)) is not None:
+        _write(path, joined)
 
 
 def identity_changes(
@@ -216,9 +233,10 @@ def identity_changes(
 def policy_changes(previous: Mapping[str, Any], identity: Mapping[str, Any]) -> list[str]:
     """What a resume with ``identity`` changes of the policy table of a run that recorded ``previous``, one line each: a
     policy other than ``main`` (whose model and renderer are the run's, compared on their own) added or removed, a
-    field of one's record changed, the agents' default policy or a role's, and how the trained policies step.  A record
-    without the table is a run of ``main`` alone, which every agent samples; one without ``stepping`` steps in
-    lockstep."""
+    field of one's record changed, the agents' default policy or a role's, the root role of an entry the run has
+    (:func:`_root_role_changes`), and how the trained policies step.  A record without the table is a run of ``main``
+    alone, which every agent samples; one without ``stepping`` steps in lockstep, and one without ``root_roles`` is a
+    run whose every root agent took the role ``policy``."""
 
     problems = []
     if (stepping := previous.get("stepping", "lockstep")) != (now_stepping := identity.get("stepping", "lockstep")):
@@ -250,7 +268,48 @@ def policy_changes(previous: Mapping[str, Any], identity: Mapping[str, Any]) -> 
         for role in _in_order(roles_before, roles_now)
         if roles_before.get(role) != roles_now.get(role)
     )
+    if agents_before:  # the run recorded the table: with it every entry's root role, unless each root took policy
+        problems.extend(_root_role_changes(agents_before.get("root_roles"), agents_now.get("root_roles") or {}))
     return problems
+
+
+def _root_role_changes(before: Mapping[str, str] | None, now: Mapping[str, str]) -> list[str]:
+    """What a resume changes of the role of each entry's root agent, one line each: ``before`` is the run's record of
+    every entry it had, by label (None: it recorded none, since every root of the run took the role ``policy``), and
+    ``now`` this start's.  An entry only one of them names joined the run or left it, which a resume may do.  In a run
+    that recorded none, an entry whose root this start gives another role either joins the run or changes its roots'
+    role, which the record cannot tell apart: it is refused too."""
+
+    if before is None:
+        return [
+            f"environments[{label}].agents.root_role: this start's root agents take the role {role!r}, and the run "
+            f"recorded no root role, so its root agents took the role {ROOT_ROLE!r}: its record cannot tell an entry "
+            "that joins the run from one whose roots change role"
+            for label, role in now.items()
+            if role != ROOT_ROLE
+        ]
+    return [
+        f"environments[{label}].agents.root_role: the run's root agents take the role {role!r}, and this start's "
+        f"{now[label]!r}"
+        for label, role in before.items()
+        if label in now and now[label] != role
+    ]
+
+
+def _with_joined_entries(previous: Mapping[str, Any], identity: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The run's record, ``previous``, with the root role of each entry that joins the run with this start
+    (``identity``), so that a later resume checks it too; None when none joins, or when the run recorded no root role,
+    whose record a root of another role than ``policy`` cannot join (:func:`_root_role_changes`)."""
+
+    agents = previous.get("agents")
+    before = agents.get("root_roles") if isinstance(agents, Mapping) else None
+    if before is None:
+        return None
+    now = (identity.get("agents") or {}).get("root_roles") or {}
+    if not (joined := {label: role for label, role in now.items() if label not in before}):
+        return None
+    record = {key: value for key, value in previous.items() if key != "written_at"}
+    return {**record, "agents": {**agents, "root_roles": {**before, **joined}}}
 
 
 def _in_order(before: Iterable[str], now: Iterable[str]) -> list[str]:
@@ -339,9 +398,20 @@ def _read(path: Path) -> dict[str, Any] | None:
     return data
 
 
+def _recorded(identity: Mapping[str, Any]) -> dict[str, Any]:
+    """What ``identity.json`` records of a start's ``identity``: all of it, but the agents' ``root_roles`` when every
+    entry's root takes the role ``policy``, so that a run without root roles records what runs recorded before them;
+    a record without ``root_roles`` is such a run's (:func:`policy_changes`)."""
+
+    agents = identity.get("agents")
+    if not isinstance(agents, Mapping) or any(role != ROOT_ROLE for role in (agents.get("root_roles") or {}).values()):
+        return dict(identity)
+    return {**identity, "agents": {key: value for key, value in agents.items() if key != "root_roles"}}
+
+
 def _write(path: Path, identity: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    record = {**identity, "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    record = {**_recorded(identity), "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     partial = path.with_name(f".{path.name}.partial")
     partial.write_text(json.dumps(record, indent=1) + "\n")
     partial.replace(path)

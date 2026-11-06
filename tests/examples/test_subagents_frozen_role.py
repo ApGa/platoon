@@ -3,7 +3,10 @@ Tinker service, with its ``subagent`` role bound to a frozen policy ``helper`` (
 trainer's own ``PolicySet.build`` serves both policies through the process's gateway: the helper samples every
 subagent call, and no row it sampled is converted to a datum or reaches ``forward_backward`` (its sampled logprob is
 distinctive), while main's rows train.  With ``credit: reverse_kl`` and a frozen teacher too, the teacher scores the
-student's multi-turn tool-call rows, and each action token's advantage is the negative reverse KL at that token."""
+student's multi-turn tool-call rows, and each action token's advantage is the negative reverse KL at that token.  And
+the other way round, a root agent bound to the frozen policy through its entry's root role
+(``environments[].agents.root_role``), as a frozen generator's control arm is: the helper samples every root call and
+main every subagent call, only the subagents' rows train, and ``identity.json`` records the root role."""
 
 from __future__ import annotations
 
@@ -97,6 +100,24 @@ class _LLM:
 def _info(llm: _LLM, model_name: str, renderer_name: str, **kwargs: Any) -> Any:
     renderer_kwargs = kwargs.get("renderer_kwargs") or {}
     return SimpleNamespace(llm=llm, model_name=model_name, renderer_name=renderer_name, renderer_kwargs=renderer_kwargs)
+
+
+def one_wrong_child_a_goal():
+    """The vault policy, whose every other subagent of a goal answers one too many, so that the subagents' rewards (and
+    their roots') differ within a group."""
+
+    answers: Counter[str] = Counter()
+
+    def policy(prompt: str) -> str:
+        reply = vault_policy(prompt)
+        goal = _FIRST_USER.search(prompt)
+        if '"name": "answer"' in reply and "<tool_response>\nAnswered" not in prompt and goal is not None:
+            answers[goal.group(1)] += 1
+            if answers[goal.group(1)] % 2:
+                return tool_call("answer", total=json.loads(reply.split("\n")[1])["arguments"]["total"] + 1)
+        return reply
+
+    return policy
 
 
 @pytest.fixture
@@ -205,3 +226,60 @@ def test_a_frozen_role_samples_and_trains_nothing(serve_policy, tmp_path, monkey
             for position, target in enumerate(targets):
                 expected = teacher_logprob(position + 1, target) - float(student[position]) if mask[position] > 0 else 0
                 assert float(advantages[position]) == pytest.approx(expected, abs=1e-5)
+
+
+def test_a_root_role_bound_to_a_frozen_policy_samples_it_while_the_subagents_train(
+    serve_policy, tmp_path, monkeypatch, tokenizers
+):
+    main_policy = serve_policy(ScriptedPolicy(one_wrong_child_a_goal(), logprob=MAIN_LOGPROB))
+    helper_policy = ScriptedPolicy(vault_policy, logprob=HELPER_LOGPROB, tokenizer=main_policy.tokenizer)
+
+    def registered(model_name: str, renderer_name: str, **kwargs: Any) -> Any:
+        return _info(_LLM(core.default_gateway(), model_name), model_name, renderer_name, **kwargs)
+
+    def opened(model_name: str, renderer_name: str, **kwargs: Any) -> Any:
+        return _info(_LLM(make_gateway(helper_policy, model_name=model_name), model_name), model_name, renderer_name)
+
+    agents: Counter[tuple[bool, str, str]] = Counter()
+    convert = worker_run.get_train_data_for_trajectory_collection
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        for trajectory in kwargs["trajectory_collection"]["trajectories"].values():
+            agent = trajectory["misc"]["agent"]
+            agents[(trajectory["parent_info"] is None, agent["role"], agent["policy"])] += 1
+        return convert(*args, **kwargs)
+
+    monkeypatch.setattr(worker_run, "get_train_data_for_trajectory_collection", recorded)
+    service = checks.FakePolicyService()
+    settings = [
+        f"log_path={tmp_path}",
+        "train.batch_size=2",
+        "train.max_training_steps=2",
+        "train.workflow_config.group_size=2",
+        "eval.every=0",
+        "watchdog.enabled=false",
+        "policies.helper.model_name=helper-model",
+        "policies.helper.renderer_name=qwen3_instruct",
+        "policies.helper.trainable=false",
+        "agents.roles.delegator.policy=helper",
+        "environments.0.agents.root_role=delegator",
+    ]
+    with checks._faked(service), checks._restored_signals():
+        monkeypatch.setattr(set_module, "register_tinker_llm", registered)
+        monkeypatch.setattr(set_module, "open_tinker_llm", opened)
+        cli.main(["train", str(CONFIG), *settings])
+
+    run = tmp_path / "subagents" / "delegator"
+    rows = [json.loads(line) for line in (run / "checkpoints.jsonl").read_text().splitlines()]
+    assert [(row["name"], row["batch"]) for row in rows] == [("recovery-000000", 0), ("final", 2)]
+    # Every root took the role delegator and sampled the helper; every subagent sampled main.
+    assert set(agents) == {(True, "delegator", "helper"), (False, "subagent", "main")}, agents
+    assert helper_policy.calls and main_policy.calls
+    sent = [datum.loss_fn_inputs["logprobs"].to_torch() for datum in service.datums]
+    assert sent and not any(bool((logprobs == HELPER_LOGPROB).any()) for logprobs in sent)
+    assert any(bool((logprobs == MAIN_LOGPROB).any()) for logprobs in sent)
+    assert json.loads((run / "identity.json").read_text())["agents"] == {
+        "policy": "main",
+        "roles": {"delegator": "helper"},
+        "root_roles": {"vault": "delegator"},
+    }
