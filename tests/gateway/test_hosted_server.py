@@ -517,6 +517,26 @@ def test_a_policy_only_agent_s_hosted_aux_and_judge_calls_are_refused_unforwarde
     assert provider.requests == [] and agent.calls == [] and "judges_refused" not in agent.misc
 
 
+def test_a_policy_only_agent_mints_no_judge_agent_on_a_hosted_gateway(provider):
+    """In evaluation too: a judge agent that a harness in a task sandbox minted would make calls that the report counts
+    as judge calls, so the mint gets the permission error, and nothing is minted or forwarded."""
+
+    gateway = hosted(provider)
+
+    async def use(base_url, agent):
+        agent.policy_only = True
+        headers = {"Authorization": f"Bearer {agent.api_key}"}
+        async with ClientSession() as session:
+            async with session.post(f"{base_url}/v1/platoon/agents", json={"role": "judge"}, headers=headers) as reply:
+                return reply.status, await reply.json(), gateway.agents(agent.rollout_id)
+
+    agent, (status, refused, agents) = asyncio.run(serve(gateway, use))
+
+    assert status == 403 and refused["error"]["type"] == "permission_error"
+    assert "may not mint a judge agent" in refused["error"]["message"]
+    assert agents == [agent] and provider.requests == [] and "judges_refused" not in agent.misc
+
+
 def test_a_policy_only_agent_without_a_cap_has_its_hosted_aux_call_forwarded(provider):
     async def use(base_url, agent):
         agent.policy_only = True

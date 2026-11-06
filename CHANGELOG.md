@@ -4,6 +4,20 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
+## Unreleased
+
+### Fixes
+
+- **A harness in a task sandbox can no longer mint a `judge` agent.** The gateway refuses the `judge` calls of such a
+  harness, since code the policy runs in the sandbox can read its agent key, but `POST /v1/platoon/agents {"role":
+  "judge"}` minted it a judge agent. That agent's ordinary policy calls sampled the judge's policy (a frozen judge,
+  where `agents.roles` binds one) in a subtree that never trains, and an evaluation counted them as judge calls. The
+  gateway now answers that request with a permission error (HTTP 403) and mints nothing, also for the agents minted
+  under such a harness, whatever `inference.judges` says: with judges off, this refusal is no longer counted as a
+  refused judge and no longer stops an evaluation with exit 78, as for the harness's `judge` calls. A harness on the
+  rollout host still mints judge agents, and a program's judge (`EpisodeContext.judge_endpoint`) is unaffected: a
+  harness that needs a judge runs on the rollout host, or its program opens the judge.
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

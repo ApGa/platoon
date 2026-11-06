@@ -448,10 +448,10 @@ sandbox reaches through its route.
 
 A gateway step budget (`AgentSession.call_cap`) counts the policy calls of the capped agent and of every agent
 minted under it over HTTP together. A harness in a task sandbox, where code the policy runs can read its key
-(`AgentSession.policy_only`), makes no `judge` calls, and no `aux` calls under a gateway step budget, which would
-not count them: the server answers those with a permission error (403). Without a gateway step budget its `aux`
-calls are sampled, recorded and trained as its policy calls are (`AgentSession.sampling_kind`), and the gateway
-counts neither.
+(`AgentSession.policy_only`), makes no `judge` calls, mints no `judge` agent, whose calls never train either, and
+makes no `aux` calls under a gateway step budget, which would not count them: the server answers those with a
+permission error (403). Without a gateway step budget its `aux` calls are sampled, recorded and trained as its policy
+calls are (`AgentSession.sampling_kind`), and the gateway counts neither.
 
 **Sampling.** A rollout's `inference_params` (`temperature`, `top_p`, `top_k`, `max_completion_tokens`) are the
 default sampling of every agent in its tree. A parameter the call sets wins, then the rollout's default, then the

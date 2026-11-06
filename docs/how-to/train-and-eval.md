@@ -897,9 +897,12 @@ agents:
 - **Which agent samples which policy.** The root agent samples `agents.policy`, `main` without it (a policy the run
   trains). An agent its harness or program opens with a role (`ctx.agents.spawn(..., role=...)`, `POST
   /v1/platoon/agents {"role": ...}`, an episode program's judge) samples that role's policy for its whole life, and
-  `agents.policy` when `agents.roles` names none for its role. A request never
-  picks a policy, and only text crosses between policies: each agent renders, samples and parses with its own policy's
-  renderer and tokenizer.
+  `agents.policy` when `agents.roles` names none for its role. A harness in a task sandbox, whose agent key code the
+  policy runs can read, mints no `judge` agent (HTTP 403), whose calls would sample the judge's policy and never
+  train. It still mints agents of other roles, and one whose role `agents.roles` binds to the judge's policy samples
+  that policy, as a frozen helper does. Harnesses on the rollout host and programs open judges as before. A request
+  never picks a policy, and only text crosses between policies: each agent renders, samples and parses with its own
+  policy's renderer and tokenizer.
 - **What trains.** `main`, and each policy of `policies:` that does not say `trainable: false` ([Train several policies
   in lockstep](#train-several-policies-in-lockstep-experimental)). A frozen policy's agents make no rows: their rewards
   still reach the credit (an estimator that reads agents sees them, with their policy), and each row is stamped with

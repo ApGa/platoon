@@ -1,8 +1,8 @@
 """The gateway step budget and agent limits: an agent with a call cap gets a final message instead of a sample past
 it (nothing recorded, so nothing trains), a harness that ignores the stop is refused, a rollout mints a bounded
 number of agents over HTTP, whose policy calls all count against the minting agent's cap, and an agent whose key
-code the policy runs can read (``policy_only``, a harness in a task sandbox) is refused its judge calls, and its aux
-calls while a cap counts its policy calls, since the cap does not count them."""
+code the policy runs can read (``policy_only``, a harness in a task sandbox) is refused its judge calls and judge
+agents, and its aux calls while a cap counts its policy calls, since the cap does not count them."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from platoon.gateway.core import (
     AgentLimitError,
     CallKindRefusedError,
     ChatRequest,
+    JudgesOffError,
     ModelGateway,
 )
 from platoon.gateway.server import CALL_ID_HEADER, GatewayServer
@@ -335,6 +336,31 @@ async def test_a_policy_only_agent_s_judge_call_is_refused_for_its_kind_not_by_t
         await gateway.chat(agent, ChatRequest.from_params([USER], {}), kind="judge")
 
     assert sampler.calls == [] and agent.calls == [] and "judges_refused" not in agent.misc
+
+
+def test_a_policy_only_agent_mints_no_judge_agent_and_is_refused_for_it_before_the_judges_switch(gateway):
+    """A judge agent's calls never train, so an agent with ``policy_only``, which may make no judge call, may mint no
+    judge agent either (``CallKindRefusedError``, 403 over HTTP): nothing is minted or counted against the rollout's
+    limit.  As with its judge calls, it is refused for what it is before the judges switch, so it is not counted as a
+    judge refused while judges are off, which would stop an evaluation.  It mints agents of other roles, and an agent
+    without ``policy_only`` mints judges unless the judges are off."""
+
+    root = open_root(gateway)
+    root.policy_only = True
+    for judges in (True, False):
+        root.judges = judges
+        with pytest.raises(CallKindRefusedError, match="may not mint a judge agent"):
+            gateway.mint_subagent(root, role="judge")
+
+    assert gateway.agents("rollout-1") == [root] and "rollout-1" not in gateway._minted
+    assert "judges_refused" not in root.misc
+    assert gateway.mint_subagent(root, role="helper").policy_only
+    host = open_root(gateway, "rollout-2")  # a harness on the rollout host
+    assert gateway.mint_subagent(host, role="judge").role == "judge"
+    host.judges = False
+    with pytest.raises(JudgesOffError):
+        gateway.mint_subagent(host, role="judge")
+    assert host.misc["judges_refused"]["count"] == 1
 
 
 @pytest.mark.parametrize(

@@ -1,8 +1,9 @@
 """A spec with ``[budget] enforce = "gateway"``: the gateway ends a harness that has no step limit of its own at the
 run's step budget, the episode is graded with reason ``budget``, and only the sampled calls train.  End to end on
 CPU through the rollout worker's own body, the real gateway (Qwen3-4B-Instruct tokenizer, scripted sampler) and
-platoon-bash told to take far more turns than the budget.  A harness in the task sandbox makes no judge calls, and
-no aux calls under a gateway budget, which counts only policy calls; one on the rollout host keeps every kind."""
+platoon-bash told to take far more turns than the budget.  A harness in the task sandbox makes no judge calls and
+mints no judge agent, and makes no aux calls under a gateway budget, which counts only policy calls; one on the
+rollout host keeps every kind, and its judges."""
 
 from __future__ import annotations
 
@@ -41,6 +42,35 @@ for kind in ("aux", "judge", "policy"):
 with open(sys.argv[2], "w") as out:
     out.write(" ".join(statuses))
 """
+# A harness that mints a judge agent and, given one, makes a policy call with the judge's key, then one with its own;
+# it writes each request's HTTP status as its final message.
+JUDGE_MINT_PROBE = """\
+import json, os, sys, urllib.error, urllib.request
+
+
+def post(path, body, key):
+    request = urllib.request.Request(
+        sys.argv[1] + path,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as error:
+        return error.code, None
+
+
+key = os.environ["PLATOON_API_KEY"]
+ask = {"model": "policy", "messages": [{"role": "user", "content": "Is the answer right?"}]}
+status, judge = post("/v1/platoon/agents", {"role": "judge", "goal": "grade"}, key)
+statuses = [f"mint={status}"]
+if judge is not None:
+    statuses.append(f"judge={post('/v1/chat/completions', ask, judge['api_key'])[0]}")
+statuses.append(f"policy={post('/v1/chat/completions', ask, key)[0]}")
+with open(sys.argv[2], "w") as out:
+    out.write(" ".join(statuses))
+"""
 
 
 def unbounded_bash(tmp_path: Path, *, max_steps: int | None = None) -> str:
@@ -70,12 +100,12 @@ file = "{{state_dir}}/final.txt"
     return str(path)
 
 
-def call_kind_probe(tmp_path: Path, *, gateway_budget: bool = False) -> str:
-    """The spec of a harness that runs :data:`CALL_KIND_PROBE`; with ``gateway_budget``, under a gateway step budget of
-    5 calls (``[budget] enforce = "gateway"``)."""
+def call_kind_probe(tmp_path: Path, *, gateway_budget: bool = False, script: str = CALL_KIND_PROBE) -> str:
+    """The spec of a harness that runs ``script`` (:data:`CALL_KIND_PROBE` or :data:`JUDGE_MINT_PROBE`); with
+    ``gateway_budget``, under a gateway step budget of 5 calls (``[budget] enforce = "gateway"``)."""
 
-    script = tmp_path / "probe.py"
-    script.write_text(CALL_KIND_PROBE)
+    probe = tmp_path / "probe.py"
+    probe.write_text(script)
     path = tmp_path / "call-kind-probe.toml"
     budget = 'max_steps = 5\n\n[budget]\nenforce = "gateway"\n' if gateway_budget else ""
     path.write_text(
@@ -85,7 +115,7 @@ version = "1"
 [launch]
 argv = ["python3", "{{state_dir}}/probe.py", "{{base_url}}", "{{state_dir}}/final.txt"]
 env = {{ PLATOON_API_KEY = "{{api_key}}" }}
-assets = {{ "probe.py" = "{script}" }}
+assets = {{ "probe.py" = "{probe}" }}
 
 [final_message]
 file = "{{state_dir}}/final.txt"
@@ -247,3 +277,43 @@ async def test_a_harness_in_the_task_sandbox_makes_no_judge_calls_and_no_aux_cal
     kinds = [step["misc"]["action_misc"].get("kind", "policy") for step in root["steps"]]
     assert kinds == (["aux", "policy"] if "aux=200" in statuses else ["policy"])  # a judge call is no step
     assert len(root["misc"].get("judge_calls", [])) == int("judge=200" in statuses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sandbox", "placement", "statuses", "sampled"),
+    [
+        (True, "task_sandbox", "mint=403 policy=200", ["An answer."]),
+        (False, "local", "mint=201 judge=200 policy=200", ["A verdict.", "An answer."]),
+    ],
+    ids=["task-sandbox", "rollout-host"],
+)
+async def test_a_harness_in_the_task_sandbox_mints_no_judge_agent(
+    tmp_path, budget_gateway, sandbox, placement, statuses, sampled
+):
+    """Red team: a judge agent samples its role's policy (a frozen judge, where the run binds one), and its calls never
+    train, so through one, code the policy runs in the task sandbox, which can read the agent's key, would make the
+    judge calls it is refused.  The gateway refuses that harness the mint (``POST /v1/platoon/agents {"role":
+    "judge"}``, 403) and samples nothing for it.  A harness on the rollout host mints its judge, whose call is kept
+    for audit under the root's ``judge_calls`` and never trains."""
+
+    from platoon.harness.rollout import EmbeddedGateway
+
+    FakeService.root = tmp_path / "sandboxes"
+    FakeService.sessions.clear()
+    gateway, sampler = budget_gateway
+    sampler.script[:] = list(sampled)
+
+    collection = await run_harness_rollout(
+        routed(call_kind_probe(tmp_path, script=JUDGE_MINT_PROBE), service_kwargs={"sandbox": sandbox}),
+        rollout_config(tmp_path),
+        gateway=EmbeddedGateway(gateway),
+        runner=runner(tmp_path),
+    )
+
+    (root,) = collection["trajectories"].values()  # a judge's subtree makes no trajectory
+    assert root["misc"]["harness"]["placement"] == placement
+    assert root["finish_message"] == statuses and len(sampler.prompts) == len(sampled) and sampler.script == []
+    assert len(root["steps"]) == 1  # the harness's own policy call, the only one that trains
+    judge_calls = root["misc"].get("judge_calls", [])
+    assert [call["role"] for call in judge_calls] == (["judge"] if "mint=201" in statuses else [])

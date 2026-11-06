@@ -1986,10 +1986,13 @@ The gateway also limits the agents a rollout may mint over its HTTP agent API (`
 since code the policy runs in the sandbox can read the agent's key; `PLATOON_MAX_MINTED_AGENTS` sets another
 limit. A minted agent shares its parent's step budget: the policy calls of the root and of every agent minted under
 it count against one budget. For the same reason the gateway answers a harness in the task sandbox with a permission
-error (HTTP 403), and samples nothing, for a call it marks `judge` (`X-Platoon-Call-Kind`), which never trains, and,
-under a gateway step budget (`[budget] enforce = "gateway"`), for a call it marks `aux`, which that budget does not
-count. Without a gateway step budget, as for `openhands`, its `aux` calls are sampled, recorded and trained as its
-policy calls are, and the gateway counts neither. Harnesses on the rollout host keep their `aux` and `judge` calls.
+error (HTTP 403), and samples nothing, for a call it marks `judge` (`X-Platoon-Call-Kind`), which never trains; for a
+`judge` agent it asks to mint (`POST /v1/platoon/agents {"role": "judge"}`), which would sample the judge's policy
+(a frozen judge, where `agents.roles` binds one) in calls that never train either, and mints nothing; and, under a
+gateway step budget (`[budget] enforce = "gateway"`), for a call it marks `aux`, which that budget does not count.
+Without a gateway step budget, as for `openhands`, its `aux` calls are sampled, recorded and trained as its policy
+calls are, and the gateway counts neither. Harnesses on the rollout host keep their `aux` and `judge` calls and their
+`judge` agents, and a program still opens its own judge (`EpisodeContext.judge_endpoint`).
 
 ### 4. Check a dataset first
 

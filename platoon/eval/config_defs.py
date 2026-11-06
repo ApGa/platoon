@@ -493,7 +493,8 @@ class EvalConfig:
     # them, parent-usage judges, and judge agents and calls. With false none run, which saves their latency and cost:
     # a child its environment grades by verifier shares the episode's outcome instead (an entry whose reward_processor
     # or program may read child verdicts is refused unless it sets agents.child_grading: none), and a judge agent or
-    # call stops the evaluation (exit 78). Success metrics never depend on judges.
+    # call stops the evaluation (exit 78), but not one that a harness in a task sandbox asks for, which is refused with
+    # judges on too. Success metrics never depend on judges.
     judges: bool = True
     # A hosted model to evaluate instead of a Tinker policy: a base URL that speaks each harness's dialect, reached
     # through the model gateway, for evaluation only (null: Tinker). See docs/how-to/evaluate-hosted-models.md.
