@@ -4,6 +4,27 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
+## Unreleased
+
+### New features
+
+- **A check of a Tinker service that two LoRA adapters share (experimental).**
+  `platoon.testing.check_shared_service(url, base_model=...)` opens two LoRA adapters of one base model on a live
+  service, each in a Tinker session of its own as a run opens each policy's, and checks what two trained policies on
+  one service ask of it, RFC 0021's U1 to U4: each adapter steps with its own optimizer and learning rate, keeps its
+  gradients when both step together, and leaves the other's weights as they were, also when both steps are in flight
+  (`U1`); the samplers of their sampler saves under one name and the samplers they publish serve each adapter's own
+  weights (`U2`); one session's end, as the Tinker SDK ends a session after a fatal error, ends it and leaves the other
+  sessions' models, which still read, step and save, and their samplers (`U3`); and an adapter saved with its
+  optimizer while the other trains reopens in a session of its own with its weights and its optimizer's state, which a
+  step with no gradient shows by its momentum (`U4`). It raises one `AssertionError` that names every check the
+  service fails, with what it saw, and lists as not run the checks after one that raised an error, since the SDK ends
+  the session of a call that fails. It ends every session it opened, and needs the SDK's telemetry, which sends the
+  session-end event ([Check a shared Tinker service](docs/how-to/test-extensions.md#check-a-shared-tinker-service)).
+  The training how-to, in
+  [Train several policies in lockstep](docs/how-to/train-and-eval.md#train-several-policies-in-lockstep-experimental),
+  and the two-agent lockstep example ask for it before two adapters train on one service.
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

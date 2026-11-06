@@ -383,6 +383,51 @@ three groups, and a new one that took up its state as JSON, credit the next grou
 `state()` as it was). Call it outside a running event loop. `check_credit_estimator` checks the
 experimental credit API (`platoon.experimental`), and changes with it.
 
+## Check a shared Tinker service
+
+Two trained policies of one base model on one Tinker service are two LoRA adapters there ([Train several policies in
+lockstep](train-and-eval.md#train-several-policies-in-lockstep-experimental)), and a run of them is only as sound as
+the service keeps them apart. `check_shared_service` checks a live service, self-hosted or hosted, before you train two
+adapters on it:
+
+```python
+from platoon.testing import check_shared_service
+
+check_shared_service("http://localhost:8000", base_model="Qwen/Qwen3-4B-Instruct-2507")
+```
+
+It opens two LoRA adapters of `base_model` at `rank` (32 by default), A and B, each in a Tinker session of its own, as
+a run opens each policy's; trains each on 16 token ids of its own (`cross_entropy`, Adam at `learning_rate`, 1e-4 by
+default); and reads an adapter's weights as the mean logprob they give each adapter's tokens, through its training
+client (`forward`) or a sampler (`compute_logprobs`), comparing readings of one kind only. It raises one
+`AssertionError` that names every check that failed, with what it saw, of what RFC 0021 asks of such a service:
+
+| Check | What the service must do | What the check does |
+|---|---|---|
+| `U1` | serve several LoRA models of one base, each with its own Adam state, stepping separately | opens A and B at once, as two models; steps both together at `learning_rate`, every `forward_backward` and then every `optim_step` submitted before any result is awaited, as a step of several policies submits them: each moves, so neither's step dropped the other's gradients; then steps one beside a step of the other at learning rate 0, submitted the same way: the one moves, the other does not, each way round |
+| `U2` | serve each adapter's own weights from its samplers | saves both adapters' sampler weights under one name, as a checkpoint does, and takes the samplers each publishes, as each step does: each kind sets A and B apart as their weights do |
+| `U3` | leave the other sessions' models when a session ends | ends A's session as the Tinker SDK ends one after a fatal error (its session-end event, then no heartbeat), after which A's model must no longer answer: B, and A reopened by `U4`, read as before and still step, B's sampler serves as before, and B still saves. A service on which A's model still answers after the event does not end a session on it (it may end one only when its lease expires), and fails `U3` as not checked |
+| `U4` | reopen an adapter saved with its optimizer while another trains | saves A with its optimizer while B steps, and reopens it in a session of its own, as a resume does, while B steps again: it reads as A did at the save, and a step with no gradient (every loss weight 0) moves it by its momentum about as far as the same step moved A; B's steps are kept |
+
+`tolerance` (0.02 by default) is how far two readings of the same weights may differ, in mean logprob per token. The
+check's steps must move its adapters well beyond it: by more than it in `U1`, and by four times it in what `U2` and
+`U4` compare, so that half of such a difference still stands out from the noise of the readings it is made of; a
+failure that says a step moved too little asks for a larger `learning_rate`. A reading that is not a finite number
+(weights that read NaN) is an error.
+
+A check that raises an error fails with what the check was doing when it did, and the checks after it do not run: the
+Tinker SDK ends the session of a call that fails, and a service may release that session's models at once, so the
+later checks would fail on them too. The `AssertionError` lists those checks as not run, after the ones that failed,
+and does not count them. The check runs `U3` last, since it ends a session, and when it is done it ends every session
+it opened as `U3` ends A's; a service that does not end a session at its session-end event keeps their adapters until
+their leases expire. It holds three adapters at once (A, B and A reopened), so a self-hosted service needs three free
+slots for it, and it leaves its saves on the service (named `platoon-check-shared-service...`).
+
+With `url=None` it checks the service `TINKER_BASE_URL` names, else hosted Tinker, with the key in `TINKER_API_KEY`.
+It needs the SDK's telemetry, which sends the session-end event: with `TINKER_TELEMETRY=0` it raises `RuntimeError`
+before any adapter opens. Call it outside a running event loop. `check_shared_service` checks what the experimental
+support for several policies (`policies:`) asks of a service, and changes with it.
+
 ## Reference
 
 | Name | Signature and behavior |
@@ -407,7 +452,9 @@ experimental credit API (`platoon.experimental`), and changes with it.
 | `fake_tinker_service` | `fake_tinker_service(*, stop_at=None)`: a context manager that yields a `FakePolicyService` in place of the Tinker service, puts back the signal handlers a run installs, and with `stop_at` asks the run to stop in that optimizer step |
 | `FakePolicyService` | The fake service: `calls` (what it was asked, in order), `datums` (each datum sent to forward_backward), `deleted` (the checkpoint paths deleted), `optimizer_steps` |
 | `check_credit_estimator` | `check_credit_estimator(estimator, *, options=None)`: raises `AssertionError` naming each check a credit estimator fails ([Check a credit estimator](#check-a-credit-estimator)) |
+| `check_shared_service` | `check_shared_service(url, *, base_model, rank=32, learning_rate=1e-4, tolerance=0.02)`: raises `AssertionError` naming each check that a Tinker service fails for two LoRA adapters of `base_model`, and `RuntimeError` when the Tinker SDK's telemetry is off ([Check a shared Tinker service](#check-a-shared-tinker-service)) |
 
 The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission`,
-`check_trainer`, `fake_tinker_service`, `FakePolicyService` and `check_credit_estimator`, which serve the
-experimental sampler, admission, trainer and credit APIs and change with them; its submodules are not.
+`check_trainer`, `fake_tinker_service`, `FakePolicyService`, `check_credit_estimator` and `check_shared_service`,
+which serve the experimental sampler, admission, trainer, credit and policy APIs and change with them; its submodules
+are not.
