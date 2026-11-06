@@ -34,6 +34,9 @@ The pieces:
   checks: it credits fixture groups of two roles, and checks that it sets advantages on action tokens only and that a
   new estimator that took up its state credits as the running one does; it checks the experimental credit API, and
   changes with it;
+* :func:`check_runtime_tasks`: the red-team check of a Harbor environment's runtime tasks (``platoon.experimental``),
+  made of named cases: tasks with known sabotages, which ``materialize`` must refuse, or whose grades must come out as
+  each case says; it checks the experimental runtime-task API, and changes with it;
 * :func:`toy_tokenizer` and :func:`toy_renderer`: a 7 KB byte-level tokenizer with Qwen3's chat tokens, and
   tinker-cookbook's ``qwen3_instruct`` renderer over it, so prompts render and parse offline as they do for a Qwen3
   model, apart from the token ids;
@@ -41,8 +44,9 @@ The pieces:
   ``pytest -p platoon.testing`` and never automatically.
 
 The names this module exports are a stable API, but for :func:`check_task_sampler`, :func:`check_group_admission`,
-:func:`check_trainer`, :func:`fake_tinker_service` and :func:`check_credit_estimator`, which serve the experimental
-sampler, admission, trainer and credit APIs and change with them; its submodules are not.  It needs the
+:func:`check_trainer`, :func:`fake_tinker_service`, :func:`check_credit_estimator` and :func:`check_runtime_tasks`,
+which serve the experimental sampler, admission, trainer, credit and runtime-task APIs and change with them; its
+submodules are not.  It needs the
 ``tinker`` extra (and the ``ors`` extra for ORS environments), and pytest only for the plugin.
 ``docs/how-to/test-extensions.md`` is the guide.
 """
@@ -77,6 +81,7 @@ _EXPORTS = {
     "check_group_admission": "platoon.testing.admissions",
     **dict.fromkeys(("FakePolicyService", "check_trainer", "fake_tinker_service"), "platoon.testing.trainers"),
     "check_credit_estimator": "platoon.testing.credit",
+    "check_runtime_tasks": "platoon.testing.runtime_tasks",
 }
 
 __all__ = [
@@ -91,6 +96,7 @@ __all__ = [
     "ScriptedPolicy",
     "check_credit_estimator",
     "check_group_admission",
+    "check_runtime_tasks",
     "check_task_sampler",
     "check_trainer",
     "fake_tinker_service",
@@ -132,6 +138,7 @@ if TYPE_CHECKING:
         sample_response,
         tool_call,
     )
+    from platoon.testing.runtime_tasks import check_runtime_tasks
     from platoon.testing.samplers import check_task_sampler
     from platoon.testing.tokenizer import (
         TOY_MODEL_NAME,

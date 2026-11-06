@@ -90,12 +90,21 @@ import aiohttp
 from platoon.envs.gate import DEFAULT_QUEUE_TIMEOUT_S, EnvBusy, GateClosed, ToolGate, caller_or
 from platoon.envs.harbor import sidecars
 from platoon.envs.harbor.artifacts import ArtifactError, CollectedArtifact, collect_artifacts, materialize_artifacts
+from platoon.envs.harbor.launcher import REPORT as LAUNCHER_REPORT
 from platoon.envs.harbor.mcp_client import McpClient, McpError
 from platoon.envs.harbor.node_services import NodeScope
+from platoon.envs.harbor.runtime import launcher_outcome, unfinished
 from platoon.envs.harbor.sidecars import SidecarLogs
 from platoon.envs.harbor.task import CollectHook, HarborTask, McpServer, resolve_env
 from platoon.envs.harbor.tools import DEFAULT_MAX_OUTPUT_CHARS, TOOL_SPECS, SandboxTools, truncate_output
-from platoon.envs.harbor.verifier import TEST_STDOUT, collect, output_tail, suspect_outcome, write_local
+from platoon.envs.harbor.verifier import (
+    REWARD_FILES,
+    TEST_STDOUT,
+    collect,
+    output_tail,
+    suspect_outcome,
+    write_local,
+)
 from platoon.envs.harbor.views import SessionUsers, unviewed
 from platoon.envs.service import EnvSetupError, ForkMode, Outcome, ToolResult, ToolSpec
 from platoon.sandbox import loses_file_owners
@@ -954,6 +963,10 @@ class HarborSession:
 
         sandbox = users.root
         timeout_s = self.harbor_task.verifier_timeout_s * self._service.verifier_timeout_multiplier
+        # A runtime task's tests are platoon's launcher, whose report is its grade (platoon.envs.harbor.runtime): once
+        # it starts, a grade that does not finish is named by its grader's owner, as only the grader, root beside it,
+        # or the sandbox could have stopped it.
+        runtime = self._service.runtime_settings(self.harbor_task)
         started = time.monotonic()
         result = await users.tests.exec(
             f"bash {TESTS_DIR}/test.sh > {VERIFIER_DIR}/{TEST_STDOUT} 2>&1", timeout_s=timeout_s, env=env
@@ -967,6 +980,10 @@ class HarborSession:
         # The tests may have run the agent's code: nothing left of it may change their output while it is read.
         if (unsafe := await self._kill_processes(sandbox, "after the tests")) is not None:
             unsafe.metadata.update(metadata)
+            if runtime is not None:
+                return unfinished(
+                    runtime, f"grading could not kill what was left: {unsafe.reason}", None, unsafe.metadata
+                )
             return unsafe
         # A command that could not start in its working directory exits 126, and so may a command by itself (whose
         # output, the tests' here, could say anything): a check run in "/" confirms it.  When a process the kill missed
@@ -978,10 +995,18 @@ class HarborSession:
                 unusable.metadata.update(metadata)
                 return unusable
         try:
-            files = await collect(sandbox, VERIFIER_DIR)
+            files = await collect(
+                sandbox, VERIFIER_DIR, whole=(*REWARD_FILES, LAUNCHER_REPORT) if runtime is not None else REWARD_FILES
+            )
         except RuntimeError as exc:
+            if runtime is not None:
+                return unfinished(runtime, f"grading could not read the verifier's output: {exc}", None, metadata)
             return Outcome.infra("verifier_output", reason=str(exc), metadata=metadata)
-        if result.timed_out:
+        if runtime is not None:  # no classifier, reading of irregular reward files or reward check of the entry's
+            outcome = launcher_outcome(
+                files, settings=runtime, exit_code=result.exit_code, timed_out=result.timed_out, timeout_s=timeout_s
+            )
+        elif result.timed_out:
             outcome = Outcome.infra("verifier_timeout", status="invalid", metadata={"timeout_s": timeout_s})
         elif (suspect := suspect_outcome(files, primary=self._service.reward.names[0])) is not None:
             outcome = suspect

@@ -56,9 +56,18 @@ And independent stepping (RFC 0021): when a run's trained policies step each on 
 policy, its rows of the group, which a trainer's steps of that policy take from the run's :class:`ShareLedger`
 (``source.ledger``: ``take``, judged stale or not at ``judge_version``, then ``consumed`` under its ``lock`` once the
 step trained them), each step ending with ``run.end_step(policy=...)`` on the policy's own clock (``run.clocks``).
+And runtime Harbor tasks (RFC 0022): task directories written while a run runs, such as an environment generator's,
+which a Harbor environment entry takes in under its ``service_kwargs.runtime_tasks`` (:class:`RuntimeTasksConfig`):
+``HarborEnvironmentService.materialize(source)`` checks one against them and refuses it, never rewriting it, or keeps
+it in their store under its digest with platoon's launcher, which replays the submission before the task's grader
+grades it (:class:`MaterializedTask`); ``platoon.testing.check_runtime_tasks`` checks an environment's runtime tasks
+against a suite of sabotaged tasks.  ``docs/how-to/sandboxes-and-harbor.md`` is the guide.
 
-This module imports neither ``tinker`` nor ``datasets``.
+This module imports neither ``tinker`` nor ``datasets``, and the Harbor service only when a runtime task's name is
+first used.
 """
+
+from typing import TYPE_CHECKING, Any
 
 from platoon.programs import DrawInfo
 from platoon.train.admission_api import (
@@ -205,4 +214,25 @@ __all__ = [
     "credit_estimator",
     # independent stepping (RFC 0021)
     "ShareLedger",
+    # runtime Harbor tasks (RFC 0022)
+    "MaterializedTask",
+    "RuntimeTasksConfig",
 ]
+
+# Public name -> the module that defines it, imported on first use: the Harbor service is not cheap to import.
+_LAZY = dict.fromkeys(("MaterializedTask", "RuntimeTasksConfig"), "platoon.envs.harbor.runtime")
+
+
+def __getattr__(name: str) -> Any:
+    import importlib
+
+    module = _LAZY.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(importlib.import_module(module), name)
+    globals()[name] = value
+    return value
+
+
+if TYPE_CHECKING:
+    from platoon.envs.harbor.runtime import MaterializedTask, RuntimeTasksConfig

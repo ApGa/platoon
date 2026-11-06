@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+from typing import Any
 
 from harness_example_fakes import EXAMPLES, REPO
 
@@ -18,6 +19,10 @@ TESTS = EXAMPLES / "quickstart" / "test_guess.py"
 
 def python_blocks() -> list[str]:
     return re.findall(r"^```python\n(.*?)^```$", GUIDE, re.S | re.M)
+
+
+def python_blocks_in(text: str) -> list[str]:
+    return [block for block in python_blocks() if block in text]
 
 
 def section(heading: str) -> str:
@@ -64,6 +69,25 @@ def test_the_sft_trainer_s_check_runs_on_the_example_s_datasets(monkeypatch):
     monkeypatch.chdir(REPO)  # its dataset_dir is relative to the repository's root
 
     exec(compile(block, "test-extensions.md", "exec"), {"check_trainer": platoon.testing.check_trainer})
+
+
+def test_the_runtime_tasks_check_runs_on_cpu_as_the_guide_writes_it(tmp_path, monkeypatch):
+    """Its refusal cases need no sandbox, so the docker provider it names is never asked for one, and what they take in
+    stays in the test's own directory."""
+
+    (block,) = python_blocks_in(section("Check an environment's runtime tasks"))
+    (tmp_path / "tasks").mkdir()
+    (tmp_path / "runtime-task.toml").write_text(
+        '[environment]\ndocker_image = "science"\nnetwork_mode = "no-network"\nworkdir = "/app"\n\n'
+        '[verifier]\nenvironment_mode = "separate"\nuser = "root"\ntimeout_sec = 60\n'
+    )
+    monkeypatch.chdir(tmp_path)  # its dataset_dir and template are relative to where it runs
+    names: dict[str, Any] = {}
+    exec(compile(block, "test-extensions.md", "exec"), names)
+
+    names["test_runtime_tasks_refuse_every_sabotage"](tmp_path)
+
+    assert [path.name for path in (tmp_path / "store").iterdir() if path.name != ".staging"] != []
 
 
 def test_the_reference_lists_every_export():

@@ -195,7 +195,8 @@ environments:
 
 `service_kwargs` are the options of the Harbor service (`platoon/envs/harbor/service.py`). The ones that name files
 platoon reads, `dataset`, `registry`, `adapter.repo`, `dataset_dir`, `task_dirs`, `splits`, `lock`, `tasks`,
-`overlays` and `mounts[].source`, are relative to the config file that names them, so `./tasks` is the `tasks`
+`overlays`, `mounts[].source`, `runtime_tasks.template` and `runtime_tasks.store`, are relative to the config file that
+names them, so `./tasks` is the `tasks`
 directory beside the config, wherever platoon runs from ([Write and override
 configs](configs.md#2-build-on-it-with-extends)):
 
@@ -224,6 +225,7 @@ configs](configs.md#2-build-on-it-with-extends)):
 | `sandbox_start_budget_s` | 600 | What a rollout's deadline allows each sandbox start, the task's and a separate verifier's ([Run it](#4-run-it)) |
 | `stacks`, `network_policy`, `on_sidecar_down` | `auto`, `task`, `invalid` | *Since 0.5.0.* Whether and how multi-container tasks run, the network of every sandbox, and what a sidecar that is down at grading makes the outcome ([Multi-container tasks](#multi-container-tasks)) |
 | `node_services` | none | *Since 0.5.0.* The services the node runs once for every rollout, by name, which a dataset's overlay names for the compose services they serve (`external`); `platoon train` and `platoon eval` start them before the first rollout ([Node services](#node-services)) |
+| `runtime_tasks` | none | *Experimental.* How the environment takes in task directories written while the run runs, such as an environment generator's, and runs them: `{images, template, verifier_user, verifier_provider_options, max_bytes, store}` ([Runtime tasks](#runtime-tasks)) |
 
 Values like `${HF_TOKEN}` or `${REGION:-us}` in a task's `env` tables are read from the host: `[environment] env`
 when a session opens (an unset variable without a default fails the session as a configuration error), and
@@ -1737,6 +1739,179 @@ train:
 A field named like one of platoon's own columns, `task_id` or one that starts with `_platoon`, is left out of the
 dataset, and a run whose `label_by` names it stops with exit 78: it would read platoon's column, not the field.
 
+## Runtime tasks
+
+*Experimental.* Some runs write tasks while they run: a program that trains an environment generator, such as a
+paper-to-task pipeline or a bug injector, has the generator write a Harbor task directory, which the run then solves
+and grades. A Harbor environment takes such a directory in as one of its own tasks when its `service_kwargs` set
+`runtime_tasks`, the rules every one must keep:
+
+```yaml
+environments:
+  - name: solver
+    service: harbor
+    service_kwargs:
+      dataset: hf://my-org/my-harbor-dataset@<revision>   # the curated tasks, served and graded as before
+      agent_user: ignore
+      provider: singularity
+      provider_options: {allow_network_none: true}
+      runtime_tasks:
+        images: {science: /shared/images/science.sif}     # the docker_image names a runtime task may give
+        template: runtime-task.toml                        # the task.toml every runtime task has
+        verifier_provider_options: {rootfs_layout: copy, fakeroot: true}   # their verifiers run as root
+```
+
+```toml
+# runtime-task.toml: everything of a runtime task's task.toml but its [task] name and its artifacts
+version = "1.0"
+
+[environment]
+docker_image = "science"
+network_mode = "no-network"
+workdir = "/app"
+cpus = 2
+memory_mb = 8192
+
+[agent]
+timeout_sec = 900
+
+[verifier]
+environment_mode = "separate"
+user = "root"
+timeout_sec = 600
+```
+
+Code that holds the environment's service, such as an episode program, then takes a directory in, and opens its task
+as it would open any of the environment's:
+
+```python
+made = await service.materialize(directory, grader_owner="generated")
+if made.ok:
+    session = await service.open(made.task, rollout_id=rollout_id)
+else:
+    print(made.problems)  # why not, one sentence each, for the generator to learn from
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `images` | | The `docker_image` names a runtime task may give, each with the image its sandboxes run: a `.sif` or `.sqsh` file or an absolute path as written, or a registry reference, which gets `docker://` |
+| `template` | | The `task.toml` every runtime task has but for its `[task] name` and its `artifacts`: a table, or a TOML file. It gives the agents and the verifier no network, grades in a separate verifier that runs the task's own image (no `[verifier.environment] docker_image`, whose image would bring its own `/tests`), and names one of `images`; the service refuses one that does not when it is built |
+| `verifier_user` | `honor` | What a runtime task's `[verifier].user` gets, in place of the entry's `verifier_user`. The launcher runs as root: a template whose `[verifier] user` is root and `honor`, on verifiers' sandboxes that give root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
+| `verifier_provider_options` | none | Laid over the entry's `verifier_provider_options` (else its `provider_options`) for runtime tasks' verifiers only; the entry's other verifiers keep theirs. A run's reaping, and `platoon sandbox reap`, look for their sandboxes with these options too |
+| `max_bytes` | 256 MiB | The most a runtime task's files may hold |
+| `store` | `runtime-tasks` in the run's directory | Where runtime tasks are kept, each in `<store>/<digest>`; outside a run, `runtime-tasks` in the Harbor cache. Entries that leave it unset share the run's; each runs only the tasks checked against its own `runtime_tasks` (below) |
+
+**What `materialize` refuses.** It never rewrites a directory: a generator that learns must learn the rules, not have
+them patched. It copies the directory's regular files and directories, and refuses, with one sentence each in
+`problems`:
+
+- a symbolic link, a device, a FIFO or a socket; more than `max_bytes` of files; more than 10,000 entries;
+- a `task.toml` that differs from the template anywhere but its `[task] name` and its `artifacts`, each difference
+  named: a network, GPUs, another image, the verifier's mode (`task.toml sets [environment] network_mode to "public",
+  and the template to "no-network"`);
+- an artifact that is no normalized path relative to the working directory (`/tests/gen`, `/logs/verifier`, `./a`,
+  `a/../b`), or one longer than 1,024 characters, or more than 256 of them: the verifier puts each artifact back at
+  its path, so an absolute one would put the solver's files beside the grader, or where the reward is written;
+- an `environment/Dockerfile`, since a runtime task builds no image, and an `environment/docker-compose.yaml`, since it
+  runs in one sandbox;
+- anything in `tests/` but `gen/`, which holds the task's grader: `tests/test.sh` is platoon's launcher;
+- a `tests/gen/grader.json` that is missing or malformed (below), and what `HarborTask.load` refuses, such as a missing
+  `instruction.md`.
+
+It then installs the launcher (`tests/test.sh`, and `tests/platoon/`, with the launcher's settings, which include a
+fingerprint of the `runtime_tasks` the task was checked against), and keeps the copy in the store under its digest, a
+SHA-256 of all its files, which is the task's id too: the same directory twice is one task. `grader_owner` says who
+wrote the task's grader, `generated` (the generator, the default) or `trusted` (trusted code, such as a task
+producer's own grader), which names the failure kinds of the grader's non-scores (below). It is the caller's word,
+never the directory's. The copy and the checks run in a thread; a store that cannot be written raises `OSError`.
+
+A runtime task's directory says it is one (the launcher's settings, which only `materialize` writes), and it runs only
+as one: an environment opens it only from its own store and only if the task was checked against its own
+`runtime_tasks`, the same `images`, `template`, `verifier_user`, `verifier_provider_options` and `max_bytes`, reward
+name and `verifier_timeout_multiplier`. Another entry's task in a shared store, a task from before the entry's
+`runtime_tasks` changed (a resumed run's), and any runtime task in an environment without `runtime_tasks` are refused
+when they open
+(`env_config`), never run as ordinary tasks. The store's default follows the run's directory: code that reads tasks
+outside the run's processes, or across runs, sets `store`.
+
+**The task's grader.** `tests/gen/grader.json` names the grader's command, and the task's replay if it has one:
+
+```json
+{"command": ["python3", "grade.py"],
+ "replay": {"command": ["python3", "analysis.py"], "outputs": ["answer.json"]}}
+```
+
+The grader runs as root in `/tests/gen`. It reads the submission in `$PLATOON_WORKDIR`, the verifier's working
+directory, where the artifacts are, and writes its verdict to `$PLATOON_VERDICT`:
+`{"passed": true, "checks": [{"id": "answer", "passed": true, "margin": 0.01}]}`, where `checks` (at most 1,000) and
+`margin` may be left out, an `id` holds at most 256 characters, and nothing else may be there, `invalid` included: a
+grader cannot censor a measurement it does not like. A replay runs the submission's own code again (`analysis.py`
+above), in a copy of the working directory without the replay's `outputs`, which it must write again, and for at most
+half the time left; the grader then grades what the replay wrote, and finds what was submitted in
+`$PLATOON_SUBMITTED`. The replay runs as a user of its own, never root, without supplementary groups or new
+privileges, and with no more than it needs: an environment of a few variables (the path, the locale and time zone,
+the search paths and prefixes of Python and the dynamic linker, numeric libraries' thread counts, and the variables of
+the template's `[environment] env` that the verifier's sandbox shares and its `[verifier] env` does not set, the path
+kept to its absolute entries alone so nothing in the replay's directory stands in for a program), no file larger than
+an output may be, at most 1,024 processes and threads of its user and 1,024 open files, and the most killable to the
+OOM killer so memory the replay runs the sandbox out of ends the replay, not the launcher. `materialize(...,
+replay_address_space_bytes=N)` also caps the address space each replay process may reserve (`RLIMIT_AS`); by default
+there is no per-process cap, since a numeric replay legitimately reserves a large virtual address space. A replay
+command whose program is a path into the working directory (`./analysis.sh`) runs the submission's own program, and
+one that cannot start is the solver's fault; one that names a program of the image's (`python3`) and cannot start is
+the task's.
+
+**How a runtime task runs.** Its sessions run the image `images` binds its `docker_image` to, with its
+`environment/` uploaded into the working directory, as Harbor does for a task with a prebuilt image. It grades in its
+separate verifier, which starts with `runtime_tasks.verifier_provider_options` laid over the entry's and needs `python3`
+(3.8 or later) in the image. There the launcher seals `/tests`, `/logs/verifier` and what the agents published
+(`/logs/agent` and `/logs/artifacts`, where they exist), each root's, mode 700, and checks that each seal took: a
+directory, never a link, open to no other user, in a directory where the replay's user cannot replace it. It checks the
+declared artifacts against the output contract (regular files and directories, every file at most 64 MiB, a `.json` file
+JSON, nothing but directories above an output of the replay), checks that the replay's user may write in no directory of
+the working directory and makes the working directory root's with the group and other write bits stripped so nothing
+there is the replay's user's to write (files and directories, at any depth), runs the replay and kills what it left
+(below the launcher, or of the replay's user — one of that user's it cannot signal is a survivor, the solver's 0, never
+excluded as foreign), removes what that user left where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`,
+`/run/lock` and `/dev/mqueue`) and all of the replay's copy but the outputs (which wait as root's) before the grader
+reads them, runs the grader for the rest of the verifier's time limit, kills every process the grader left, and writes
+the only reward file, with its report, `/logs/verifier/launcher.json` (at most 64 KiB: a larger one leaves out the
+verdict's checks, then the artifacts' names), which the outcome's metadata holds as `launcher`. It reads every file
+whose contents it uses (its settings, a JSON artifact, a replayed output, the verdict, a log's tail) without following a
+link or waiting on a FIFO, checking the open file. That report is the grade: the entry's `verifier_classifiers`, its
+reading of reward files that are not regular files and its reward contract's `check` hook apply to its curated tasks
+only, since a grader that runs as root could write what they read.
+
+| What happened | Outcome |
+|---|---|
+| The verdict passed, or did not | `scored`, 1 or 0, as the reward contract's first name (`reward` by default) |
+| A declared artifact breaks the output contract; the working directory is more than a replay copies (4 GiB beyond the task's own files), or the artifacts take longer to check than the verifier's time limit allows | `scored` 0, reason `solver_output_contract` |
+| The replay fails, outlives its time, lacks its own program, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a filesystem (disk, inode or memory exhaustion it causes is its own, never the launcher's), or does not write an output again | `scored` 0, reason `solver_nonreproducible` |
+| The grader exits nonzero, or cannot start | `invalid`, `verifier_generated_exit` |
+| The grader outlives its time | `invalid`, `verifier_generated_timeout` |
+| No verdict, or one beyond the schema; a replay command of the image's that cannot start | `invalid`, `verifier_generated_protocol` |
+| What the grader left could not be killed | `invalid`, `verifier_generated_isolation` |
+| The launcher fails once the grader ran; it exits nonzero, leaves no report it writes, or outlives the verifier's time limit; grading cannot kill what was left in the verifier, or read its output | `invalid`, `verifier_generated_unfinished`, whatever the reward file says: the grader, root beside the launcher, may have stopped it |
+| The launcher cannot do its own part before the grader runs: no `python3`, no root, no other user to replay as, a seal that does not take, a working directory inside what it seals or one the replay's user may write in | `invalid`, `verifier_trusted_launcher` |
+
+A trusted grader (`grader_owner="trusted"`) gets `verifier_trusted_exit`, `verifier_trusted_timeout`,
+`verifier_trusted_protocol`, `verifier_trusted_isolation` and `verifier_trusted_unfinished` instead. A score of 0 that
+the launcher gives before the grader runs is the solver's, whoever wrote the grader: a measurement, whose `reason` says
+why, never a failure kind. The launcher is no security boundary against a generated grader, which runs as root beside
+it: a grader may choose 0 or 1, which controls check, and from the moment the launcher starts, every non-score of a task
+whose grader is generated is a `verifier_generated_*` kind, but `verifier_trusted_launcher`, which the launcher writes
+only before the grader runs. What fails before it starts (the verifier's sandbox, the upload of the artifacts) keeps
+platoon's kinds, such as `verifier_start` and `verifier_setup`. A program that runs runtime tasks charges the
+`verifier_generated_*` kinds to the generator once a known-good task on the same environment rules out the sandbox (a
+`verifier_generated_unfinished` may be the sandbox's, out of memory or disk). The environment's curated tasks are
+fetched, listed, opened and graded as before.
+
+**Before a run.** `platoon train`, `eval` and `rollout` refuse an environment whose provider options could not run its
+runtime tasks when they list its tasks (exit 78): sandboxes without a network, the verifiers' root filesystem layout,
+or root for verifiers whose template names root. `platoon.testing.check_runtime_tasks` takes a suite of sabotaged
+tasks through an environment, on its own sandboxes, before a run that generates tasks ([Check an environment's runtime
+tasks](test-extensions.md#check-an-environments-runtime-tasks)).
+
 ## Harness timeouts and crashes
 
 A harness runs for at most the earliest of its spec's `timeout_s`, the rollout's `timeout`, and the task's own
@@ -2156,6 +2331,7 @@ dataset skips such a task with a warning; naming it directly (as a task id, in a
 | `gpus` above 0 on a provider that cannot give a sandbox GPUs (when the session opens) | The tests would fail for want of a GPU and score 0 |
 | `network_mode = "no-network"`, for the agents or a separate verifier, on `singularity` without `allow_network_none: true`, or on `enroot` with `allow_network_none: false` (when the tasks are listed, which stops `platoon train` and `platoon eval` at startup with exit 78, and when a session opens) | hpc-sandbox would refuse every such sandbox, so every rollout of the task would fail at sandbox start and the task would never train. Set `allow_network_none: true` where the site lets users create network namespaces (enroot needs no such permission: drop `allow_network_none: false` from its options), or leave the tasks out (`exclude_tasks`) |
 | Any task, on `singularity` with a `rootfs_layout` that cannot run (an unknown name; any name, `copy` included, with an hpc-sandbox that has no layouts; `fuse-overlay` without `fuse-overlayfs` or `fusermount3` on `PATH`, or with `gpu`, `cgroup_limits` or `fakeroot`), or with `fakeroot` on an hpc-sandbox that does not take it, when the tasks are listed; `verifier_provider_options` are checked the same way for tasks with a separate verifier | Every sandbox start would fail. Fix the option or the `PATH`, or leave `rootfs_layout` out |
+| A runtime task's directory that breaks the environment's `runtime_tasks`, when `materialize` takes it in | It is refused with what is wrong, never rewritten ([Runtime tasks](#runtime-tasks)) |
 | Multi-step tasks (`steps` in `task.toml`) | Not supported |
 | Non-Linux tasks | Not supported |
 

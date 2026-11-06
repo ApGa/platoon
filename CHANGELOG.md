@@ -4,6 +4,47 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
+## Unreleased
+
+### New features
+
+- **Runtime Harbor tasks** (experimental, RFC 0022). A Harbor environment takes in task directories written while a
+  run runs, such as an environment generator's, when its `service_kwargs` set `runtime_tasks: {images, template,
+  verifier_user, verifier_provider_options, max_bytes, store}` (`platoon.experimental.RuntimeTasksConfig`).
+  `HarborEnvironmentService.materialize(source, grader_owner=...)` refuses a directory that breaks them, and never
+  rewrites one, saying why in `MaterializedTask.problems`: links and special files, files beyond `max_bytes`, a
+  `task.toml` that differs from the template but for its `[task] name` and `artifacts` (a template gives no network
+  and grades in a separate verifier on one of `images`), an artifact that is no path below the working directory, a
+  Dockerfile or compose file, and anything in `tests/` but `gen/`, the task's grader, which `tests/gen/grader.json`
+  describes. Otherwise it installs platoon's launcher as `tests/test.sh` and keeps the task in the store under its
+  digest, which is its id; an environment runs a runtime task only from its own store and only if the task was checked
+  against its own `runtime_tasks`, and refuses any other, never running one as an ordinary task. A runtime task's
+  sessions run the image `images` binds its `docker_image` to with its `environment/` uploaded, and its verifier starts
+  with `runtime_tasks.verifier_provider_options` laid over the entry's; there the launcher seals `/tests`,
+  `/logs/verifier` and what the agents published, and fails closed when a seal does not take; checks the artifacts
+  against an output contract; makes the working directory root's with the group and other write bits stripped so
+  nothing there is the replay's user's to write (files and directories, at any depth); replays the submission as a
+  user of its own, never root, with a thin environment (its `PATH` cut to absolute entries alone, so nothing in the
+  replay's directory stands in for a program) and limits on its files, processes, open files and, where
+  `materialize(..., replay_address_space_bytes=N)` gives one, address space, the replay disfavoured for the OOM killer
+  so memory it runs the sandbox out of ends the replay; and kills what the replay left (one of the replay user's
+  processes it cannot signal is a survivor, the solver's 0, never excluded as foreign), removes what that user left
+  where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and `/dev/mqueue`) and all of its copy but the
+  outputs (which wait as root's) before the grader runs, and puts each output back. It then runs the grader, kills what
+  it left and writes the only reward file, with a report that is the task's whole grade (the entry's classifiers and
+  reward check apply to its curated tasks only). A broken contract, a replay that leaves more than the launcher removes
+  in its time, and disk, inode or memory exhaustion a replay causes score 0, the solver's fault (reason
+  `solver_output_contract` or `solver_nonreproducible`), never a launcher fault that would censor the measurement; and
+  from the moment the launcher starts, every non-score of a generated grader is a `verifier_generated_*` kind (`_exit`,
+  `_timeout`, `_protocol` for a verdict beyond `{passed, checks}`, `invalid` included, `_isolation`, and `_unfinished`
+  for a launcher that did not finish), but `verifier_trusted_launcher`, which the launcher writes only before the grader
+  runs; a trusted grader (`grader_owner="trusted"`) gets `verifier_trusted_*`. The environment's curated tasks are
+  fetched, listed, opened and graded as before ([Runtime tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
+- **`platoon.testing.check_runtime_tasks`** takes a red-team suite of sabotaged tasks through an environment's runtime
+  tasks: what `materialize` must refuse, on CPU, and, on the environment's sandboxes, the grade each sabotaged grader,
+  replay or submission must get ([Check an environment's runtime
+  tasks](docs/how-to/test-extensions.md#check-an-environments-runtime-tasks)).
+
 ## 0.5.0 (2026-10-29)
 
 ### New features
