@@ -361,6 +361,12 @@ async def episode(ep: pt.EpisodeContext[EpisodeOptions]) -> pt.Outcome: ...
   component to find out when the run starts. The research extension's check that an env-server pool is set, for
   example, belongs in the ORS service, which would then refuse to fall back to `localhost`.
 
+[RFC 0022](0022-programs-that-run-rollouts.md) builds the program row of section 1's table ahead of the rest of M2, as
+its milestone M4: `@pt.program(name, options=, check=)`, `program_options` and `eval_overrides.program_options`,
+`ep.options` and `pt.CheckContext`, stable. For an entry that runs other entries' rollouts (`child_entries`, its M9),
+the program's `pt.CheckContext` will also hold, read-only, those entries, the role bindings and the `train:` settings
+that the entry's rows depend on; every other check keeps this section's boundary.
+
 ### 4. Options of named environments
 
 ```python

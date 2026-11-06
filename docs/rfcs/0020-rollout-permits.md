@@ -461,6 +461,11 @@ score for group size 1, which `pass_rate` refuses.
 - **Do not overload `group_size`** to make a swarm's lease a pool of slots: it is also the credit group, the statistics
   record's size and `pass_rate`'s `k`.
 
+[RFC 0022](0022-programs-that-run-rollouts.md) builds the static form for episodes that open sandboxed sessions beside
+their root's: `workflow_config.rollout_permits` reserves the `weight`, without the unit plan. Its dynamic form serves
+only children that open after their root's session has closed, so it needs no lending rule, and for such episodes a
+permit stands for one open session, not for the rollout's worker and sandboxes (section 2).
+
 **Several policies** (RFC 0003): one permit pool per policy, with one lease per pool held by the draw. Credit once,
 then routing, and drops atomic per policy are unaffected.
 

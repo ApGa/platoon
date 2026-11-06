@@ -2,12 +2,18 @@
 
 | | |
 |---|---|
-| Status | Draft |
+| Status | Draft; amended in part by [RFC 0022](0022-programs-that-run-rollouts.md) |
 | Created | 2026-10-16 |
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | The model gateway (`platoon/gateway/core.py`, `platoon/gateway/server.py`, `platoon/gateway/dialects/`, [Architecture](../architecture.md#the-model-gateway)), `platoon eval` (`platoon/eval/`), verifier grading (`platoon/harness/agents.py`, `platoon/harness/verify.py`), episode programs (`platoon/programs.py`), [RFC 0005](0005-gateway-dialects-and-tito.md), [RFC 0009](0009-gateway-step-budgets.md) |
 | Discussion | The pull request that adds this RFC. 0013 is the extension model and 0014 the remote sandbox service's draft, so this draft takes 0015 |
 | Implementation | M1 (the judges switch) and M2 (hosted models, rebuilt to this revision in place of the provider backends the first draft built) in the pull request that adds this RFC, as "What was built" lists; the answers to its two open questions in a follow-up pull request; M3 not yet |
+
+**Amended in part by [RFC 0022](0022-programs-that-run-rollouts.md):** frozen hosted policies may judge in training;
+their calls never train. A training config may serve a frozen policy from a hosted model (`policies.<id>.hosted`), for a
+judge of another model family, say, and the gateway dispatches each call by the agent's runtime, so that such a policy
+serves inside a Tinker gateway. A hosted call records text, not token ids, so nothing it returns can train. Evaluation,
+and the rest of this RFC, stand as written.
 
 ## Summary
 
@@ -211,6 +217,7 @@ Checks when the config loads (exit 78, before any task is listed):
 - The variable that `api_key_env` names must be set and non-empty, unless `stage: report`.
 - Training configs have no `inference` and no `hosted` section. `platoon train` refuses both as unknown keys, and
   the message adds that hosted models serve evaluation only, because their records hold no token ids or logprobs.
+  [RFC 0022](0022-programs-that-run-rollouts.md) adds `policies.<id>.hosted`, for frozen policies only.
 - The first draft's `inference.backend` is an unknown key, and its message names `inference.hosted`. Under
   `hosted`, the first draft's `kind`, `require_api_key`, `headers`, `headers_env`, `extra_body` and `drop_params`
   are unknown keys too, each with a message that says what replaces it (section 11).

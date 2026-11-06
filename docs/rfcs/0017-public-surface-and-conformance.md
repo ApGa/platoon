@@ -273,6 +273,10 @@ class TestAgent(HarnessConformance):
   a fake Tinker service, an interrupt and a resume, the saved state and the step hooks) and `check_credit_estimator`
   (advantages on action tokens only, state that resumes), plus `check_shared_service`, which runs against a live
   service. Their promotion to stable waits for an outside user, as this RFC requires.
+- **Programs that run rollouts** ([RFC 0022](0022-programs-that-run-rollouts.md)) follow them too: their names start in
+  `platoon.experimental`, but RFC 0016's program options, which it builds stable, and `platoon.testing` gains
+  `check_runtime_tasks` (runtime tasks with known sabotages, each with the refusal or verdict it must get) and
+  `check_program` (a program against a fake service and model: its stages' budgets, cancellation and the deadline).
 
 ### 6. `platoon env check` and `platoon harness check`
 
