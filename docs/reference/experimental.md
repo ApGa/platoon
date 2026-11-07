@@ -2374,7 +2374,8 @@ class RuntimeTasksConfig
 
 How an environment entry's runtime tasks run: `service_kwargs.runtime_tasks` of a Harbor environment.
 
-Built from a mapping of its fields (`coerce`), where `template` may name a TOML file.  The template must
+Built from a mapping of its fields (`coerce`), where `template` may name a TOML file.  The template nests
+tables and arrays at most 64 levels deep (`MAX_TOML_DEPTH`), as a runtime task's `task.toml` must; it must
 give the agents and the verifier no network (`[environment] network_mode = "no-network"`), grade in a separate
 verifier (`[verifier] environment_mode = "separate"`) that runs the task's own image (no
 `[verifier.environment] docker_image`, whose image would bring its own `/tests`), and name one of `images` as

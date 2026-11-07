@@ -15,7 +15,8 @@ them patched:
   ``materialize`` installs;
 * there is no ``environment/Dockerfile`` (a runtime task runs a prebuilt image and builds none) and no
   ``environment/docker-compose.yaml`` (it runs in one sandbox, never a stack);
-* its ``task.toml`` is the ``template`` but for the ``[task] name`` and the ``artifacts``, which are the task's own
+* its ``task.toml`` nests tables and arrays at most :data:`MAX_TOML_DEPTH` levels deep (:func:`load_toml`), and is the
+  ``template`` but for the ``[task] name`` and the ``artifacts``, which are the task's own
   (:func:`template_differences`); the template itself gives no network, grades in a separate verifier on the task's own
   image and names an image of ``images`` (:func:`template_problems`);
 * each of its ``artifacts`` is a path relative to the working directory, below it (:func:`artifact_problems`), so that
@@ -44,6 +45,7 @@ listed, opened and graded as before.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -97,6 +99,13 @@ MAX_OUTPUT_BYTES = 64 * 2**20
 DEFAULT_REPLAY_ADDRESS_SPACE_BYTES: int | None = None
 #: The largest ``tests/gen/grader.json``.
 MAX_MANIFEST_BYTES = 64 * 1024
+#: How deeply a runtime task's ``task.toml``, and the template, may nest tables and arrays, the document's own table
+#: included: deeper TOML is refused, before it is parsed where its text shows it (:func:`load_toml`).  Python's TOML
+#: parser gives up at depths of its own, all deeper than this: where the stack it was called with reaches the
+#: recursion limit (about 330 inline tables deep from a shallow stack), and, in recent 3.13 and 3.14 releases, at a
+#: dotted key of more parts than that limit, which 3.12 parses in time quadratic in its parts.  So what is refused is
+#: the same on every Python.
+MAX_TOML_DEPTH = 64
 #: The most problems a refusal lists.
 MAX_PROBLEMS = 20
 #: The store's directory when ``store`` is None: in the run's directory, else in the Harbor cache.
@@ -126,6 +135,22 @@ _REFUSED_ENVIRONMENT_FILES = (
     ("docker-compose.yaml", "a runtime task runs in one sandbox, never a multi-container stack"),
 )
 _CONFIG_KEYS = ("images", "template", "verifier_user", "verifier_provider_options", "max_bytes", "store")
+# What toml_text_depth reads a TOML text by.  First, in one pass, each string (tried as a multi-line one first; one that
+# never ends runs to the end of its line, or a multi-line one to the end of the text) and each comment, which each
+# become one character of a bare key; then the brackets left, and the dotted keys left (bare keys joined by dots, a
+# string among them now a bare key too), each tried from its first character only.  An alternative for a string or a
+# comment whose opening matches goes on to match, and no repetition gives back what it took, so each pass is linear in
+# the text's length.
+_TOML_STRING_OR_COMMENT = re.compile(
+    r'"""(?:[^"\\]++|\\[\s\S]|"(?!""))*+(?:"{3,5}|\\?\Z)'
+    r"|'''(?:[^']++|'(?!''))*+(?:'{3,5}|\Z)"
+    r'|"(?:[^"\\\n]++|\\[^\n])*+"?'
+    r"|'[^'\n]*+'?"
+    r"|#[^\n]*+"
+)
+_TOML_NOT_BRACKET = re.compile(r"[^\[\]{}]+")
+_TOML_DOTTED_KEY = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]++(?:[ \t]*+\.[ \t]*+[A-Za-z0-9_-]++)++")
+_BRACKET_STEP = {"[": 1, "{": 1, "]": -1, "}": -1}
 # The launcher's entry point, which a verifier runs as `bash /tests/test.sh`: the image's python3 runs the launcher
 # beside it, and without one the grade is a fault on the trusted side, never a score.
 TEST_SH = """#!/bin/sh
@@ -148,7 +173,8 @@ echo "platoon launcher: the verifier image has no python3, which the launcher ru
 class RuntimeTasksConfig:
     """How an environment entry's runtime tasks run: ``service_kwargs.runtime_tasks`` of a Harbor environment.
 
-    Built from a mapping of its fields (:meth:`coerce`), where ``template`` may name a TOML file.  The template must
+    Built from a mapping of its fields (:meth:`coerce`), where ``template`` may name a TOML file.  The template nests
+    tables and arrays at most 64 levels deep (:data:`MAX_TOML_DEPTH`), as a runtime task's ``task.toml`` must; it must
     give the agents and the verifier no network (``[environment] network_mode = "no-network"``), grade in a separate
     verifier (``[verifier] environment_mode = "separate"``) that runs the task's own image (no
     ``[verifier.environment] docker_image``, whose image would bring its own ``/tests``), and name one of ``images`` as
@@ -186,6 +212,10 @@ class RuntimeTasksConfig:
             raise ValueError(
                 f"runtime_tasks.template must be a task.toml's tables, or a TOML file, got {self.template!r}"
             )
+        if toml_depth(self.template) > MAX_TOML_DEPTH:
+            raise ValueError(
+                f"runtime_tasks.template is nested too deeply: more than {MAX_TOML_DEPTH} levels of tables and arrays"
+            )
         object.__setattr__(self, "template", _plain(self.template))
         if problems := template_problems(self.template, self.images):
             raise ValueError("runtime_tasks.template cannot be runtime tasks' task.toml: " + "; ".join(problems))
@@ -218,8 +248,9 @@ class RuntimeTasksConfig:
         if isinstance(template, str | os.PathLike):
             path = Path(template).expanduser()
             try:
-                options["template"] = tomllib.loads(path.read_text())
-            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+                options["template"] = load_toml(path.read_text())
+            # A TOMLDecodeError, a bad encoding, and an integer past Python's digit limit are all ValueErrors.
+            except (OSError, ValueError) as exc:
                 raise ValueError(f"runtime_tasks.template: {path}: {exc}") from exc
         if "images" not in options or "template" not in options:
             raise ValueError("runtime_tasks needs images and a template")
@@ -471,6 +502,56 @@ def read_grader_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
         return None, problems
     plain_replay = None if replay is None else {"command": list(replay["command"]), "outputs": list(replay["outputs"])}
     return {"command": list(manifest["command"]), "replay": plain_replay}, []
+
+
+class TomlNestedTooDeeply(ValueError):
+    """TOML that nests tables and arrays more than :data:`MAX_TOML_DEPTH` levels deep (:func:`load_toml`)."""
+
+
+def load_toml(text: str) -> dict[str, Any]:
+    """The TOML document ``text``: a :class:`TomlNestedTooDeeply` for one that nests more than
+    :data:`MAX_TOML_DEPTH` levels deep, refused before it is parsed where its text shows that (:func:`toml_text_depth`),
+    else once it is parsed (:func:`toml_depth`), and a ``tomllib.TOMLDecodeError`` for one that is not TOML.  Python's
+    parser then never reaches the depths at which it gives up, which differ between Pythons."""
+
+    if toml_text_depth(text) <= MAX_TOML_DEPTH:
+        document = tomllib.loads(text)
+        if toml_depth(document) <= MAX_TOML_DEPTH:
+            return document
+    raise TomlNestedTooDeeply(f"nested too deeply: more than {MAX_TOML_DEPTH} levels of tables and arrays")
+
+
+def toml_text_depth(text: str) -> int:
+    """How deeply the TOML ``text`` nests, read from its text, never by parsing it: one more (its own table) than the
+    most arrays and inline tables (or brackets of a table's header) that any start of it opens and leaves open outside
+    its strings and comments, or the most parts of a dotted key in it, if that is more.  A parser that stops at an
+    error was never deeper, and a TOML document nests at least as deeply (:func:`toml_depth`) unless this is 2, the
+    parts of a float.  It takes time linear in the text's length."""
+
+    text = _TOML_STRING_OR_COMMENT.sub("_", text)
+    brackets = _TOML_NOT_BRACKET.sub("", text)
+    opened = max(itertools.accumulate(map(_BRACKET_STEP.__getitem__, brackets), initial=0))
+    parts = max((key.count(".") for key in _TOML_DOTTED_KEY.findall(text)), default=0) + 1
+    return max(opened + 1, parts)
+
+
+def toml_depth(value: Any) -> int:
+    """How many levels of tables and arrays (mappings, lists and tuples) ``value``, TOML as Python holds it, nests, its
+    own included, counted without recursion and only up to one past :data:`MAX_TOML_DEPTH`."""
+
+    deepest, pending = 0, [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, Mapping):
+            items = item.values()
+        elif isinstance(item, list | tuple):
+            items = item
+        else:
+            continue
+        deepest = max(deepest, depth)
+        if depth <= MAX_TOML_DEPTH:
+            pending.extend((inner, depth + 1) for inner in items)
+    return deepest
 
 
 def task_digest(task_dir: Path) -> str:
@@ -762,13 +843,18 @@ def _layout(task_dir: Path) -> tuple[dict[str, Any] | None, list[str]]:
 
 
 def _task_toml(task_dir: Path, problems: list[str]) -> dict[str, Any] | None:
-    """The task's ``task.toml``, or None with why not added to ``problems``."""
+    """The task's ``task.toml`` (:func:`load_toml`), or None with why not added to ``problems``."""
 
     try:
-        return tomllib.loads((task_dir / CONFIG_FILENAME).read_text())
+        return load_toml((task_dir / CONFIG_FILENAME).read_text())
     except FileNotFoundError:
         problems.append(f"{CONFIG_FILENAME} is missing")
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+    except TomlNestedTooDeeply:
+        problems.append(
+            f"{CONFIG_FILENAME} is nested too deeply to read as TOML: more than {MAX_TOML_DEPTH} levels of tables and "
+            "arrays"
+        )
+    except (OSError, ValueError) as exc:  # TOMLDecodeError, a bad encoding, and an integer past Python's digit limit
         problems.append(f"{CONFIG_FILENAME}: {exc}")
     return None
 

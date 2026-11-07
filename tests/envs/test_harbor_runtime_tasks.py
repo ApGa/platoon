@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 from collections.abc import Mapping
@@ -214,6 +215,23 @@ def test_runtime_verifier_options_need_a_provider_named_by_its_name(tmp_path: Pa
             provider=ProcessProvider(tmp_path),
             runtime_tasks={"images": IMAGES, "template": TEMPLATE, "verifier_provider_options": {"fakeroot": True}},
         )
+
+
+def test_a_config_refuses_a_template_nested_deeper_than_a_runtime_task_may_be(tmp_path: Path):
+    """A template that nests deeper than a runtime task's ``task.toml`` may (``runtime.MAX_TOML_DEPTH``), which no task
+    could then match, is refused, as a mapping and as a TOML file, and the file before it is parsed where its text
+    shows it, the same way on every Python."""
+
+    deep: dict[str, Any] = {}
+    for _ in range(100_000):
+        deep = {"d": deep}
+    with pytest.raises(ValueError, match="runtime_tasks.template is nested too deeply: more than 64 levels"):
+        RuntimeTasksConfig.coerce({"images": IMAGES, "template": {**TEMPLATE, "metadata": deep}})
+    template = tmp_path / "template.toml"
+    for deeply in ("deep = " + "[" * 100_000, ".".join(["d"] * 100_000) + " = 1"):
+        template.write_text(f"{deeply}\n{to_toml(TEMPLATE)}")
+        with pytest.raises(ValueError, match=re.escape(f"runtime_tasks.template: {template}: nested too deeply")):
+            RuntimeTasksConfig.coerce({"images": IMAGES, "template": str(template)})
 
 
 def test_the_store_is_in_the_runs_directory_else_in_the_harbor_cache(tmp_path: Path, monkeypatch):
@@ -494,6 +512,107 @@ def test_platoon_reads_a_runtime_tasks_json_no_deeper_than_its_launcher_does(tmp
     )
     assert (outcome.status, outcome.failure_kind) == ("invalid", "verifier_generated_unfinished")
     assert outcome.reason is not None and "it left no report" in outcome.reason
+
+
+# A task.toml nested deeper than runtime tasks may be (runtime.MAX_TOML_DEPTH, 64 levels with its own table), each
+# written around the honest one: arrays and inline tables that every Python's parser takes, arrays that every Python's
+# parser gives up on (a RecursionError), a dotted key that recent 3.13 and 3.14 releases give up on while 3.12 parses
+# it, and a header and a key, each shallow enough, that nest too deeply together.
+DEEP_TOML = {
+    "arrays": lambda toml: "deep = " + "[" * 64 + "]" * 64 + "\n" + toml,
+    "inline-tables": lambda toml: "deep = " + "{d = " * 64 + "1" + "}" * 64 + "\n" + toml,
+    "beyond-every-parser": lambda toml: "deep = " + "[" * 100_000 + "\n" + toml,
+    "dotted-key": lambda toml: ".".join(["d"] * 2_000) + " = 1\n" + toml,
+    "header-and-key": lambda toml: toml + "[" + ".".join(["h"] * 40) + "]\n" + ".".join(["k"] * 40) + " = 1\n",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("deepen", DEEP_TOML.values(), ids=DEEP_TOML.keys())
+async def test_a_task_toml_nested_too_deeply_is_refused_the_same_way_on_every_python(tmp_path, rootful, store, deepen):
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources")
+    (source / "task.toml").write_text(deepen((source / "task.toml").read_text()))
+
+    made = await service.materialize(source)
+
+    assert made.problems == (
+        "task.toml is nested too deeply to read as TOML: more than 64 levels of tables and arrays",
+    )
+    assert [path.name for path in store.iterdir()] == [".staging"] and list((store / ".staging").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_a_task_toml_whose_integer_python_cannot_read_is_refused_not_raised(tmp_path, rootful, store):
+    """``tomllib`` reads an integer with ``int()``, which raises a plain ``ValueError`` (no ``TOMLDecodeError``) past
+    Python's limit on the digits of an integer: a refusal, as any other unreadable ``task.toml`` is."""
+
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources")
+    (source / "task.toml").write_text("big = " + "1" * 4_301 + "\n" + (source / "task.toml").read_text())
+
+    made = await service.materialize(source)
+
+    assert len(made.problems) == 1 and made.problems[0].startswith("task.toml: ")
+    assert "4300 digits" in made.problems[0]
+
+
+def test_a_template_whose_integer_python_cannot_read_is_refused_with_its_path(tmp_path: Path):
+    template = tmp_path / "template.toml"
+    template.write_text("big = " + "1" * 4_301 + "\n" + to_toml(TEMPLATE))
+    with pytest.raises(ValueError, match=re.escape(f"runtime_tasks.template: {template}: ")):
+        RuntimeTasksConfig.coerce({"images": IMAGES, "template": str(template)})
+
+
+@pytest.mark.parametrize(
+    ("text", "depth"),
+    [
+        ("", 1),  # the document's own table
+        ("a = 1", 1),
+        ("a = [1, [2, {b = 3}]]", 4),
+        ("a.b.c = 1", 3),  # a dotted key's parts
+        ("a . 'b.c' . \"d.e\" = 1", 3),  # a quoted key's dots are its text
+        ("[a.b]\nc = 1", 2),  # a header's brackets and its key's parts
+        ("[[a]]", 3),
+        ("a = '[[[' # [[[", 1),  # brackets in strings and comments are text
+        ('a = "\\"[[[\\\\" # ]', 1),  # escapes: a quote, a backslash
+        ('a = """\n"[[""\\"""[{"""', 1),  # quotes in a multi-line string, which ends at three
+        ("a = '''\n[[[''''\nb = [1]", 2),  # a multi-line literal string ending in a quote
+        ("a = " + "[" * 3, 4),  # what a text opens counts, closed or not
+        ('a = "[[\nb = [[', 3),  # a string that never ends runs to the end of its line
+        ("a = 1.5", 2),  # a float's two parts, which never make a document too deep alone
+        ("]]][", 1),  # a parser stops at the first ]
+    ],
+)
+def test_toml_text_depth_reads_how_deeply_a_text_nests_without_parsing_it(text, depth):
+    assert runtime.toml_text_depth(text) == depth
+
+
+def test_load_toml_refuses_toml_nested_deeper_than_runtime_tasks_may_be():
+    """TOML at ``MAX_TOML_DEPTH`` parses, on every Python; a level deeper is refused, before it is parsed where its text
+    shows it (so never where a Python's parser would give up, or take a key's parts in quadratic time), else once it is
+    parsed, as a ``ValueError``, as text that is not TOML is."""
+
+    limit = runtime.MAX_TOML_DEPTH
+    for text in (
+        "a = " + "[" * (limit - 1) + "]" * (limit - 1),
+        "a = " + "{b = " * (limit - 1) + "1" + "}" * (limit - 1),
+        ".".join(["a"] * limit) + " = 1",
+        "[" + ".".join(["h"] * 32) + "]\n" + ".".join(["k"] * 32) + " = 1",
+    ):
+        assert runtime.toml_depth(runtime.load_toml(text)) == limit
+    assert runtime.load_toml('a = "' + "[" * 100_000 + '"') == {"a": "[" * 100_000}
+    for text in (
+        "a = " + "[" * limit + "]" * limit,
+        "a = " + "{b = " * limit + "1" + "}" * limit,
+        "a = " + "[" * 100_000,
+        ".".join(["a"] * (limit + 1)) + " = 1",
+        ".".join(["a"] * 100_000),  # no TOML: a key without a value
+        "[" + ".".join(["h"] * 33) + "]\n" + ".".join(["k"] * 33) + " = 1",
+    ):
+        with pytest.raises(runtime.TomlNestedTooDeeply, match="nested too deeply: more than 64 levels") as refused:
+            runtime.load_toml(text)
+        assert isinstance(refused.value, ValueError)
 
 
 # ----------------------------------------------------------------------------------------------------------- sessions

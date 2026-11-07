@@ -1795,7 +1795,7 @@ else:
 | Option | Default | Meaning |
 |---|---|---|
 | `images` | | The `docker_image` names a runtime task may give, each with the image its sandboxes run: a `.sif` or `.sqsh` file or an absolute path as written, or a registry reference, which gets `docker://` |
-| `template` | | The `task.toml` every runtime task has but for its `[task] name` and its `artifacts`: a table, or a TOML file. It gives the agents and the verifier no network, grades in a separate verifier that runs the task's own image (no `[verifier.environment] docker_image`, whose image would bring its own `/tests`), and names one of `images`; the service refuses one that does not when it is built |
+| `template` | | The `task.toml` every runtime task has but for its `[task] name` and its `artifacts`: a table, or a TOML file. It nests tables and arrays at most 64 levels deep, gives the agents and the verifier no network, grades in a separate verifier that runs the task's own image (no `[verifier.environment] docker_image`, whose image would bring its own `/tests`), and names one of `images`; the service refuses one that does not when it is built |
 | `verifier_user` | `honor` | What a runtime task's `[verifier].user` gets, in place of the entry's `verifier_user`. The launcher runs as root: a template whose `[verifier] user` is root and `honor`, on verifiers' sandboxes that give root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
 | `verifier_provider_options` | none | Laid over the entry's `verifier_provider_options` (else its `provider_options`) for runtime tasks' verifiers only; the entry's other verifiers keep theirs. A run's reaping, and `platoon sandbox reap`, look for their sandboxes with these options too |
 | `max_bytes` | 256 MiB | The most a runtime task's files may hold |
@@ -1806,6 +1806,9 @@ them patched. It copies the directory's regular files and directories, and refus
 `problems`:
 
 - a symbolic link, a device, a FIFO or a socket; more than `max_bytes` of files; more than 10,000 entries;
+- a `task.toml` that nests tables and arrays more than 64 levels deep, its own table and those a dotted key names
+  included (`task.toml is nested too deeply to read as TOML`), before it is parsed where its text shows that, the same
+  way on every Python;
 - a `task.toml` that differs from the template anywhere but its `[task] name` and its `artifacts`, each difference
   named: a network, GPUs, another image, the verifier's mode (`task.toml sets [environment] network_mode to "public",
   and the template to "no-network"`);
