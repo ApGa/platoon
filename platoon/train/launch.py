@@ -134,8 +134,9 @@ async def _train_without_rollouts(config: PlatoonTinkerRLTrainerConfig) -> None:
 def _check_environments(
     config: PlatoonTinkerRLTrainerConfig,
 ) -> tuple[dict[str, entry_settings.EntrySettings], EnvironmentConfig]:
-    """Each entry's own training settings, laid over the run's; and the run's environment, once the environments'
-    packages are imported and their mixture pools, routes and harness toolchains checked, before any task is listed."""
+    """Each entry's own training settings, laid over the run's, their warnings logged once the environments' packages
+    are imported; and the run's environment, once its mixture pools, routes and harness toolchains are checked, before
+    any task is listed."""
 
     from platoon.eval.config_defs import sample_timeout_note
 
@@ -144,8 +145,10 @@ def _check_environments(
     logger.info(sample_timeout_note("train.sample_timeout_seconds", config.train.sample_timeout_seconds))
     # Each entry's own training settings, laid over the run's (checked when the config loaded).
     settings = entry_settings.entry_settings(config)
-    entry_settings.log_warnings(config, settings)
+    # The packages first, which register the components the entries name: a warning reads the class flag of the
+    # credit estimator a package registers (credits_single_members), also in a supervised start's fresh process.
     AutoEnvironment.load(config)
+    entry_settings.log_warnings(config, settings)
     environment = AutoEnvironment.from_config(config)
     check_mixture_pools(AutoEnvironment.environments(config))  # before any env server is contacted
     check_environment_routes(AutoEnvironment.environments(config))  # before any task is listed
@@ -289,7 +292,8 @@ def _build_workflows(
     workflow_cls = components.workflow_cls
     group_kwargs = {**worker_package_kwargs(workflow_cls, config), **label_kwargs(workflow_cls, config)}
     views = credit_registry.policy_views(policies) if components.credit else {}  # what estimators read of each
-    entry_credit = credit_registry.build_entry_credit(components.credit, settings, views)
+    own_bounds = policy_spec.own_staleness_bounds(config)  # the policies whose rows have a bound of their own
+    entry_credit = credit_registry.build_entry_credit(components.credit, settings, views, own_bounds)
     setups = [
         _workflow_setup(phase, config, components, policies, settings, group_kwargs, entry_credit, views)
         for phase in ("train", "eval")

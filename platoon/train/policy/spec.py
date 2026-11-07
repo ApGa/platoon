@@ -244,6 +244,19 @@ def horizon_bound(config: Any) -> int | None:
     return min(bounded) if bounded else None
 
 
+def own_staleness_bounds(config: Any) -> dict[PolicyId, int]:
+    """The trained policies whose rows have a staleness bound of their own, each with it, by id: a ``policies:``
+    entry's ``max_staleness``, which the stale filter judges the policy's rows of every entry by in place of the
+    entry's bound.  Main's rows always take their entry's, so main is never here."""
+
+    declared = _declared(config)
+    return {
+        policy: declared[policy].max_staleness
+        for policy in trained_policies(config)[1:]
+        if getattr(declared[policy], "max_staleness", None) is not None
+    }
+
+
 # A policy's id: a lowercase letter, then lowercase letters, digits, ``_`` and ``-``, 32 characters at most.
 POLICY_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 # The root agent's role (the gateway's AgentSession.role), whose agent samples agents.policy whatever agents.roles says.

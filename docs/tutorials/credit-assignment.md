@@ -225,7 +225,7 @@ group is kept.
 | `train.workflow_config.filter_errors` | `true` | Suppress positive-advantage error tokens |
 | `train.workflow_config.filter_zero_advantage_datums` | `true` | Skip the model pass for all-zero-advantage datums. A step whose every advantage is zero takes no optimizer update either way, under the `cispo`, `ppo` and `importance_sampling` losses with no `loss_fn_config` keys but their clip thresholds |
 | `train.workflow_config.min_successful_group_size` | `1` | Fewest trainable rollouts (completed, `scored` roots) a group needs to train |
-| `environments[].credit`, `credit_options` | null: step 5 above | An entry's credit estimator (experimental): `group`, `keyed` (each agent centered on the group's agents of its task, policy, role or depth), a registered name or `module:Class` |
+| `environments[].credit`, `credit_options` | null: step 5 above | An entry's credit estimator (experimental): `group`, `keyed` (each agent centered on the group's agents of its task, policy, role or depth), `running` (each agent centered on running statistics of the groups that settled before it, so that groups of one rollout train), a registered name or `module:Class` |
 
 The keys that act on one group (`group_size`, `leave_one_out_baseline`, `min_successful_group_size`, `filter_errors`,
 `filter_message_actions` and the subagent datum sampling) may differ by environment: an entry's own `workflow_config`

@@ -1,10 +1,11 @@
 """A group's credit under its entry's credit estimator (``environments[].credit``, :mod:`platoon.train.credit.api`), as
 ``GroupRolloutWorkflow`` runs it: the estimator of the group being run (``_entry_estimator``), the group the estimator
-sees (``_credit_group``: the members that returned a result, their rows, and, for an estimator that reads agents,
-their agents from the workers' tags), and the group's output once it is credited (``_credited_output``).  The
-estimator's ``assign`` itself is awaited through :func:`platoon.train.credit.runtime.assign_credit`; a group whose
-credit failed because a policy's scoring did (``_credit_failed``) trains nothing.  Without an estimator the workflow
-centers each member's rows itself (``assign_advantages``), as it always did, and none of this runs.
+sees (``_credit_group``: the members that returned a result, their rows with the versions they were sampled at, for an
+estimator that reads agents their agents from the workers' tags, and the task's own columns), and the group's output
+once it is credited (``_credited_output``).  The estimator's ``assign`` itself is awaited through
+:func:`platoon.train.credit.runtime.assign_credit`; a group whose credit failed because a policy's scoring did
+(``_credit_failed``) trains nothing.  Without an estimator the workflow centers each member's rows itself
+(``assign_advantages``), as it always did, and none of this runs.
 
 In a run that trains several policies, each row must say which policy it trains, so that the step hands it to that
 policy's learner: the workers tag every row with the agent that produced it, the estimator sees the group's agents, and
@@ -16,12 +17,13 @@ name, so to replace one, replace the method, on the class or an instance, not th
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
+from platoon.train.components import platoon_column
 from platoon.train.credit.api import AgentRun, CreditGroup, MemberRollout, PolicyView, ScoringFailed, TrainingSample
 from platoon.train.credit.runtime import Credit
-from platoon.train.labels import task_label
+from platoon.train.labels import label_text, task_label
 from platoon.train.policy.spec import MAIN, PolicyId
 from platoon.train.workflow.context import current_entry
 from platoon.train.workflow.output import GroupOutput, PolicyGroupOutput
@@ -57,10 +59,10 @@ def _credit_group(
 ) -> CreditGroup:
     """The group an estimator credits: the members that returned a result (``results``), in the group's order, each
     with its rows and, when ``tagged`` (the estimator reads agents), its agents, each row of the policy its agent
-    samples (``main`` untagged); the task of row ``data``, its label and its entry, the entry's settings, the run's
-    policies as estimators read them (``policy_views``, which ``platoon train`` gives the training workflow; without
-    them, ``main``'s from the workflow's model info) with each one's version now, and where the group's statistics
-    go."""
+    samples (``main`` untagged); the task of row ``data``, its label, its entry and its own columns
+    (:func:`task_columns`), the entry's settings, the run's policies as estimators read them (``policy_views``, which
+    ``platoon train`` gives the training workflow; without them, ``main``'s from the workflow's model info) with each
+    one's version now, and where the group's statistics go."""
 
     views = workflow.policy_views
     if not views:
@@ -76,7 +78,22 @@ def _credit_group(
         policies=dict(views),
         versions={policy: view.version for policy, view in views.items()},
         stats=workflow._group_stats(),
+        columns=task_columns(data),
     )
+
+
+def task_columns(data: Any) -> dict[str, str]:
+    """The task's own columns of its dataset row ``data``, as an estimator reads them (``CreditGroup.columns``): each
+    column but platoon's own (``task_id``, ``_platoon*``), as text, as a label reads it
+    (:func:`~platoon.train.labels.label_text`), leaving out a column whose value is empty or not a scalar."""
+
+    if not isinstance(data, Mapping):
+        return {}
+    return {
+        name: text
+        for name, value in data.items()
+        if isinstance(name, str) and not platoon_column(name) and (text := label_text(value)) is not None
+    }
 
 
 def _credit_failed(workflow: "GroupRolloutWorkflow", data: dict, error: ScoringFailed) -> str:
@@ -90,22 +107,40 @@ def _credit_failed(workflow: "GroupRolloutWorkflow", data: dict, error: ScoringF
 
 
 def member_rollout(index: int, result: TrajectoryCollectionResult, policy: PolicyId, *, tagged: bool) -> MemberRollout:
-    """Member ``index``'s rollout as an estimator sees it: each of its rows, of ``policy``; when ``tagged``, each row
-    with the agent that produced it, of the policy that agent samples, and every agent of its tree
-    (:func:`agent_runs`)."""
+    """Member ``index``'s rollout as an estimator sees it: each of its rows, of ``policy``, with the version it was
+    sampled at (:func:`sampled_versions`); when ``tagged``, each row with the agent that produced it, of the policy
+    that agent samples, and every agent of its tree (:func:`agent_runs`)."""
 
     task_reward, valid = result.task_reward, result.task_reward_valid
+    versions = sampled_versions(result)
     if not tagged:
-        samples = [TrainingSample(datum, policy, index) for datum in result.datums]
+        samples = [
+            TrainingSample(datum, policy, index, version=version)
+            for datum, version in zip(result.datums, versions, strict=True)
+        ]
         return MemberRollout(index, samples, [], task_reward, valid, result)
     agents = agent_runs(result, policy)
     samples = []
-    for datum, trajectory in zip(result.datums, result.datum_trajectories or (), strict=True):
+    for datum, trajectory, version in zip(result.datums, result.datum_trajectories or (), versions, strict=True):
         agent = agents[trajectory]
-        sample = TrainingSample(datum, agent.policy, index, agent.agent_id, agent.role, trajectory, agent.depth)
+        sample = TrainingSample(
+            datum, agent.policy, index, agent.agent_id, agent.role, trajectory, agent.depth, version=version
+        )
         agent.samples.append(sample)
         samples.append(sample)
     return MemberRollout(index, samples, list(agents.values()), task_reward, valid, result)
+
+
+def sampled_versions(result: TrajectoryCollectionResult) -> list[int | None]:
+    """The version each of a member's rows was sampled at, in the order of its datums: its own, the oldest its model
+    calls sampled, or its rollout's when one of them recorded none (``own_versions``, which the conversion gives
+    whatever ``train.stale_filter`` is); for a result whose own versions do not match its datums in number (a
+    workflow that changed them after the conversion), None for each, so that each row reads the version its datum
+    carries."""
+
+    if len(result.own_versions) == len(result.datums):
+        return list(result.own_versions)
+    return [None] * len(result.datums)
 
 
 def agent_runs(result: TrajectoryCollectionResult, policy: PolicyId) -> dict[str, AgentRun]:

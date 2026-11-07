@@ -784,23 +784,25 @@ environments:
 | `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards, value for value | none |
 | `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key: under `[task, role]` the roots on the roots' mean and the subagents on the subagents', where `group` centers every agent on its rollout's root baseline | `key`: one or more of `task`, `policy`, `role` and `depth` (default `[task, policy, role]`); `leave_one_out` (default false): the mean of the other agents of its key, an agent alone in its key getting 0 |
 | `reverse_kl` | On-policy distillation: a frozen teacher scores every token the student sampled, and each action token's advantage is the negative reverse KL between them ([Distill a frozen teacher](#distill-a-frozen-teacher-experimental)) | `teacher` (required): a frozen policy of `policies:`; `kl_coef` (default 1); `reward_coef` (default 0): the weight of the row's reward centered on its member's baseline |
+| `running` | Each scored agent's rows centered on running statistics of the groups that settled before it began sampling, by its role and the stratum of the task's columns, and divided by a running scale: groups of one rollout train. Needs a staleness bound ([Credit groups of one rollout](#credit-groups-of-one-rollout-experimental)) | `strata` (default none), `priors` (default none), `half_life` (default 4), `shrink` (default 8), `clip` (default 3), `cap_penalties` (default true) |
 | a name an entry's `package` registers with `@credit_estimator`, or `module:Class` | yours ([Write a credit estimator](../extending/credit-estimators.md); [`examples/credit-by-role`](../../examples/credit-by-role/README.md) is one of about 40 lines) | its own |
 
 **Where it runs.** The training workflow awaits the entry's estimator once per group, in the trainer process, after
 every member of the group has settled; the error-token filter, the group's verdict and its output come after it, as
 without one. Under `train.permit_release: rollout`, the default, the members have returned their rollout permits by
 then; under `group` the group holds them, and in both modes its label slot, until the estimator returns. Evaluation never runs an
-estimator, so an evaluation's rollouts cost nothing more. An estimator that reads agents (`keyed`, `by_role`) has the
-rollout workers tag each row with the agent that produced it (worker protocol 3), and sees each member's agents: each
-agent's role (the root's is `policy`, a subagent's the role its harness minted it with, `subagent` for
-`ctx.agents.spawn`), its depth and parent, its rows, and its own reward, the processed reward of its trajectory, as
-the converter loaded it onto its action tokens. An agent that was not scored, interrupted or a child whose verifier
-gave no verdict (a judge error, an unparseable or a pending one), has no reward: it enters no baseline, and it has no
-rows. A row that reaches such an estimator without its tags (a workflow subclass that runs its members another way)
-fails its group, with an error that says why. An estimator that raises, or whose `assign` does not return within its
-`assign_timeout_seconds` (600 by default), stops the run with an error that names it and its entry; but a policy's
-scoring that fails (a teacher's service that raised or did not answer within its `sample_timeout_seconds`) fails only
-the group it was crediting, whose verdict is then `failed` and which trains nothing, counted under `credit/failures`.
+estimator, so an evaluation's rollouts cost nothing more. An estimator that reads agents (`keyed`, `running`,
+`by_role`) has the rollout workers tag each row with the agent that produced it (worker protocol 3), and sees each
+member's agents: each agent's role (the root's is `policy`, a subagent's the role its harness minted it with,
+`subagent` for `ctx.agents.spawn`), its depth and parent, its rows, and its own reward, the processed reward of its
+trajectory, as the converter loaded it onto its action tokens. An agent that was not scored, interrupted or a child
+whose verifier gave no verdict (a judge error, an unparseable or a pending one), has no reward: it enters no baseline,
+and it has no rows. A row that reaches such an estimator without its tags (a workflow subclass that runs its members
+another way) fails its group, with an error that says why. An estimator that raises, or whose `assign` does not return
+within its `assign_timeout_seconds` (600 by default), stops the run with an error that names it and its entry; but a
+policy's scoring that fails (a teacher's service that raised or did not answer within its `sample_timeout_seconds`)
+fails only the group it was crediting, whose verdict is then `failed` and which trains nothing, counted under
+`credit/failures`.
 
 **What loads.** The estimator resolves when the config loads (core's names, then names the entries' packages register,
 then `module:Class`), its options are checked against its schema and its `check` runs: an unknown name, an option it
@@ -817,7 +819,97 @@ as each group is filed, and each full checkpoint saves it with the groups it kee
 takes up both; a resume whose entry names another estimator than the one that saved the state starts it afresh, with a
 warning. Credit metrics go with the group, recorded in the step that trains it: `keyed` logs
 `credit/keyed/baselines` (the keys a group's agents fell into) and `credit/agent_advantage/abs_avg`, beside the
-`credit/baseline/*` of the workflow's own credit.
+`credit/baseline/*` of the workflow's own credit; `running` logs `credit/running/*`
+([below](#credit-groups-of-one-rollout-experimental)).
+
+## Credit groups of one rollout (experimental)
+
+A group of one rollout has no peers to center on: under the group baselines its root is centered on its own reward and
+never trains, which `platoon config validate` warns of for an entry that sets `group_size: 1`. `credit: running` credits
+each scored agent of such a group against running statistics of the entry's groups that settled before the agent began
+sampling: REINFORCE++'s baseline, scale and clip, with the step's batch replaced by decayed statistics, since an entry's
+groups settle apart and each is credited alone. It suits tasks too costly to roll out more than once per draw, and tasks
+that are each their own prompt, such as those of an environment generator (a paper-to-task pipeline, say) whose every
+draw writes one environment:
+
+```yaml
+train:
+  max_staleness: 4                    # running needs a staleness bound: how far back its statistics reach
+environments:
+  - name: generate
+    # service, harness, ...
+    workflow_config: {group_size: 1}
+    credit: running
+    credit_options:
+      strata: [kind, domain]          # task columns, coarsest first: a Harbor task's index fields, say
+      priors: priors/base-policy.yaml # where the statistics start, relative to the config file
+```
+
+Each scored agent's advantage, on every action token of its rows, is
+`clip((reward - baseline) / scale, -clip, clip)`, and 0 for a negative reward whose advantage would be positive
+(`cap_penalties`):
+
+- **Strata.** An agent's stratum is its task's values of the `strata` columns, in order (the task's own columns, which
+  an estimator reads as `CreditGroup.columns`: a Harbor task's index fields, a dataset loader's columns). Under
+  `[kind, domain]` a task of kind `masked` and domain `chemistry` is in the stratum `(masked, chemistry)`, below
+  `(masked)`, below the root that holds every sample. A task without one of the columns, or with an empty value, is
+  credited at the stratum above it, with a warning once per column.
+- **The baseline** of a stratum is its decayed mean reward shrunk toward its parent's, `(S + shrink * parent) / (W +
+  shrink)`, with `S` and `W` the decayed sums of its samples' rewards and weights, so that a stratum with few samples
+  reads mostly its parent's; the root's is its own mean. **The scale** is the decayed root mean square of the settled
+  samples' residuals, each its reward less the baseline it was credited against, and at least 0.1.
+- **Decay.** A sample enters the statistics at full weight when its group settles, and its weight halves each
+  `half_life` versions of its policy (each twice as many in the scale), so that each outcome counts at the share it
+  settles at, whether its rollout took a minute or an hour.
+- **The read.** An agent reads the statistics as they were when its policy reached the version it sampled at, the
+  oldest of its rows' (`TrainingSample.version`): only what settled before it began, so that how long its own group
+  took to settle does not change its baseline. The statistics are kept as far back as the policy's rows of the entry
+  may be old and still train, their staleness bound (a policy's own `policies.<id>.max_staleness` when it has one,
+  else the entry's `max_staleness`, else `train.max_staleness`), counted from the last settle: an agent that sampled
+  earlier, whose oldest row the stale filter drops, trains at 0. So an entry under `running` needs a bound:
+  `platoon config validate` and `platoon train` refuse a config without `train.max_staleness` (exit 78).
+- **Priors and the warm-up.** `priors` seed the statistics as `weight` samples at each prior mean and residuals of
+  their `scale`, which decay as samples do; they are a mapping, or the path of a YAML or JSON file that holds one,
+  such as a measurement of the policy before training. A prior's `stratum` holds the values as the task's columns hold
+  them: `[3]` for an integer column, `[true]` for a boolean one. Without priors, each agent trains at 0 until the
+  statistics it reads hold 32 settled samples.
+- **Roles and policies.** The agents of each role of each policy have statistics of their own, aged in that policy's
+  versions: the roots apart from their subagents, each role's from the same priors. A composite that credits each role
+  with an estimator of its own gives each its own options.
+- **Unscored agents.** An agent without a reward trains nothing and moves nothing, and so does one whose reward is no
+  finite number, which a reward gone wrong upstream gives (warned of once); a scored agent whose rows were left out
+  still settles.
+
+```yaml
+# priors/base-policy.yaml
+mean: -0.3        # the prior mean reward of every sample
+scale: 0.6        # the prior root mean square of the residuals
+weight: 16        # how many samples each prior weighs as (the default)
+strata:           # prior means of strata, any of them
+  - {stratum: [masked], mean: -0.2}
+  - {stratum: [masked, chemistry], mean: -0.1}
+```
+
+| Option | Default | What it sets |
+|---|---|---|
+| `strata` | `[]` | The task columns the baselines are kept by, coarsest first; none: one baseline |
+| `priors` | none | Where the statistics start: `mean` and `scale` (required), `weight` (16) and `strata`, inline or in a file |
+| `half_life` | `4` | The policy versions over which a sample's weight in the baselines halves; the scale's halves over twice as many |
+| `shrink` | `8` | How many samples a stratum's parent's baseline weighs as in the stratum's |
+| `clip` | `3` | The largest advantage, in either sign |
+| `cap_penalties` | `true` | A negative reward never gets a positive advantage, whatever its stratum's baseline |
+
+The statistics move only as each group settles, and are the estimator's state, which each full checkpoint saves with
+the groups it keeps, so a resume credits as the run would have: for each role, the oldest statistics a read may still
+need and every settle since, from which the resume rebuilds the rest exactly. A row of `checkpoints.jsonl` holds that
+inline: about one copy of the statistics, over the strata of recent samples, and the settles of the bound's versions,
+some 20 kB for a hundred strata, a bound of 10 and 16 settles a version. An entry that sets `group_size: 1` under
+`running` is not warned of. The step's metrics add, over the agents `running` credited:
+`credit/running/advantage/avg` (the mean advantage, about 0 while the baselines keep up),
+`credit/agent_advantage/abs_avg`, `credit/running/baseline/avg`, `credit/running/scale/avg`, `credit/running/age/avg`
+(the policy versions between an agent's sampling and its credit), and the shares of agents in the warm-up
+(`credit/running/warmup`), whose statistics were no longer kept (`credit/running/out_of_ring`), clipped
+(`credit/running/clipped`) and capped (`credit/running/capped`).
 
 ## Distill a frozen teacher (experimental)
 

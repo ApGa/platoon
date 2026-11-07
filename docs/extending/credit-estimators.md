@@ -2,9 +2,10 @@
 
 A credit estimator decides how a training group's rewards become the advantages its rows train with. Platoon's own are
 `group` (the workflow's own credit: each rollout centered on the group's completed-root baseline), `keyed` (each
-agent centered on the group's agents of its key: task, policy, role, depth) and `reverse_kl` (on-policy distillation:
-each token's negative reverse KL against a frozen teacher's score of it); this page shows how to write your own,
-register it and test it. What choosing one does to a run is in
+agent centered on the group's agents of its key: task, policy, role, depth), `reverse_kl` (on-policy distillation:
+each token's negative reverse KL against a frozen teacher's score of it) and `running` (each agent centered on running
+statistics of the groups that settled before it sampled, for groups of one rollout); this page shows how to write your
+own, register it and test it. What choosing one does to a run is in
 [Credit each environment's groups](../how-to/train-and-eval.md#credit-each-environments-groups-experimental).
 
 The credit API lives in `platoon.experimental` and is **experimental**: it is documented, and its names are in the
@@ -35,13 +36,19 @@ trainer process, after every member has settled. `group` is a `CreditGroup`:
 - `agents()` and `samples()`: every agent and every row of the group, member by member;
 - `task_id`, `label`, `entry`, the entry's training `settings`, the run's `policies` (`PolicyView`: id, renderer),
   each policy's version when `assign` began (`versions`), and `stats`, where the group's own metrics go (put yours
-  under `credit/`; the step that trains the group records them).
+  under `credit/`; the step that trains the group records them);
+- `columns`: the task's own columns, by name, each as text as a label reads it: the columns of its dataset row (a
+  Harbor task's index fields, a dataset loader's columns) but platoon's own (`task_id`, `_platoon*`), and none whose
+  value is empty or not a scalar. An estimator that keeps statistics by kind of task, as `running` does by its
+  `strata`, reads them here.
 
-A row is a `TrainingSample`: its `datum`, the `policy` that sampled it, its `member` and, when the estimator reads
-agents, its `agent_id`, `role`, `trajectory_id` and `depth`. `sample.advantages` and `sample.mask` read its
-advantages and which of its target tokens are actions; `sample.set_advantage(value)` sets one value on its action
-tokens, and `sample.set_advantages(values)` one value per target token, set on the action tokens only. A row the
-estimator leaves alone keeps what the converter loaded: its trajectory's processed reward on every action token.
+A row is a `TrainingSample`: its `datum`, the `policy` that sampled it, its `member`, the `version` of its policy it
+was sampled at (the oldest its own model calls sampled, whatever `train.stale_filter` is, or its rollout's when one of
+them recorded none) and, when the estimator reads agents, its `agent_id`, `role`, `trajectory_id` and `depth`.
+`sample.advantages` and `sample.mask` read its advantages and which of its target tokens are actions;
+`sample.set_advantage(value)` sets one value on its action tokens, and `sample.set_advantages(values)` one value per
+target token, set on the action tokens only. A row the estimator leaves alone keeps what the converter loaded: its
+trajectory's processed reward on every action token.
 
 An agent is an `AgentRun`: its `agent_id`, `trajectory_id`, its parent's trajectory (`parent_id`, none for the root),
 its `role` (the root's is `policy`; a subagent's is the role its harness minted it with, `subagent` for
@@ -53,8 +60,10 @@ unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows t
 counts.
 
 It is built once per start of the process and entry, `Class(setup, options)`: `setup` is a `CreditSetup` (its name as
-the config gives it, its entry, the entry's training settings, the run's policies by id, and `policy_views`, each
-policy as the estimator may read it), `options` its options parsed. Subclass `CreditEstimatorBase` for the defaults.
+the config gives it, its entry, the entry's training settings, the run's policies by id, `policy_views`, each policy as
+the estimator may read it, and `max_staleness`, how many of its own versions old each policy's rows of the entry may
+be and still train, by id, None for no bound), `options` its options parsed. Subclass `CreditEstimatorBase` for the
+defaults.
 
 An estimator that scores rows with another policy, a frozen teacher or judge the config declares under `policies:`,
 reads it from `setup.policy_views[policy_id]`, a `PolicyView`: `await view.score(datums)` gives that policy's logprob
@@ -107,13 +116,21 @@ A static `check(options, ctx)` (or the decorator's `check=`) refuses a config th
 `ctx` (`CreditCheckContext`) holds the entry, the run's policies and the whole loaded config. A resume whose entry
 names another estimator than the one that saved its state starts the new one afresh, with a warning.
 
+An entry whose groups have one rollout is warned of as it loads: under the group baselines such a group's root is
+centered on its own reward, and never trains. An estimator that gives a group of one member advantages of its own, as a
+running baseline across groups does, says so with the class flag `credits_single_members = True`
+(`CreditEstimatorBase` has it False), and the entries it credits are not warned of. The warning reads the flag of the
+class the entry names once its module is imported: `platoon config validate` and `platoon train` import the entries'
+packages first, but `platoon config validate --no-resolve` imports none, so it still warns of an entry whose estimator
+a package registers, or that names one as `module:Class`.
+
 ## Register it, or name it
 
 Register an estimator under a short name with `@credit_estimator(name, options=..., check=...)` in a module an entry's
 `package` names, so that it is imported before the estimators resolve; or name it in the config as `module:Class`,
-with no registration at all. Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds later) are
-reserved, whatever their case: registering one is an error, whatever was imported first, and so is registering a
-name twice. An unknown name is refused before the run starts, with the nearest name.
+with no registration at all. Core's names (`group`, `keyed`, `reverse_kl`, `running`, and `gae`, which platoon adds
+later) are reserved, whatever their case: registering one is an error, whatever was imported first, and so is
+registering a name twice. An unknown name is refused before the run starts, with the nearest name.
 
 ## Test it
 
@@ -142,7 +159,11 @@ See
 
 With one rollout per task (`group_size: 1`), a group has no peers to center on: the group mean is the rollout's own
 reward, and every advantage is 0. This estimator centers each member on a running mean of the entry's completed root
-rewards instead, which each settled group moves by `rate`; its state is that mean.
+rewards instead, which each settled group moves by `rate`; its state is that mean, and its class flag keeps the
+group-of-one warning off the entries it credits. Its metric goes under a name of its own, `credit/acme_running/`, apart
+from core's `credit/running/`. Core's `running` is the full form of it: baselines by role and stratum, a scale, decay
+by policy version, priors, and a read at the version each agent sampled at
+([Credit groups of one rollout](../how-to/train-and-eval.md#credit-groups-of-one-rollout-experimental)).
 
 ```python
 # acme_credit/running.py
@@ -165,6 +186,8 @@ class RunningOptions:
 class RunningBaseline(px.CreditEstimatorBase):
     """Each member's rows centered on a running mean of the entry's completed root rewards."""
 
+    credits_single_members = True  # a group of one trains: no warning for an entry of group_size 1
+
     def __init__(self, setup: px.CreditSetup, options: RunningOptions) -> None:
         super().__init__(setup, options)
         self.mean = 0.0
@@ -172,7 +195,7 @@ class RunningBaseline(px.CreditEstimatorBase):
     async def assign(self, group: px.CreditGroup) -> None:
         for sample in group.samples():
             sample.set_advantages(sample.advantages - self.mean)
-        group.stats.scalar(**{"credit/running/mean": self.mean})
+        group.stats.scalar(**{"credit/acme_running/mean": self.mean})
 
     def settle(self, group: px.CreditGroup) -> None:
         rewards = [member.task_reward for member in group.members if member.task_reward_valid]

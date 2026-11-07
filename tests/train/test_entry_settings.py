@@ -617,3 +617,19 @@ def test_warnings_name_a_group_of_one_and_a_raised_bound_without_a_limit(tmp_pat
         "environments[slow].max_staleness: 48 raises the run's bound (3), as a slow entry's does, but "
         "train.rollout_group_limits has no limit for it"
     )
+
+
+@pytest.mark.parametrize(
+    ("credit", "warned"),
+    [("running", False), ("keyed", True), ("group", True), ("acme.missing:Estimator", True), (None, True)],
+)
+def test_a_group_of_one_is_not_warned_of_under_an_estimator_that_credits_groups_of_one(tmp_path, credit, warned):
+    # running credits a group of one against the groups before it (credits_single_members); a name that does not
+    # resolve here, such as a package's before the package is imported, is warned of as before.
+    data = _with(workflow_config={"group_size": 1, "min_successful_group_size": 1}, credit=credit)
+    data["train"]["rollout_group_limits"] = {"slow": 1}
+
+    config = _load(tmp_path, data)
+    lines = entry_settings.warnings(config, entry_settings.entry_settings(config))
+
+    assert any("workflow_config.group_size is 1: a group of one rollout" in line for line in lines) is warned

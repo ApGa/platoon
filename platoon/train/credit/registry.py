@@ -1,12 +1,15 @@
 """Which credit estimator each environment entry credits its groups with: the ``credit`` component kind (RFC 0013's one
 discovery rule), and what a config chooses (``environments[].credit`` with its ``credit_options``, RFC 0016).
 
-An estimator is named by core's name (:data:`BUILTIN_CREDIT_ESTIMATORS`: ``group``, ``keyed``, ``reverse_kl``), by a
-name that a module an entry's ``package`` names registers (:func:`credit_estimator`), or as ``module:Class``
-(:func:`resolve_credit_estimator`).  When the config loads, each entry's estimator resolves, its options are parsed
-against its schema and its ``check`` runs (:func:`choose_credit`, exit 78 for any problem), and ``lock.json`` records
-it (:func:`credit_lock_records`); ``platoon train`` then builds each entry's estimator for the training workflow
-(:func:`build_entry_credit`), with the run's policies as estimators read them (:func:`policy_views`).  An entry without
+An estimator is named by core's name (:data:`BUILTIN_CREDIT_ESTIMATORS`: ``group``, ``keyed``, ``reverse_kl``,
+``running``), by a name that a module an entry's ``package`` names registers (:func:`credit_estimator`), or as
+``module:Class`` (:func:`resolve_credit_estimator`).  A core estimator's options that name files are relative to the
+config file (:func:`credit_path_options`).  When the config loads, each entry's estimator resolves, its options are
+parsed against its schema and its ``check`` runs (:func:`choose_credit`, exit 78 for any problem), and ``lock.json``
+records it (:func:`credit_lock_records`); ``platoon train`` then builds each entry's estimator for the training workflow
+(:func:`build_entry_credit`), with the run's policies as estimators read them (:func:`policy_views`) and the staleness
+bound of each one's rows of the entry.  Core's answers that a config's loading reads (:data:`CORE_PATH_OPTIONS`,
+:data:`CORE_SINGLE_MEMBER_CREDIT`) are tables here, so that loading imports no estimator.  An entry without
 ``credit`` keeps the workflow's own credit, today's ``group``, run as it always ran; in a run that trains several
 policies, ``keyed`` on ``[task, policy, role]`` instead (RFC 0021's D5: each agent of each policy and role on its own
 baseline), which ``lock.json`` records as it records a chosen one.  Core's built-ins are imported by name, so this
@@ -35,11 +38,17 @@ BUILTIN_CREDIT_ESTIMATORS: dict[str, str] = {
     "group": "platoon.train.credit.group:GroupCredit",
     "keyed": "platoon.train.credit.keyed:Keyed",
     "reverse_kl": "platoon.train.credit.reverse_kl:ReverseKL",
+    "running": "platoon.train.credit.running:Running",
 }
+# What core's estimators say of themselves, so that a config loads without importing them (they import Tinker and
+# torch): the options of each that name files (its options class's ``path_options``), and those that credit a group of
+# one member (their class flag ``credits_single_members``).  A test holds each table to its classes.
+CORE_PATH_OPTIONS: dict[str, tuple[str, ...]] = {"running": ("priors",)}
+CORE_SINGLE_MEMBER_CREDIT = frozenset({"running"})
 # Core's names, that of the estimator platoon adds included (gae): no package may register them.
 RESERVED_CREDIT_NAMES = frozenset({*BUILTIN_CREDIT_ESTIMATORS, "gae"})
 # Core's estimators, as messages name them.
-_CORE = "group, keyed and reverse_kl"
+_CORE = "group, keyed, reverse_kl and running"
 # The estimator of an entry that names none, in a run that trains several policies (RFC 0021, D5).
 SEVERAL_POLICIES_DEFAULT = "keyed"
 # What a registered name may be: no spaces, and neither ``:`` (module:Class) nor ``@``.
@@ -51,8 +60,8 @@ def credit_estimator(
 ) -> Callable[[R], R]:
     """Register a credit estimator class under ``name``, from a module that an environment entry's ``package`` names,
     so that configs can name it (``credit: <name>``); ``options`` sets its ``options_schema`` and ``check`` its
-    load-time check.  Core's names (``group``, ``keyed``, ``reverse_kl``, and ``gae``, which platoon adds) are
-    reserved, whatever their case and their ``-`` or ``_``; a name registered twice is an error."""
+    load-time check.  Core's names (``group``, ``keyed``, ``reverse_kl``, ``running``, and ``gae``, which platoon adds)
+    are reserved, whatever their case and their ``-`` or ``_``; a name registered twice is an error."""
 
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ValueError(f"a credit estimator's name is a word without spaces, ':' or '@', got {name!r}")
@@ -81,6 +90,15 @@ def _plain(name: str) -> str:
     """A name as it reads, whatever its case and its ``-`` or ``_``: ``Reverse-KL`` reads as ``reverse_kl``."""
 
     return name.casefold().replace("-", "_")
+
+
+def credit_path_options(name: Any) -> tuple[str, ...]:
+    """The ``credit_options`` of core's estimator ``name`` that name files (:data:`CORE_PATH_OPTIONS`: ``running``'s
+    ``priors``), which the config loader makes absolute against the config file's directory
+    (:func:`platoon.utils.config.resolve_input_paths`), importing nothing; none for any other name, such as a
+    package's, whose module a config file's loading does not import."""
+
+    return CORE_PATH_OPTIONS.get(name, ()) if isinstance(name, str) else ()
 
 
 def resolve_credit_estimator(ref: str) -> type:
@@ -122,13 +140,15 @@ def resolve_credit_estimator(ref: str) -> type:
 
 def estimator_problem(cls: Any) -> str | None:
     """Why ``cls`` is no credit estimator class, or None when it is one: a class whose ``assign(group)`` is a coroutine
-    function and whose ``needs_agents`` is a bool, whose ``settle``, if any, is synchronous, and that has both or
-    neither of ``state()`` and ``load_state(state)``."""
+    function and whose ``needs_agents`` is a bool, whose ``credits_single_members``, if any, is a bool, whose
+    ``settle``, if any, is synchronous, and that has both or neither of ``state()`` and ``load_state(state)``."""
 
     if not isinstance(cls, type) or not inspect.iscoroutinefunction(getattr(cls, "assign", None)):
         return "a class with async assign(group)"
     if not isinstance(getattr(cls, "needs_agents", None), bool):
         return "its needs_agents is no bool (True when it reads the group's agents)"
+    if not isinstance(getattr(cls, "credits_single_members", False), bool):
+        return "its credits_single_members is no bool (True when it credits a group of one member)"
     settle = getattr(cls, "settle", None)
     if settle is not None and (not callable(settle) or inspect.iscoroutinefunction(settle)):
         return "its settle(group) is no synchronous method: the run settles a group with no await"
@@ -257,22 +277,34 @@ def build_entry_credit(
     choices: Mapping[str, CreditChoice],
     settings: Mapping[str, Any],
     policy_views: Mapping[PolicyId, PolicyView] | None = None,
+    own_bounds: Mapping[PolicyId, int | None] | None = None,
 ) -> dict[str, Any]:
     """Each entry's estimator, by entry label, built as ``Class(setup, options)`` with the entry's training settings
-    (``settings``: each entry's :class:`~platoon.train.entry_settings.EntrySettings`, by label), and the run's policies
-    with their views (``policy_views``, the trainer's; without them, the one policy ``main``)."""
+    (``settings``: each entry's :class:`~platoon.train.entry_settings.EntrySettings`, by label), the run's policies
+    with their views (``policy_views``, the trainer's; without them, the one policy ``main``), and the staleness bound
+    of each policy's rows of the entry: the policy's own (``own_bounds``, by id:
+    :func:`~platoon.train.policy.spec.own_staleness_bounds`), else the entry's."""
 
     views = dict(policy_views or {})
     policies = tuple(views) or (MAIN,)
-    return {
-        label: choice.cls(
-            CreditSetup(
-                name=choice.name, entry=label, settings=settings[label].train, policies=policies, policy_views=views
-            ),
-            choice.options,
+    own = dict(own_bounds or {})
+    built = {}
+    for label, choice in choices.items():
+        entry = settings[label]
+        bounds = {
+            policy: own[policy] if own.get(policy) is not None else getattr(entry, "max_staleness", None)
+            for policy in policies
+        }
+        setup = CreditSetup(
+            name=choice.name,
+            entry=label,
+            settings=entry.train,
+            policies=policies,
+            policy_views=views,
+            max_staleness=bounds,
         )
-        for label, choice in choices.items()
-    }
+        built[label] = choice.cls(setup, choice.options)
+    return built
 
 
 def credit_lock_records(choices: Mapping[str, CreditChoice]) -> list[dict[str, Any]]:
