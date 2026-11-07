@@ -251,6 +251,10 @@ platoon.experimental.EntryInfo.seed: field int = 0
 platoon.experimental.EntryInfo.success_threshold: field float = 1.0
 platoon.experimental.EntryInfo.task_ids: field tuple[str, ...] = ()
 platoon.experimental.EntryInfo.weight: field float | None = None
+platoon.experimental.ForbiddenLiterals: @dataclass(frozen=True) class ForbiddenLiterals
+platoon.experimental.ForbiddenLiterals.path: field str
+platoon.experimental.ForbiddenLiterals.scan: field str = "python-numeric-literals/v1"
+platoon.experimental.ForbiddenLiterals.sources: field Sequence[str]
 platoon.experimental.GroupAdmission: class GroupAdmission(Protocol)
 platoon.experimental.GroupAdmission.admit: def admit(group: GroupRecord, stats: TaskStatsView) -> Admission | bool
 platoon.experimental.GroupRecord: @dataclass(frozen=True) class GroupRecord
@@ -371,6 +375,17 @@ platoon.experimental.PolicyView.score: async def score(datums: Sequence[tinker.D
 platoon.experimental.PolicyView.scorer: field Callable[[Sequence[tinker.Datum]], Awaitable[list[torch.Tensor]]] | None = None
 platoon.experimental.PolicyView.tokenizer: field Any = None
 platoon.experimental.PolicyView.version: property int
+platoon.experimental.ReplayChecks: @dataclass(frozen=True) class ReplayChecks
+platoon.experimental.ReplayChecks.coerce: classmethod def coerce(value: ReplayChecks | Mapping[str, Any]) -> ReplayChecks
+platoon.experimental.ReplayChecks.forbidden_literals: field ForbiddenLiterals | None = None
+platoon.experimental.ReplayChecks.settings: def settings() -> dict[str, Any]
+platoon.experimental.ReplayChecks.variants: field Sequence[ReplayVariant] = ()
+platoon.experimental.ReplayVariant: @dataclass(frozen=True) class ReplayVariant
+platoon.experimental.ReplayVariant.expected: field str
+platoon.experimental.ReplayVariant.inputs: field str
+platoon.experimental.ReplayVariant.meta: field Any = None
+platoon.experimental.ReplayVariant.name: field str
+platoon.experimental.ReplayVariant.tolerance: field float | Mapping[str, Any]
 platoon.experimental.RolloutLease: class RolloutLease(Protocol)
 platoon.experimental.RolloutLease.rollout: def rollout(index: int) -> AbstractAsyncContextManager[float]
 platoon.experimental.RolloutLease.size: property int

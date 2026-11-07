@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 from collections.abc import Mapping
@@ -22,7 +23,14 @@ import pytest
 
 import platoon.sandbox
 from platoon.envs.harbor import HarborEnvironmentService, runtime
-from platoon.envs.harbor.runtime import MaterializedTask, RuntimeTasksConfig, task_digest
+from platoon.envs.harbor.runtime import (
+    ForbiddenLiterals,
+    MaterializedTask,
+    ReplayChecks,
+    ReplayVariant,
+    RuntimeTasksConfig,
+    task_digest,
+)
 from platoon.envs.harbor.task import HarborTask
 from platoon.envs.service import EnvSetupError
 from platoon.sandbox import ExecResult, SandboxSpec
@@ -1240,3 +1248,406 @@ async def test_a_rollouts_deadline_counts_each_regrade_of_a_generated_grader(tmp
         service = make_service(tmp_path, rootful, store, runtime_tasks={"regrade": count})
         assert service.rollout_overhead_s(trusted) == once.rollout_overhead_s(trusted)
         assert service.rollout_overhead_s(generated) == once.rollout_overhead_s(generated) + count * regrade
+
+
+# --------------------------------------------------------------------------------------------------- replay checks
+
+CHECKS: dict[str, Any] = {
+    "variants": [
+        {
+            "name": "fifty",
+            "inputs": "tests/gen/variants/fifty/inputs",
+            "expected": "tests/gen/variants/fifty/expected.json",
+            "tolerance": {"default": 0.5, "keys": {"a.json#/answer": 1}},
+            "meta": {"covers": [[0, 1]]},
+        }
+    ],
+    "forbidden_literals": {"path": "tests/gen/forbidden.json", "sources": ["solve.py"]},
+}
+# The data of CHECKS, in the task's tests/gen: the variant's data.txt of 50, which gives an answer of 100, and the
+# answer as a forbidden literal.
+CHECK_FILES = {
+    "tests/gen/variants/fifty/inputs/data.txt": "50\n",
+    "tests/gen/variants/fifty/expected.json": json.dumps({"a.json#/answer": 100}),
+    "tests/gen/forbidden.json": json.dumps([{"value": 42, "tolerance": 0.5}]),
+}
+
+
+def _variant(**changes: Any) -> dict[str, Any]:
+    return {**CHECKS["variants"][0], **changes}
+
+
+def _untolerant() -> dict[str, Any]:
+    return {key: value for key, value in _variant().items() if key != "tolerance"}
+
+
+def _nested(depth: int) -> Any:
+    """A list ``depth`` levels deep."""
+
+    value: Any = 0
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_replay_checks_are_built_from_mappings_and_record_what_the_launcher_runs():
+    checks = ReplayChecks.coerce(CHECKS)
+
+    assert isinstance(checks.variants[0], ReplayVariant) and isinstance(checks.forbidden_literals, ForbiddenLiterals)
+    assert checks.settings() == {
+        "variants": [CHECKS["variants"][0]],
+        "forbidden_literals": {**CHECKS["forbidden_literals"], "scan": "python-numeric-literals/v1"},
+    }
+    assert ReplayChecks.coerce(checks) is checks
+    one = ReplayVariant(name="v", inputs="tests/gen/v/inputs", expected="tests/gen/v/expected.json", tolerance=0.25)
+    assert (one.tolerance, one.meta) == ({"default": 0.25, "keys": {}}, None)
+    assert ReplayChecks.coerce({"variants": [_variant(tolerance={"default": 0.25})]}).variants[0].tolerance == {
+        "default": 0.25,
+        "keys": {},
+    }
+    assert ReplayChecks.coerce({"variants": [_variant(tolerance=0)]}).variants[0].tolerance == {
+        "default": 0,
+        "keys": {},
+    }
+
+
+@pytest.mark.parametrize(
+    ("checks", "message"),
+    [
+        ({"variants": [_variant(name="fifty two")]}, "a replay variant's name must be letters"),
+        ({"variants": [_variant(inputs="tests/platoon/inputs")]}, "inputs must be a path of the task below tests/gen/"),
+        ({"variants": [_variant(inputs="environment/data")]}, "inputs must be a path of the task below tests/gen/"),
+        ({"variants": [_variant(inputs="tests/gen/../gen/x")]}, "inputs must be a path of the task below"),
+        ({"variants": [_variant(expected="/tests/gen/e.json")]}, "expected must be a path of the task below"),
+        (
+            {"variants": [_variant(expected="tests/gen/variants/fifty/inputs/e.json")]},
+            "its expected outputs lie in its inputs, which its replay would read",
+        ),
+        ({"variants": [_variant(), _variant()]}, "replay_checks name two variants alike"),
+        (
+            {"variants": [_variant(), _variant(name="nested", inputs="tests/gen/variants/fifty/inputs/more")]},
+            "replay variant nested's inputs lie in variant fifty's",
+        ),
+        (
+            {
+                "variants": [
+                    _variant(),
+                    _variant(name="other", inputs="tests/gen/o", expected="tests/gen/variants/fifty/inputs/o.json"),
+                ]
+            },
+            "replay variant other's expected outputs lie in variant fifty's inputs",
+        ),
+        (
+            {
+                "variants": [_variant()],
+                "forbidden_literals": {"path": "tests/gen/variants/fifty/inputs/f.json", "sources": ["s.py"]},
+            },
+            "the forbidden literals lie in replay variant fifty's inputs",
+        ),
+        ({"variants": [_variant(tolerance=-1)]}, "tolerance must be a number of 0 or more, or a mapping"),
+        ({"variants": [_variant(tolerance=True)]}, "tolerance must be a number of 0 or more"),
+        ({"variants": [_variant(tolerance={"default": 0, "margin": 1})]}, "or a mapping of a default and keys"),
+        ({"variants": [_variant(tolerance={"keys": {"a": 1}})]}, "or a mapping of a default and keys"),  # no default
+        ({"variants": [_untolerant()]}, "missing 1 required positional argument: 'tolerance'"),
+        ({"variants": [_variant(tolerance={"default": float("nan")})]}, "its tolerance's default must be a finite"),
+        ({"variants": [_variant(tolerance={"default": 0, "keys": {"a": -1}})]}, "its tolerance's keys must map output"),
+        ({"variants": [_variant(meta={1, 2})]}, "meta must be JSON"),
+        ({"variants": [_variant(meta="x" * 9000)]}, "more than a variant records (8192)"),
+        ({"variants": [_variant(meta=_nested(17))]}, "meta nests more than 16 levels deep"),
+        ({"variants": [_variant(meta=_nested(1200))]}, "meta nests more than 16 levels deep"),  # within 8 KiB
+        ({"variants": [_variant(meta=_nested(100_000))]}, "meta must be JSON: maximum recursion depth exceeded"),
+        (  # 8 KiB of meta each, which launch.json holds one number a line: less than its cap compact, more indented
+            {"variants": [_variant(name=f"v{n}", inputs=f"tests/gen/{n}", meta=[0] * 2700) for n in range(16)]},
+            "bytes of settings, more than a task's launcher settings take (262144)",
+        ),
+        ({"variants": [_variant(unknown=1)]}, "a replay variant: "),
+        ({"variants": ["fifty"]}, "a replay variant must be a ReplayVariant or a mapping"),
+        ({"variants": "fifty"}, "replay_checks.variants must be a list"),
+        ({"variants": [_variant(name=f"v{n}", inputs=f"tests/gen/{n}") for n in range(33)]}, "33 variants, more than"),
+        ({"forbidden_literals": {"path": "tests/gen/f.json", "sources": "solve.py"}}, "sources must list 1 to 64"),
+        ({"forbidden_literals": {"path": "tests/gen/f.json", "sources": []}}, "sources must list 1 to 64"),
+        ({"forbidden_literals": {"path": "tests/gen/f.json", "sources": ["../solve.py"]}}, "sources must list"),
+        ({"forbidden_literals": {"path": "tests/gen/f.json", "sources": ["a.py", "a.py"]}}, "sources must list"),
+        (
+            {"forbidden_literals": {"path": "tests/gen/f.json", "sources": ["analysis.R"]}},
+            "sources must be Python files (.py), which python-numeric-literals/v1 reads",
+        ),
+        ({"forbidden_literals": {"path": "tests/f.json", "sources": ["a.py"]}}, "path must be a JSON file of the task"),
+        (
+            {"forbidden_literals": {"path": "tests/gen/f.json", "sources": ["a.py"], "scan": "regex/v1"}},
+            "scan must be python-numeric-literals/v1",
+        ),
+        ({"variants": [], "tolerance": 1}, "replay_checks take variants and forbidden_literals, not tolerance"),
+    ],
+)
+def test_replay_checks_refuse_what_no_launcher_could_run(checks: dict[str, Any], message: str):
+    with pytest.raises(ValueError, match=re.escape(message)):
+        ReplayChecks.coerce(checks)
+
+
+@pytest.mark.asyncio
+async def test_materialize_records_the_replay_checks_in_the_tasks_launcher_settings(tmp_path, rootful, store):
+    """The checks are the caller's word, kept in the task's settings, so that the same directory with other checks is
+    another task; checks that check nothing are none."""
+
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources", files=CHECK_FILES)
+
+    checked, again = (
+        await service.materialize(source, replay_checks=CHECKS),
+        await service.materialize(source, replay_checks=ReplayChecks.coerce(CHECKS)),
+    )
+    plain, empty = await service.materialize(source), await service.materialize(source, replay_checks={})
+
+    assert checked.ok and checked.digest == again.digest != plain.digest == empty.digest
+    launch = json.loads((store / checked.digest / "tests" / "platoon" / "launch.json").read_text())
+    assert launch["replay_checks"] == ReplayChecks.coerce(CHECKS).settings()
+    assert "replay_checks" not in json.loads((store / plain.digest / "tests" / "platoon" / "launch.json").read_text())
+    assert (
+        store / checked.digest / "tests" / "gen" / "variants" / "fifty" / "inputs" / "data.txt"
+    ).read_text() == "50\n"
+    with pytest.raises(ValueError, match="a replay variant's name must be"):
+        await service.materialize(source, replay_checks={"variants": [_variant(name="")]})
+
+
+@pytest.mark.asyncio
+async def test_materialize_records_a_time_for_each_replay_that_leaves_the_grader_some(tmp_path, rootful, store):
+    """``replay_timeout_s`` is the caller's word too: the task's settings record it, so that the same directory with
+    another is another task.  The template's verifier gives the launcher 108 s of its 120: the replay and one variant
+    may each take up to 53 s, and the grader the rest, but not 54 s each."""
+
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources", files=CHECK_FILES)
+    one = {"variants": CHECKS["variants"], "forbidden_literals": None}
+
+    timed = await service.materialize(source, replay_checks=one, replay_timeout_s=53)
+    plain = await service.materialize(source, replay_checks=one)
+
+    assert timed.ok and timed.digest != plain.digest
+    settings = {
+        made.digest: json.loads((store / made.digest / "tests" / "platoon" / "launch.json").read_text())
+        for made in (timed, plain)
+    }
+    assert settings[timed.digest]["replay_timeout_s"] == 53 and "replay_timeout_s" not in settings[plain.digest]
+    with pytest.raises(ValueError, match=re.escape("2 replays of 54 s leave the grader none of the 108 s")):
+        await service.materialize(source, replay_checks=one, replay_timeout_s=54)
+    wrongs: list[Any] = [0, -1, float("nan"), True, "300"]
+    for wrong in wrongs:
+        with pytest.raises(ValueError, match="replay_timeout_s must be a finite number of seconds above 0"):
+            await service.materialize(source, replay_timeout_s=wrong)
+    untimed = write_task(tmp_path / "plain", files={"tests/gen/grader.json": json.dumps({"command": ["python3", "g"]})})
+    made = await service.materialize(untimed, replay_timeout_s=10)
+    assert made.problems == ("replay_timeout_s needs a replay, and tests/gen/grader.json gives none",)
+    assert sorted(path.name for path in store.iterdir()) == sorted([".staging", str(timed.digest), str(plain.digest)])
+
+
+@pytest.mark.asyncio
+async def test_materialize_refuses_launcher_settings_larger_than_the_launcher_reads(
+    tmp_path, rootful, store, monkeypatch
+):
+    """Settings the launcher would not read whole are refused, never stored: a task without checks fits, the same
+    task with them would not."""
+
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources", files=CHECK_FILES)
+    plain = await service.materialize(source)
+    size = len((store / plain.digest / "tests" / "platoon" / "launch.json").read_bytes())
+    monkeypatch.setattr(runtime.launcher, "MAX_CONFIG_BYTES", size + 10)
+
+    made = await service.materialize(source, replay_checks=CHECKS)
+
+    assert len(made.problems) == 1, made.problems
+    assert made.problems[0].startswith("the task's launcher settings would hold ")
+    assert f"more than its launcher reads ({size + 10})" in made.problems[0]
+    assert sorted(path.name for path in store.iterdir()) == [".staging", plain.digest]
+
+
+def _empty_inputs(task_dir: Path) -> None:
+    (task_dir / "tests" / "gen" / "variants" / "fifty" / "inputs" / "data.txt").unlink()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("files", "setup", "problem"),
+    [
+        (
+            {"tests/gen/grader.json": json.dumps({"command": ["python3", "grade.py"]})},
+            None,
+            "replay_checks need a replay, and tests/gen/grader.json gives none",
+        ),
+        (
+            {"tests/gen/variants/fifty/inputs/data.txt": None},
+            None,
+            "variant fifty's inputs, tests/gen/variants/fifty/inputs, cannot be read:",
+        ),
+        ({}, _empty_inputs, "variant fifty's inputs, tests/gen/variants/fifty/inputs, hold no file to lay over"),
+        (
+            {"tests/gen/variants/fifty/inputs/solve.py": "print(1)\n"},
+            None,
+            "variant fifty's inputs cannot be laid over the working inputs: solve.py would change solve.py, which the "
+            "submission holds or the replay writes",
+        ),
+        ({"tests/gen/variants/fifty/inputs/a.json": "{}"}, None, "a.json would change a.json"),
+        (
+            {"tests/gen/variants/fifty/inputs/tools": "a file\n"},
+            None,
+            "tools is a file of the variant's and a directory of environment/'s",
+        ),
+        (
+            {"tests/gen/variants/fifty/inputs/data.txt": None, "tests/gen/variants/fifty/inputs/data.txt/more": "1\n"},
+            None,
+            "data.txt is a directory of the variant's and a file of environment/'s",
+        ),
+        (
+            {"tests/gen/variants/fifty/expected.json": "{"},
+            None,
+            "variant fifty's expected outputs, tests/gen/variants/fifty/expected.json, cannot be read as JSON",
+        ),
+        (
+            {"tests/gen/variants/fifty/expected.json": json.dumps({"answer.json#/answer": 100})},
+            None,
+            'hold the key "answer.json#/answer", which names no output of the replay',
+        ),
+        (
+            {"tests/gen/variants/fifty/expected.json": json.dumps({"a.json#/other": 100})},
+            None,
+            'lack "a.json#/answer", which the variant\'s tolerance names',
+        ),
+        (
+            {"tests/gen/forbidden.json": None},
+            None,
+            "the forbidden literals, tests/gen/forbidden.json, cannot be read as JSON",
+        ),
+        ({"tests/gen/forbidden.json": json.dumps({"value": 42})}, None, "are no list of at most 10000 objects"),
+    ],
+    ids=[
+        "no-replay",
+        "no-inputs",
+        "empty-inputs",
+        "inputs-replace-an-artifact",
+        "inputs-replace-an-output",
+        "inputs-a-file-for-a-directory",
+        "inputs-a-directory-for-a-file",
+        "expected-not-json",
+        "expected-no-output",
+        "tolerance-of-a-key-not-expected",
+        "no-forbidden-literals",
+        "forbidden-literals-no-list",
+    ],
+)
+async def test_materialize_refuses_replay_checks_whose_data_the_launcher_could_not_use(
+    tmp_path, rootful, store, files, setup, problem
+):
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources", files={**CHECK_FILES, **files})
+    if setup is not None:
+        setup(source)
+    before = sorted(str(path.relative_to(source)) for path in source.rglob("*"))
+
+    made = await service.materialize(source, replay_checks=CHECKS)
+
+    assert not made.ok and any(problem in found for found in made.problems), made.problems
+    assert not any(".staging" in found or str(store) in found for found in made.problems)
+    assert [path.name for path in store.iterdir()] == [".staging"] and list((store / ".staging").iterdir()) == []
+    assert sorted(str(path.relative_to(source)) for path in source.rglob("*")) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sources", "problem"),
+    [
+        (["notes.py"], "the forbidden literals' source notes.py is no artifact of the task, nor below one"),
+        (["made.py"], "the forbidden literals' source made.py is what the replay writes again"),
+    ],
+)
+async def test_materialize_refuses_a_source_to_scan_that_the_submission_does_not_hold(
+    tmp_path, rootful, store, sources, problem
+):
+    """The scan reads the submission's own code, never what the replay writes again (here made.py, an artifact too)."""
+
+    service = make_service(tmp_path, rootful, store)
+    checks = {**CHECKS, "forbidden_literals": {**CHECKS["forbidden_literals"], "sources": sources}}
+    manifest = {"command": ["python3", "grade.py"], "replay": {"command": ["python3", "solve.py"], "outputs": []}}
+    manifest["replay"]["outputs"] = ["a.json", "made.py"]
+    source = write_task(
+        tmp_path / "sources",
+        edit=lambda config: config["artifacts"].append("made.py"),
+        files={**CHECK_FILES, "tests/gen/grader.json": json.dumps(manifest)},
+    )
+
+    made = await service.materialize(source, replay_checks=checks)
+
+    assert made.problems == (problem + (": the scan reads what the submission holds" if "artifact" in problem else ""),)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_of_replay_checks_lists_each_variants_problem_and_the_tasks(tmp_path, rootful, store):
+    service = make_service(tmp_path, rootful, store)
+    checks = {
+        "variants": [_variant(), _variant(name="ten", inputs="tests/gen/ten", expected="tests/gen/ten.json")],
+        "forbidden_literals": None,
+    }
+    source = write_task(
+        tmp_path / "sources",
+        edit=edit("environment", "network_mode", "public"),
+        files={**CHECK_FILES, "tests/gen/variants/fifty/expected.json": "[]"},
+    )
+
+    made = await service.materialize(source, replay_checks=checks)
+
+    assert len(made.problems) == 3, made.problems
+    assert "variant fifty's expected outputs" in made.problems[1] and "variant ten's inputs" in made.problems[2]
+
+
+_CHECK_ZERO = {**_SCORED_ZERO, "detail": "the replay of variant fifty gave a.json#/answer outside the tolerance"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["solver_variant_failed", "solver_hardcoded"])
+async def test_a_replay_checks_zero_is_the_solvers_and_never_regraded(tmp_path, rootful, store, monkeypatch, reason):
+    """It is no score of the grader's, which the launcher gives before the grader runs."""
+
+    report = {**_CHECK_ZERO, "reason": reason}
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, _launched(report, '{"reward": 0}'), _launched(_PASSED)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.reason, outcome.failure_kind) == ("scored", 0.0, reason, None)
+    assert outcome.metadata["launcher"] == report and "regrades" not in outcome.metadata
+    assert len(_verifiers(tmp_path)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_regrade_whose_replay_fails_a_variant_makes_the_grade_the_solvers_zero(
+    tmp_path, rootful, store, monkeypatch
+):
+    """Each regrade runs the task's replay checks again: a submission that follows its inputs only once fails the
+    variant in a regrade, and the grade is that regrade's own, the solver's 0."""
+
+    report = {**_CHECK_ZERO, "reason": "solver_variant_failed"}
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, _launched(_PASSED), _launched(report, '{"reward": 0}')))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.reason) == ("scored", 0.0, "solver_variant_failed")
+    assert outcome.metadata["launcher"] == report and outcome.metadata["first_grade"]["metadata"]["launcher"] == _PASSED
+    assert [entry["reason"] for entry in outcome.metadata["regrades"]] == ["solver_variant_failed"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["solver_variant_failed", "solver_hardcoded"])
+async def test_a_replay_checks_reason_with_a_reward_of_1_is_no_report_the_launcher_writes(
+    tmp_path, rootful, store, monkeypatch, reason
+):
+    monkeypatch.setattr(runtime, "TEST_SH", _launched({**_CHECK_ZERO, "reason": reason, "reward": 1}))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.failure_kind) == ("invalid", "verifier_generated_unfinished")
+    assert "its report holds no reward the launcher writes" in outcome.reason

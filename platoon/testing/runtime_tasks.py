@@ -15,16 +15,22 @@ the template in its network (``network``), its GPUs (``gpus``), its image (``ima
 (``shared_grading``), and one that declares an artifact outside the working directory, such as ``/tests/gen``, where a
 submission would sit beside the grader (``outside_artifact``); an ``environment/Dockerfile`` (``dockerfile``) and a
 compose file (``stack``); a ``tests/test.sh`` of the task's own (``own_launcher``); a symbolic link (``symlink``); files
-beyond ``max_bytes`` (``oversized``, a sparse file); and a grader manifest that is missing (``no_manifest``) or not an
-argv (``bad_manifest``).  ``accepts``: it takes the honest task, twice into one digest, which names its directory in
-the store, with the launcher installed.
+beyond ``max_bytes`` (``oversized``, a sparse file); a grader manifest that is missing (``no_manifest``) or not an
+argv (``bad_manifest``); and a replay variant whose inputs would replace a file of the submission's
+(``variant_overlay``).  ``accepts``: it takes the honest task, twice into one digest, which names its directory in the
+store, with the launcher installed.
 
 **Grades** (:data:`GRADES`, with ``grade``): each task is taken in, opened, solved by its reference solution (its
 ``solution/solve.sh``, as the oracle runs it) and graded, which needs the environment's sandboxes: a provider that
 starts its template's image, which has ``python3`` and ``sh``, with no network, and separate verifiers that run as
 root.  An honest grader scores the right answer 1 (``honest_pass``) and a wrong one 0 (``honest_fail``); a missing
 artifact (``missing_artifact``) and a replay that fails (``replay_fails``) score 0, the solver's fault (reason
-``solver_output_contract``, ``solver_nonreproducible``); a replay can read neither the grader's files nor the copy of
+``solver_output_contract``, ``solver_nonreproducible``); with replay checks (:data:`REPLAY_CHECKS`: a variant whose
+``data.txt`` holds another number, and the answer as a forbidden literal), the honest solution passes
+(``variant_followed``), one that computes the answer without reading its inputs fails the variant (``variant_ignored``,
+``solver_variant_failed``), one that states the answer is hardcoded (``hardcoded_literal``, ``solver_hardcoded``), and a
+variant's replay can neither change what the replay wrote, which waits as root's, nor read the grader's files
+(``variant_sealed``: its wrong answer scores 0); a replay can read neither the grader's files nor the copy of
 the answer the agents published in ``/logs/artifacts``, and cannot write a reward (``replay_sealed``); a module of the
 submission's never shadows one the grader imports (``module_shadow``); a grader that declares its measurement invalid
 is ``verifier_generated_protocol`` (``invalid_grader``), one that crashes after a verdict of 0 is
@@ -71,6 +77,7 @@ REFUSALS = (
     "oversized",
     "no_manifest",
     "bad_manifest",
+    "variant_overlay",
     "accepts",
 )
 #: The grading cases, in the order they run.
@@ -79,6 +86,10 @@ GRADES = (
     "honest_fail",
     "missing_artifact",
     "replay_fails",
+    "variant_followed",
+    "variant_ignored",
+    "hardcoded_literal",
+    "variant_sealed",
     "replay_sealed",
     "module_shadow",
     "invalid_grader",
@@ -94,6 +105,26 @@ GRADES = (
 #: grader is ``verifier_flaky`` with probability 1/2, so all of them agree with probability 2**-20.
 FLAKY_GRADES = 20
 _FLAKY = "verifier_flaky"
+#: The replay checks of the cases that have them (``variant_overlay``, ``variant_followed``, ``variant_ignored``,
+#: ``hardcoded_literal``, ``variant_sealed``): a variant whose ``data.txt`` holds 50, so that the solution, which reads
+#: it, writes 100, and the answer, 42, as a forbidden literal of ``solve.py``.
+REPLAY_CHECKS: dict[str, Any] = {
+    "variants": [
+        {
+            "name": "fifty",
+            "inputs": "tests/gen/variants/fifty/inputs",
+            "expected": "tests/gen/variants/fifty/expected.json",
+            "tolerance": 0,
+            "meta": {"data.txt": 50},
+        }
+    ],
+    "forbidden_literals": {"path": "tests/gen/forbidden-literals.json", "sources": ["solve.py"]},
+}
+_CHECK_FILES = {
+    "tests/gen/variants/fifty/inputs/data.txt": "50\n",
+    "tests/gen/variants/fifty/expected.json": json.dumps({"answer.json#/answer": 100}),
+    "tests/gen/forbidden-literals.json": json.dumps([{"value": 42, "tolerance": 0.5}]),
+}
 _ARTIFACTS = ["solve.py", "answer.json"]
 _SOLVE = """import json
 
@@ -197,6 +228,44 @@ with open(os.environ["PLATOON_VERDICT"], "w") as stream:
 """,
 }
 _FAILING_SOLVE = "import sys\nsys.exit(1)\n"
+# A submission that computes the answer without reading its inputs: it states no forbidden literal, and writes 42 on
+# any data, which the variant catches.
+_IGNORING_SOLVE = """import json
+
+with open("answer.json", "w") as stream:
+    json.dump({"answer": 6 * 7}, stream)
+"""
+# A submission that states the answer, which the scan for forbidden literals catches before anything replays.
+_HARDCODED_SOLVE = """import json
+
+with open("answer.json", "w") as stream:
+    json.dump({"answer": 42}, stream)
+"""
+# A submission whose replay writes a wrong answer, 41, and whose replay of the variant (a data.txt of 50) gives what the
+# variant expects but first tries what a sealed verifier keeps it from: replace what the replay wrote, which waits
+# beside it as root's, with the right answer, and read the grader's files.  It scores 1 only if either leaks.
+_SEALED_SOLVE = """import json
+
+with open("data.txt") as stream:
+    data = int(stream.read())
+answer = 41
+if data == 50:
+    try:
+        with open("../replayed/answer.json", "w") as stream:
+            json.dump({"answer": 6 * 7}, stream)
+    except OSError:
+        pass
+    try:
+        with open("/tests/gen/grader.json") as stream:
+            stream.read()
+        with open("../replayed/answer.json", "w") as stream:
+            json.dump({"answer": 6 * 7}, stream)
+    except OSError:
+        pass
+    answer = 2 * data
+with open("answer.json", "w") as stream:
+    json.dump({"answer": answer}, stream)
+"""
 # The solution's lines that publish a copy of its answer where every agent may publish files, which the verifier then
 # holds in /logs/artifacts; they never fail the solution, on a sandbox where no agent may publish there either.
 _PUBLISH = (
@@ -287,9 +356,11 @@ class _Sources:
         grader: str = _HONEST_GRADER,
         manifest: Any = None,
         replay: bool = True,
+        checks: bool = False,
     ) -> Path:
         """The honest task as ``case``'s directory, with what the case changes: its ``task.toml`` (``toml`` edits the
-        template's tables), its ``environment/data.txt``, the extra lines of its solution, its grader and manifest."""
+        template's tables), its ``environment/data.txt``, the extra lines of its solution, its grader and manifest,
+        and with ``checks`` the data of :data:`REPLAY_CHECKS`."""
 
         task_dir = self.root / f"{case}-{uuid.uuid4().hex[:8]}"
         config: dict[str, Any] = copy.deepcopy(dict(self.config.template))
@@ -314,6 +385,8 @@ class _Sources:
             manifest = honest
         if manifest is not False:
             files["tests/gen/grader.json"] = json.dumps(manifest)
+        if checks:
+            files.update(_CHECK_FILES)
         for name, text in files.items():
             path = task_dir / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -321,8 +394,8 @@ class _Sources:
         return task_dir
 
 
-async def _refused(service: Any, source: Path, expected: str) -> None:
-    made = await service.materialize(source)
+async def _refused(service: Any, source: Path, expected: str, **options: Any) -> None:
+    made = await service.materialize(source, **options)
     if made.ok:
         raise _Failed(f"materialize took it in, as {made.digest}")
     if not any(re.search(expected, problem) for problem in made.problems):
@@ -409,6 +482,12 @@ async def _bad_manifest(service: Any, sources: _Sources) -> None:
     await _refused(service, source, r"grader\.json: command")
 
 
+async def _variant_overlay(service: Any, sources: _Sources) -> None:
+    source = sources.write("variant_overlay", checks=True)
+    (source / "tests" / "gen" / "variants" / "fifty" / "inputs" / "solve.py").write_text("print('not yours')\n")
+    await _refused(service, source, r"would change solve\.py", replay_checks=REPLAY_CHECKS)
+
+
 async def _accepts(service: Any, sources: _Sources) -> None:
     source = sources.write("accepts")
     first, second = await service.materialize(source), await service.materialize(source)
@@ -438,6 +517,7 @@ _REFUSAL_CASES = {
     "oversized": _oversized,
     "no_manifest": _no_manifest,
     "bad_manifest": _bad_manifest,
+    "variant_overlay": _variant_overlay,
     "accepts": _accepts,
 }
 
@@ -463,6 +543,18 @@ _GRADE_CASES: dict[str, tuple[dict[str, Any], str, tuple[str, float | None, str 
         "generated",
         ("scored", 0.0, None, "solver_nonreproducible"),
     ),
+    "variant_followed": ({"checks": True}, "generated", ("scored", 1.0, None, None)),
+    "variant_ignored": (
+        {"checks": True, "solve": _solve_line(_IGNORING_SOLVE)},
+        "generated",
+        ("scored", 0.0, None, "solver_variant_failed"),
+    ),
+    "hardcoded_literal": (
+        {"checks": True, "solve": _solve_line(_HARDCODED_SOLVE)},
+        "generated",
+        ("scored", 0.0, None, "solver_hardcoded"),
+    ),
+    "variant_sealed": ({"checks": True, "solve": _solve_line(_SEALED_SOLVE)}, "generated", ("scored", 0.0, None, None)),
     "replay_sealed": ({"solve": _PUBLISH + _solve_line(_PRYING_SOLVE)}, "generated", ("scored", 0.0, None, None)),
     "module_shadow": (
         {
@@ -503,7 +595,8 @@ _GRADE_CASES: dict[str, tuple[dict[str, Any], str, tuple[str, float | None, str 
 
 async def _graded(service: Any, case: str, sources: _Sources) -> None:
     changes, owner, expected = _GRADE_CASES[case]
-    made = await service.materialize(sources.write(case, **changes), grader_owner=owner)
+    checks = {"replay_checks": REPLAY_CHECKS} if changes.get("checks") else {}
+    made = await service.materialize(sources.write(case, **changes), grader_owner=owner, **checks)
     if not made.ok:
         raise _Failed(f"materialize refused it: {list(made.problems)}")
     session = await service.open(made.task, rollout_id=f"platoon-red-team-{uuid.uuid4().hex[:12]}")

@@ -64,8 +64,10 @@ And runtime Harbor tasks (RFC 0022): task directories written while a run runs, 
 which a Harbor environment entry takes in under its `service_kwargs.runtime_tasks` (`RuntimeTasksConfig`):
 `HarborEnvironmentService.materialize(source)` checks one against them and refuses it, never rewriting it, or keeps
 it in their store under its digest with platoon's launcher, which replays the submission before the task's grader
-grades it (`MaterializedTask`); `platoon.testing.check_runtime_tasks` checks an environment's runtime tasks
-against a suite of sabotaged tasks.  `docs/how-to/sandboxes-and-harbor.md` is the guide.
+grades it (`MaterializedTask`), and gives it the replay checks the caller names (`ReplayChecks`): the
+literals its sources may not state (`ForbiddenLiterals`) and variants of its inputs, on which its replay must
+give what each expects (`ReplayVariant`); `platoon.testing.check_runtime_tasks` checks an environment's
+runtime tasks against a suite of sabotaged tasks.  `docs/how-to/sandboxes-and-harbor.md` is the guide.
 
 This module imports neither `tinker` nor `datasets`, and the Harbor service only when a runtime task's name is
 first used.
@@ -144,6 +146,9 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`ShareLedger`](#platoon-experimental-shareledger) | The shares of a run's groups, as a trainer of its own whose policies step independently takes them (`run.rollouts().ledger`; `TrainerNeeds.stepping`): each step of policy `p` takes `p`'s shares (`take`), trains them (a trainer that drops stale ones judges each at `judge_version`), records them consumed under the commit lock (`async with ledger.lock:` `consumed`), then ends with `await run.end_step(policy=p)` on `p`'s own clock (`run.clocks[p]`). The run keeps the rest: which shares a checkpoint holds, which a resume puts back, and when a group retires. |
 | [`MaterializedTask`](#platoon-experimental-materializedtask) | What `materialize` made of a directory: a runtime task, or why there is none. |
 | [`RuntimeTasksConfig`](#platoon-experimental-runtimetasksconfig) | How an environment entry's runtime tasks run: `service_kwargs.runtime_tasks` of a Harbor environment. |
+| [`ReplayChecks`](#platoon-experimental-replaychecks) | The replay checks of a runtime task, which `materialize(source, replay_checks=...)` gives it, beside its replay: the task's launcher scans the submission's sources for `forbidden_literals` before the replay, and once the replay wrote every output again, replays each of `variants` on its own inputs. A check that fails is the solver's 0 (`solver_hardcoded`, `solver_variant_failed`), never a censored measurement. Their data lie in the task's `tests/gen`, beside its grader and as sealed as it is; `materialize` refuses data the launcher could not use, as data that a grade finds unusable all the same is the protocol fault of the grader's owner (`verifier_generated_protocol`, `verifier_trusted_protocol`). Built from a mapping of its fields (`coerce`), whose variants and forbidden literals may be mappings too. |
+| [`ReplayVariant`](#platoon-experimental-replayvariant) | A variant of a runtime task's replay (`ReplayChecks`): once the replay wrote every output again, the launcher replays the submission once more, as it replayed it, in a fresh copy of the working directory with `inputs` laid over it, and the outputs that replay writes must hold what `expected` lists, each within its `tolerance`. A submission that ignores its inputs, such as one that states the answer, writes the working inputs' answer again, and fails (`solver_variant_failed`). |
+| [`ForbiddenLiterals`](#platoon-experimental-forbiddenliterals) | The forbidden literals of a runtime task (`ReplayChecks`): numbers its submission's sources may not state, such as the answers it must compute. Before the replay, the launcher reads each source as Python, by the rule `scan` names, and a number one states within the tolerance of a forbidden one scores 0 (`solver_hardcoded`). |
 
 ## Task samplers
 
@@ -2410,6 +2415,86 @@ def store_path() -> Path
 
 The store, as an absolute path: `store`, else `runtime-tasks` in the run's directory (which every process
 of a `platoon train` or `platoon eval` run labels its sandboxes with), else in the Harbor cache.
+
+<a id="platoon-experimental-replaychecks"></a>
+
+### `platoon.experimental.ReplayChecks`
+
+```python
+class ReplayChecks
+```
+
+The replay checks of a runtime task, which `materialize(source, replay_checks=...)` gives it, beside its
+replay: the task's launcher scans the submission's sources for `forbidden_literals` before the replay, and once
+the replay wrote every output again, replays each of `variants` on its own inputs.  A check that fails is the
+solver's 0 (`solver_hardcoded`, `solver_variant_failed`), never a censored measurement.  Their data lie in the
+task's `tests/gen`, beside its grader and as sealed as it is; `materialize` refuses data the launcher could not
+use, as data that a grade finds unusable all the same is the protocol fault of the grader's owner
+(`verifier_generated_protocol`, `verifier_trusted_protocol`).  Built from a mapping of its fields
+(`coerce`), whose variants and forbidden literals may be mappings too.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `variants` | `Sequence[ReplayVariant]` | `()` | The variants of the replay, at most 32, one after the other: each a ReplayVariant, or a mapping of its fields. |
+| `forbidden_literals` | `ForbiddenLiterals \| None` | `None` | The literals the submission's sources may not state: a ForbiddenLiterals, a mapping of its fields, or None. |
+
+#### `ReplayChecks.coerce`
+
+```python
+@classmethod
+def coerce(value: ReplayChecks | Mapping[str, Any]) -> ReplayChecks
+```
+
+The checks `value` gives: itself, or a mapping of its fields.
+
+#### `ReplayChecks.settings`
+
+```python
+def settings() -> dict[str, Any]
+```
+
+What the task's launcher settings record of the checks, as `replay_checks`.
+
+<a id="platoon-experimental-replayvariant"></a>
+
+### `platoon.experimental.ReplayVariant`
+
+```python
+class ReplayVariant
+```
+
+A variant of a runtime task's replay (`ReplayChecks`): once the replay wrote every output again, the
+launcher replays the submission once more, as it replayed it, in a fresh copy of the working directory with
+`inputs` laid over it, and the outputs that replay writes must hold what `expected` lists, each within its
+`tolerance`.  A submission that ignores its inputs, such as one that states the answer, writes the working
+inputs' answer again, and fails (`solver_variant_failed`).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | required | The variant's name, its own among the task's: letters, digits, _, . and -, at most 128 characters. |
+| `inputs` | `str` | required | A directory of the task below tests/gen, such as tests/gen/variants/rescaled/inputs, whose files the launcher lays over the working inputs for this variant's replay, each in place of the file at its path (its data/table.csv for the working directory's data/table.csv). It holds at least one file, and none at a path of the submission's. |
+| `expected` | `str` | required | A JSON file of the task below tests/gen, outside every variant's inputs: an object that maps output keys to the number, or the list of numbers, the variant's replay must write there. An output key names a .json output of the replay, for the whole of its JSON, or the output, # and a JSON Pointer into it (answer.json#/rows/2/value). |
+| `tolerance` | `float \| Mapping[str, Any]` | required | How far a value may be from what is expected, absolutely: a number for every key, or {"default": number, "keys": {output key: number}}, where keys of expected get their own. Required, since outputs a replay computes in floating point on another machine rarely match to the last bit; 0 compares exactly. |
+| `meta` | `Any` | `None` | Anything the task's producer wants recorded with the variant, such as the cells it covers: JSON of at most 8 KiB, nested at most 16 levels deep, which the task's launcher settings keep, as does the report of a grade whose replay of the variant failed. |
+
+<a id="platoon-experimental-forbiddenliterals"></a>
+
+### `platoon.experimental.ForbiddenLiterals`
+
+```python
+class ForbiddenLiterals
+```
+
+The forbidden literals of a runtime task (`ReplayChecks`): numbers its submission's sources may not
+state, such as the answers it must compute.  Before the replay, the launcher reads each source as Python, by the
+rule `scan` names, and a number one states within the tolerance of a forbidden one scores 0
+(`solver_hardcoded`).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `path` | `str` | required | A JSON file of the task below tests/gen, outside every variant's inputs, that lists the forbidden literals: [{"value": number, "tolerance": number}], a number of a source being forbidden within tolerance of a value. |
+| `sources` | `Sequence[str]` | required | The submission's files the launcher scans, as paths relative to the working directory: each a Python file (.py) that is a declared artifact or below one, never an output of the replay (or above or below one), at most 64. |
+| `scan` | `str` | `"python-numeric-literals/v1"` | The rule a source is scanned by: python-numeric-literals/v1, the only one. A source's int, float and complex constants (each with the chain of unary signs applied to it), and its string and ASCII bytes constants that read as a finite number; never its comments. |
 
 ## The types these take and return
 

@@ -64,6 +64,7 @@ from platoon.envs.harbor.runtime import (
     GRADER_OWNERS,
     RUNTIME_MISC_KEY,
     MaterializedTask,
+    ReplayChecks,
     RuntimeTasksConfig,
     config_fingerprint,
     in_store,
@@ -201,9 +202,12 @@ class HarborEnvironmentService:
     laid over ``verifier_provider_options``; its ``[verifier].user`` gets ``runtime_tasks.verifier_user``, and its
     grade is the launcher's report, which, where the task's grader is generated, stands only while
     ``runtime_tasks.regrade`` grades of the same artifacts again, each in a fresh verifier, give the same score (where
-    one does not, ``verifier_flaky``, or the solver's 0 where the submission's replay wrote other outputs).  A runtime
-    task that another store holds, or that was checked against other ``runtime_tasks``, is refused, with or without
-    ``runtime_tasks``, never served as an ordinary task.  The service's other tasks are served as before.
+    one does not, ``verifier_flaky``, or the solver's 0 where the submission's replay wrote other outputs).  A task
+    that ``materialize`` gave replay checks (:class:`~platoon.envs.harbor.runtime.ReplayChecks`) is the solver's 0
+    where its submission's sources state a forbidden literal or the replay of a variant of its inputs does not give
+    what the variant expects, in every grade, a regrade's too.  A runtime task that another store holds, or that was
+    checked against other ``runtime_tasks``, is refused, with or without ``runtime_tasks``, never served as an ordinary
+    task.  The service's other tasks are served as before.
 
     Grading reads the verifier's reward files under the ``reward`` contract (:mod:`platoon.envs.harbor.grading`;
     default: the ``reward`` key trains), after the opt-in ``verifier_classifiers``.  A task with a separate
@@ -599,6 +603,8 @@ class HarborEnvironmentService:
         *,
         grader_owner: str = "generated",
         replay_address_space_bytes: int | None = DEFAULT_REPLAY_ADDRESS_SPACE_BYTES,
+        replay_checks: ReplayChecks | Mapping[str, Any] | None = None,
+        replay_timeout_s: float | None = None,
     ) -> MaterializedTask:
         """Make the task directory ``source`` one of the service's runtime tasks (:mod:`platoon.envs.harbor.runtime`):
         checked against ``runtime_tasks``, refused and never rewritten where it breaks them, else given
@@ -606,11 +612,18 @@ class HarborEnvironmentService:
         its grader, ``generated`` (the producer) or ``trusted`` (trusted code), which names the failure kinds of the
         grader's non-scores (``verifier_generated_*`` or ``verifier_trusted_*``) and says whether its scores are
         regraded (a generated grader's are, ``runtime_tasks.regrade`` times): the caller's word, never the directory's.
-        ``replay_address_space_bytes`` caps the address space each of the task's replay processes may reserve
-        (``RLIMIT_AS``; None, the default, sets no per-process cap, the launcher disfavouring the replay for the OOM
-        killer either way).  What is wrong with the directory comes back in :attr:`MaterializedTask.problems`; a
-        ``ValueError`` for a service without ``runtime_tasks``, and an ``OSError`` for a store it cannot write.  The
-        copy and the checks run in a thread."""
+        ``replay_address_space_bytes`` caps the address space each process of the task's replays may reserve, the
+        replay's own and each variant's (``RLIMIT_AS``; None, the default, sets no per-process cap, the launcher
+        disfavouring the replays for the OOM killer either way).  ``replay_checks``
+        (:class:`~platoon.envs.harbor.runtime.ReplayChecks`, or a mapping of its fields) are the task's replay checks,
+        its replay on variants of its inputs and the literals its sources may not state, whose data the directory holds
+        in ``tests/gen``: the caller's word too, which the task's launcher settings record.  ``replay_timeout_s`` is
+        the most each of the task's replays takes, its own and each variant's (such as the time its producer told the
+        solver), the grader getting what they leave; without it, they share half of the time the launcher has.  What
+        is wrong with the directory comes back in :attr:`MaterializedTask.problems`; a ``ValueError`` for a service
+        without ``runtime_tasks``, an owner, a replay address space, checks or a replay time that are none, or replays
+        that would leave the grader no time, and an ``OSError`` for a store it cannot write.  The copy and the checks
+        run in a thread."""
 
         config = self.runtime_tasks
         if config is None:
@@ -619,6 +632,7 @@ class HarborEnvironmentService:
             )
         if grader_owner not in GRADER_OWNERS:
             raise ValueError(f"grader_owner must be one of {GRADER_OWNERS}, got {grader_owner!r}")
+        checks = ReplayChecks.coerce(replay_checks) if replay_checks is not None else None
         return await asyncio.to_thread(
             materialize_task,
             source,
@@ -629,6 +643,8 @@ class HarborEnvironmentService:
             timeout_multiplier=self.verifier_timeout_multiplier,
             grader_owner=grader_owner,
             replay_address_space_bytes=replay_address_space_bytes,
+            replay_checks=checks,
+            replay_timeout_s=replay_timeout_s,
         )
 
     @cached_property

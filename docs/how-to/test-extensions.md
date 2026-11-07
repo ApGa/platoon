@@ -412,18 +412,22 @@ It takes a `HarborEnvironmentService` or the `service_kwargs` to build one, and 
 every case that failed, with what it saw. The refusal cases need no sandbox: a `task.toml` that differs from the
 template in its network, its GPUs, its image or its verifier's mode, an artifact outside the working directory, an
 `environment/Dockerfile`, a compose file, a `tests/test.sh` of the task's own, a symbolic link, files beyond
-`max_bytes`, and a grader manifest that is missing or no argv are refused; the honest task is taken in, twice into one
-digest. With `grade=True`, the default, each grading case is taken in, opened, solved by its reference solution and
-graded, on the environment's own sandboxes, which must start its template's image (with `python3` and `sh`) and give its
-verifiers root, as a run's would: a right answer scores 1 and a wrong one 0; a missing artifact and a replay that fails
-score 0, the solver's fault; a replay can read neither the grader's files nor the copy of the answer the agents
-published, and cannot write a reward, and a module of the submission's never shadows one the grader imports; a grader
-that declares its measurement invalid, crashes after a verdict of 0, or kills the launcher is a non-score of the
-generated grader's; and one that writes a reward file of its own, leaves a process that keeps writing one, or writes
-what a verifier classifier would match into the verifier's log gets the launcher's score, as a trusted grader that
-crashes gets its own kind. A grader that flips a coin must come out `verifier_flaky`, as the environment's regrades
-find it (`runtime_tasks.regrade`, which must not be 0 for this case): its submission is graded again, up to 20 times,
-while each grade is the grader's score that every regrade gave again, as a coin flip's is half the time with one
+`max_bytes`, a grader manifest that is missing or no argv, and a replay variant whose inputs would replace a file of the
+submission's are refused; the honest task is taken in, twice into one digest. With `grade=True`, the default, each
+grading case is taken in, opened, solved by its reference solution and graded, on the environment's own sandboxes, which
+must start its template's image (with `python3` and `sh`) and give its verifiers root, as a run's would: a right answer
+scores 1 and a wrong one 0; a missing artifact and a replay that fails score 0, the solver's fault; with replay checks
+(a variant of the task's input, and the answer as a forbidden literal), the right answer scores 1, one that the solution
+computes without reading its input fails the variant (`solver_variant_failed`), one that it states is hardcoded
+(`solver_hardcoded`), and a variant's replay can neither replace what the replay wrote, which waits as root's, nor read
+the grader's files, so a wrong answer still scores 0; a replay can read neither the grader's files nor the copy of the
+answer the agents published, and cannot write a reward, and a module of the submission's never shadows one the grader
+imports; a grader that declares its measurement invalid, crashes after a verdict of 0, or kills the launcher is a
+non-score of the generated grader's; and one that writes a reward file of its own, leaves a process that keeps writing
+one, or writes what a verifier classifier would match into the verifier's log gets the launcher's score, as a trusted
+grader that crashes gets its own kind. A grader that flips a coin must come out `verifier_flaky`, as the environment's
+regrades find it (`runtime_tasks.regrade`, which must not be 0 for this case): its submission is graded again, up to 20
+times, while each grade is the grader's score that every regrade gave again, as a coin flip's is half the time with one
 regrade. Run it there before a run that generates tasks, and on CPU with `grade=False` in your package's tests. It is
 the generic half of a red-team suite: a task producer's own toolkit holds the domain's half, in the checks it runs on a
 task before the task is taken in (leaks, planted secrets, a module the task's own grader directory shadows), and a
