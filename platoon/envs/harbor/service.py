@@ -69,6 +69,7 @@ from platoon.envs.harbor.runtime import (
     in_store,
     launch_settings,
     materialize_task,
+    regrade_count,
     runtime_image,
     runtime_task,
     stored,
@@ -198,9 +199,11 @@ class HarborEnvironmentService:
     run the image ``runtime_tasks.images`` binds its ``docker_image`` to, with its ``environment/`` uploaded into the
     working directory, and grade it in a separate verifier that starts with ``runtime_tasks.verifier_provider_options``
     laid over ``verifier_provider_options``; its ``[verifier].user`` gets ``runtime_tasks.verifier_user``, and its
-    grade is the launcher's report.  A runtime task that another store holds, or that was checked against other
-    ``runtime_tasks``, is refused, with or without ``runtime_tasks``, never served as an ordinary task.  The service's
-    other tasks are served as before.
+    grade is the launcher's report, which, where the task's grader is generated, stands only while
+    ``runtime_tasks.regrade`` grades of the same artifacts again, each in a fresh verifier, give the same score (where
+    one does not, ``verifier_flaky``, or the solver's 0 where the submission's replay wrote other outputs).  A runtime
+    task that another store holds, or that was checked against other ``runtime_tasks``, is refused, with or without
+    ``runtime_tasks``, never served as an ordinary task.  The service's other tasks are served as before.
 
     Grading reads the verifier's reward files under the ``reward`` contract (:mod:`platoon.envs.harbor.grading`;
     default: the ``reward`` key trains), after the opt-in ``verifier_classifiers``.  A task with a separate
@@ -492,6 +495,17 @@ class HarborEnvironmentService:
 
         return launch_settings(harbor_task.task_dir) if self.runtime_tasks is not None else None
 
+    def runtime_regrades(self, harbor_task: HarborTask) -> int:
+        """How many times a score of ``harbor_task``'s grader is graded again, each time in a fresh verifier after the
+        one before: ``runtime_tasks.regrade`` for one of the service's runtime tasks whose grader is generated, as its
+        launcher settings say (:func:`~platoon.envs.harbor.runtime.regrade_count`); 0 for one whose grader is
+        trusted, and for the service's other tasks, whose grading regrades would change."""
+
+        settings = self.runtime_settings(harbor_task)
+        if settings is None or self.runtime_tasks is None:
+            return 0
+        return regrade_count(settings, self.runtime_tasks)
+
     @cached_property
     def _runtime_fingerprint(self) -> str | None:
         """The fingerprint of ``runtime_tasks``, the reward's name and the verifier's time multiplier, which
@@ -590,12 +604,13 @@ class HarborEnvironmentService:
         checked against ``runtime_tasks``, refused and never rewritten where it breaks them, else given
         platoon's launcher and kept in the store under its digest, which is its id.  ``grader_owner`` says who wrote
         its grader, ``generated`` (the producer) or ``trusted`` (trusted code), which names the failure kinds of the
-        grader's non-scores (``verifier_generated_*`` or ``verifier_trusted_*``): the caller's word, never the
-        directory's.  ``replay_address_space_bytes`` caps the address space each of the task's replay processes may
-        reserve (``RLIMIT_AS``; None, the default, sets no per-process cap, the launcher disfavouring the replay for
-        the OOM killer either way).  What is wrong with the directory comes back in
-        :attr:`MaterializedTask.problems`; a ``ValueError`` for a service without ``runtime_tasks``, and an ``OSError``
-        for a store it cannot write.  The copy and the checks run in a thread."""
+        grader's non-scores (``verifier_generated_*`` or ``verifier_trusted_*``) and says whether its scores are
+        regraded (a generated grader's are, ``runtime_tasks.regrade`` times): the caller's word, never the directory's.
+        ``replay_address_space_bytes`` caps the address space each of the task's replay processes may reserve
+        (``RLIMIT_AS``; None, the default, sets no per-process cap, the launcher disfavouring the replay for the OOM
+        killer either way).  What is wrong with the directory comes back in :attr:`MaterializedTask.problems`; a
+        ``ValueError`` for a service without ``runtime_tasks``, and an ``OSError`` for a store it cannot write.  The
+        copy and the checks run in a thread."""
 
         config = self.runtime_tasks
         if config is None:
@@ -1393,7 +1408,8 @@ class HarborEnvironmentService:
         timeouts, and the close.  For a stack, its services' starts, health waits (their images' healthchecks too) and
         init jobs' runs (each bounded by a start budget) count along their dependencies' longest path, and so do three
         probes of its sidecars, the listing of its MCP servers' tools, and the wait for a node service that starts
-        again.  Deadlines on whole rollouts add it
+        again.  A runtime task whose grader is generated counts each regrade too (:meth:`runtime_regrades`): another
+        verifier's start, tests and grading commands.  Deadlines on whole rollouts add it
         (:func:`platoon.train.components.rollout_overhead_s`)."""
 
         return self._limits(task_id)[1]
@@ -1434,6 +1450,8 @@ class HarborEnvironmentService:
         hooks = sum(hook.timeout_s for hook in harbor_task.collect)
         verifier = harbor_task.verifier_timeout_s * self.verifier_timeout_multiplier
         overhead = start + hooks + verifier + _GRADING_ALLOWANCE_S + self.close_timeout_s
+        if regrades := self.runtime_regrades(harbor_task):  # each in a verifier of its own, one after the other
+            overhead += regrades * (budget + verifier + _GRADING_ALLOWANCE_S)
         limits = (None if agent is None else agent * self.agent_timeout_multiplier, overhead)
         self._task_limits[task_id] = limits
         return limits

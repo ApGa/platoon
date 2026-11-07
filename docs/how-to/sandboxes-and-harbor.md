@@ -225,7 +225,7 @@ configs](configs.md#2-build-on-it-with-extends)):
 | `sandbox_start_budget_s` | 600 | What a rollout's deadline allows each sandbox start, the task's and a separate verifier's ([Run it](#4-run-it)) |
 | `stacks`, `network_policy`, `on_sidecar_down` | `auto`, `task`, `invalid` | *Since 0.5.0.* Whether and how multi-container tasks run, the network of every sandbox, and what a sidecar that is down at grading makes the outcome ([Multi-container tasks](#multi-container-tasks)) |
 | `node_services` | none | *Since 0.5.0.* The services the node runs once for every rollout, by name, which a dataset's overlay names for the compose services they serve (`external`); `platoon train` and `platoon eval` start them before the first rollout ([Node services](#node-services)) |
-| `runtime_tasks` | none | *Experimental.* How the environment takes in task directories written while the run runs, such as an environment generator's, and runs them: `{images, template, verifier_user, verifier_provider_options, max_bytes, store}` ([Runtime tasks](#runtime-tasks)) |
+| `runtime_tasks` | none | *Experimental.* How the environment takes in task directories written while the run runs, such as an environment generator's, and runs them: `{images, template, verifier_user, verifier_provider_options, regrade, max_bytes, store}` ([Runtime tasks](#runtime-tasks)) |
 
 Values like `${HF_TOKEN}` or `${REGION:-us}` in a task's `env` tables are read from the host: `[environment] env`
 when a session opens (an unset variable without a default fails the session as a configuration error), and
@@ -1798,6 +1798,7 @@ else:
 | `template` | | The `task.toml` every runtime task has but for its `[task] name` and its `artifacts`: a table, or a TOML file. It gives the agents and the verifier no network, grades in a separate verifier that runs the task's own image (no `[verifier.environment] docker_image`, whose image would bring its own `/tests`), and names one of `images`; the service refuses one that does not when it is built |
 | `verifier_user` | `honor` | What a runtime task's `[verifier].user` gets, in place of the entry's `verifier_user`. The launcher runs as root: a template whose `[verifier] user` is root and `honor`, on verifiers' sandboxes that give root ([Verifiers that run as root](#verifiers-that-run-as-root)) |
 | `verifier_provider_options` | none | Laid over the entry's `verifier_provider_options` (else its `provider_options`) for runtime tasks' verifiers only; the entry's other verifiers keep theirs. A run's reaping, and `platoon sandbox reap`, look for their sandboxes with these options too |
+| `regrade` | 1 | How many times a generated grader's score is graded again, each time in a fresh verifier after the one before; the score stands only while every regrade gives it again (**Regrades**, below). 0 grades once |
 | `max_bytes` | 256 MiB | The most a runtime task's files may hold |
 | `store` | `runtime-tasks` in the run's directory | Where runtime tasks are kept, each in `<store>/<digest>`; outside a run, `runtime-tasks` in the Harbor cache. Entries that leave it unset share the run's; each runs only the tasks checked against its own `runtime_tasks` (below) |
 
@@ -1828,11 +1829,10 @@ never the directory's. The copy and the checks run in a thread; a store that can
 A runtime task's directory says it is one (the launcher's settings, which only `materialize` writes), and it runs only
 as one: an environment opens it only from its own store and only if the task was checked against its own
 `runtime_tasks`, the same `images`, `template`, `verifier_user`, `verifier_provider_options` and `max_bytes`, reward
-name and `verifier_timeout_multiplier`. Another entry's task in a shared store, a task from before the entry's
-`runtime_tasks` changed (a resumed run's), and any runtime task in an environment without `runtime_tasks` are refused
-when they open
-(`env_config`), never run as ordinary tasks. The store's default follows the run's directory: code that reads tasks
-outside the run's processes, or across runs, sets `store`.
+name and `verifier_timeout_multiplier` (its `store` and `regrade` may differ). Another entry's task in a shared store, a
+task from before the entry's `runtime_tasks` changed (a resumed run's), and any runtime task in an environment without
+`runtime_tasks` are refused when they open (`env_config`), never run as ordinary tasks. The store's default follows the
+run's directory: code that reads tasks outside the run's processes, or across runs, sets `store`.
 
 **The task's grader.** `tests/gen/grader.json` names the grader's command, and the task's replay if it has one:
 
@@ -1873,26 +1873,28 @@ the working directory and makes the working directory root's with the group and 
 there is the replay's user's to write (files and directories, at any depth), runs the replay and kills what it left
 (below the launcher, or of the replay's user — one of that user's it cannot signal is a survivor, the solver's 0, never
 excluded as foreign), removes what that user left where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`,
-`/run/lock` and `/dev/mqueue`) and all of the replay's copy but the outputs (which wait as root's) before the grader
-reads them, runs the grader for the rest of the verifier's time limit, kills every process the grader left, and writes
-the only reward file, with its report, `/logs/verifier/launcher.json` (at most 64 KiB: a larger one leaves out the
-verdict's checks, then the artifacts' names), which the outcome's metadata holds as `launcher`. It reads every file
-whose contents it uses (its settings, a JSON artifact, a replayed output, the verdict, a log's tail) without following a
-link or waiting on a FIFO, checking the open file. That report is the grade: the entry's `verifier_classifiers`, its
-reading of reward files that are not regular files and its reward contract's `check` hook apply to its curated tasks
-only, since a grader that runs as root could write what they read.
+`/run/lock` and `/dev/mqueue`) and all of the replay's copy but the outputs (which wait as root's), puts the outputs
+back and notes their SHA-256 (`replayed_sha256`) before the grader reads them, runs the grader for the rest of the
+verifier's time limit, kills every process the grader left, and writes the only reward file, with its report,
+`/logs/verifier/launcher.json` (at most 64 KiB: a larger one leaves out the verdict's checks, then the artifacts'
+names), which the outcome's metadata holds as `launcher`. It reads every file whose contents it uses (its settings, a
+JSON artifact, a replayed output, the verdict, a log's tail) without following a link or waiting on a FIFO, checking
+the open file. That report is the grade: the entry's `verifier_classifiers`, its reading of reward files that are not
+regular files and its reward contract's `check` hook apply to its curated tasks only, since a grader that runs as root
+could write what they read.
 
 | What happened | Outcome |
 |---|---|
 | The verdict passed, or did not | `scored`, 1 or 0, as the reward contract's first name (`reward` by default) |
 | A declared artifact breaks the output contract; the working directory is more than a replay copies (4 GiB beyond the task's own files), or the artifacts take longer to check than the verifier's time limit allows | `scored` 0, reason `solver_output_contract` |
-| The replay fails, outlives its time, lacks its own program, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a filesystem (disk, inode or memory exhaustion it causes is its own, never the launcher's), or does not write an output again | `scored` 0, reason `solver_nonreproducible` |
+| The replay fails, outlives its time, lacks its own program, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a filesystem (disk, inode or memory exhaustion it causes is its own, never the launcher's), or does not write an output again; or a regrade's replay writes other outputs than the first grade's, which the grader scores otherwise (**Regrades**, below) | `scored` 0, reason `solver_nonreproducible` |
 | The grader exits nonzero, or cannot start | `invalid`, `verifier_generated_exit` |
 | The grader outlives its time | `invalid`, `verifier_generated_timeout` |
 | No verdict, or one beyond the schema; a replay command of the image's that cannot start | `invalid`, `verifier_generated_protocol` |
 | What the grader left could not be killed | `invalid`, `verifier_generated_isolation` |
 | The launcher fails once the grader ran; it exits nonzero, leaves no report it writes, or outlives the verifier's time limit; grading cannot kill what was left in the verifier, or read its output | `invalid`, `verifier_generated_unfinished`, whatever the reward file says: the grader, root beside the launcher, may have stopped it |
 | The launcher cannot do its own part before the grader runs: no `python3`, no root, no other user to replay as, a seal that does not take, a working directory inside what it seals or one the replay's user may write in | `invalid`, `verifier_trusted_launcher` |
+| A generated grader's score, graded again in a fresh verifier, comes out otherwise for the same artifacts and replayed outputs (**Regrades**, below) | `invalid`, `verifier_flaky` |
 
 A trusted grader (`grader_owner="trusted"`) gets `verifier_trusted_exit`, `verifier_trusted_timeout`,
 `verifier_trusted_protocol`, `verifier_trusted_isolation` and `verifier_trusted_unfinished` instead. A score of 0 that
@@ -1905,6 +1907,29 @@ platoon's kinds, such as `verifier_start` and `verifier_setup`. A program that r
 `verifier_generated_*` kinds to the generator once a known-good task on the same environment rules out the sandbox (a
 `verifier_generated_unfinished` may be the sandbox's, out of memory or disk). The environment's curated tasks are
 fetched, listed, opened and graded as before.
+
+**Regrades.** A grader the generator wrote may give the same submission a score one time and another the next: one
+that flips a coin passes three reference solutions and fails three no-op ones one time in 64. So once a task's
+generated grader scored the artifacts, they are graded again, `runtime_tasks.regrade` times (1 by default), each time
+in a fresh verifier's sandbox, started after the one before stopped, with the same artifacts, tests and launcher, and
+the score stands only while every regrade gives it again. A regrade runs the submission's replay again, and the
+launchers' reports say whether the replays wrote the same bytes (`replayed_sha256`, taken before the grader runs):
+
+| A regrade | The grade |
+|---|---|
+| gives the same score | the first grade's score, and the next regrade runs |
+| gives another score of the same bytes: the same artifacts and, for a task with a replay, the same outputs of it | `invalid`, `verifier_flaky`, and no regrade runs after it |
+| gives another score, its replay having written other outputs than the first grade's | `scored` 0, reason `solver_nonreproducible`: a submission that computes something else each time it runs does not reproduce, which is the solver's fault and never the grader's; no regrade runs after it |
+| gives no score of the grader's: the solver's 0, such as a replay that does not reproduce the submission this time; a non-score of the grader's, such as `verifier_generated_timeout`; or an infrastructure fault, such as `verifier_start` | that regrade's own outcome, attributed as any grade's, and no regrade runs after it |
+
+A grade that is no score of the grader's, such as the solver's 0 that the launcher gives before the grader runs, is not
+regraded. The outcome's metadata lists each regrade in `regrades`: its `status`, `reward`, `failure_kind`, `reason`
+and `metadata`, its own `launcher` report among it. The rest of the metadata is the first grade's (its `launcher`
+report, `verifier_exit_code`, `test_output`), but where a regrade's own outcome stands it is that regrade's, and the
+first grade is in `first_grade`, as an entry of `regrades` is. The artifacts, which every grade gets alike, are listed
+once, in `artifacts`. Each regrade costs a verifier's start and up to the verifier's time limit, which deadlines on
+whole rollouts count; `regrade: 0` grades once. A trusted grader (`grader_owner="trusted"`) is never regraded, and
+neither are the environment's curated tasks, whose grading a regrade would change.
 
 **Before a run.** `platoon train`, `eval` and `rollout` refuse an environment whose provider options could not run its
 runtime tasks when they list its tasks (exit 78): sandboxes without a network, the verifiers' root filesystem layout,

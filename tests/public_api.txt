@@ -383,6 +383,7 @@ platoon.experimental.RuntimeTasksConfig: @dataclass(frozen=True) class RuntimeTa
 platoon.experimental.RuntimeTasksConfig.coerce: classmethod def coerce(value: RuntimeTasksConfig | Mapping[str, Any]) -> RuntimeTasksConfig
 platoon.experimental.RuntimeTasksConfig.images: field Mapping[str, str]
 platoon.experimental.RuntimeTasksConfig.max_bytes: field int = 268435456
+platoon.experimental.RuntimeTasksConfig.regrade: field int = 1
 platoon.experimental.RuntimeTasksConfig.store: field str | None = None
 platoon.experimental.RuntimeTasksConfig.store_path: def store_path() -> Path
 platoon.experimental.RuntimeTasksConfig.template: field Mapping[str, Any]

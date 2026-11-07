@@ -39,6 +39,14 @@ lock would hold); its separate verifier starts with ``runtime_tasks.verifier_pro
 and its grade is what the launcher's report says (:func:`launcher_outcome`): once the grader runs, a non-score is named
 by the grader's owner, as is a launcher that did not finish (:func:`unfinished`).  The entry's other tasks are fetched,
 listed, opened and graded as before.
+
+A grade of a task whose grader is generated (the generator's, not trusted code's) is **regraded**: its grader's score
+is graded again ``regrade`` times (:func:`regrade_count`), each time in a fresh verifier after the one before, and
+stands only while every regrade gives the same score.  A regrade that scores otherwise makes the grade ``invalid``,
+:data:`FLAKY`, where its replay wrote the same outputs as the first grade's, and the solver's 0
+(``solver_nonreproducible``) where it wrote others; one that gives no score of the grader's makes the grade that
+regrade's outcome (:func:`regraded`).  A trusted grader is never regraded, nor is any of the entry's other tasks, whose
+grading a regrade would change.
 """
 
 from __future__ import annotations
@@ -51,8 +59,8 @@ import shutil
 import stat
 import tomllib
 import uuid
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -81,6 +89,10 @@ from platoon.task import Task
 #: Who wrote a runtime task's grader, which names the failure kinds of its non-scores (``verifier_generated_*`` for one
 #: the generator wrote, ``verifier_trusted_*`` for trusted code's, such as a task producer's own grader).
 GRADER_OWNERS = launcher.OWNERS
+#: The failure kind of a grade whose generated grader, graded again in a fresh verifier, gave the same artifacts (and
+#: the same replayed outputs) another score (:func:`regraded`).
+FLAKY = "verifier_flaky"
+DEFAULT_REGRADE = 1
 DEFAULT_MAX_BYTES = 256 * 2**20
 #: The most files and directories a runtime task holds.
 MAX_ENTRIES = 10_000
@@ -125,7 +137,14 @@ _REFUSED_ENVIRONMENT_FILES = (
     ("Dockerfile", "a runtime task runs a prebuilt image of runtime_tasks.images, and builds none"),
     ("docker-compose.yaml", "a runtime task runs in one sandbox, never a multi-container stack"),
 )
-_CONFIG_KEYS = ("images", "template", "verifier_user", "verifier_provider_options", "max_bytes", "store")
+_CONFIG_KEYS = ("images", "template", "verifier_user", "verifier_provider_options", "regrade", "max_bytes", "store")
+# The keys of the config that its fingerprint leaves out: where the tasks are kept, and how often a generated grader's
+# score is graded again, neither of which a task was checked or set up against.
+_UNFINGERPRINTED = ("regrade", "store")
+# What a grade's metadata records of the artifacts it graded (platoon.envs.harbor.session), which each regrade of them
+# records alike: a regraded outcome lists them once, and the entries of its grades (regrades, first_grade) leave them
+# out.
+_ARTIFACT_KEYS = ("artifacts", "artifacts_skipped", "artifacts_skipped_count")
 # The launcher's entry point, which a verifier runs as `bash /tests/test.sh`: the image's python3 runs the launcher
 # beside it, and without one the grade is a fault on the trusted side, never a score.
 TEST_SH = """#!/bin/sh
@@ -154,7 +173,8 @@ class RuntimeTasksConfig:
     ``[verifier.environment] docker_image``, whose image would bring its own ``/tests``), and name one of ``images`` as
     its ``[environment] docker_image``; and it gives neither ``[task] name`` nor ``artifacts``, which are each task's
     own.  The launcher runs as root, so the template's ``[verifier] user`` is root, with ``verifier_user: honor``, on
-    verifiers' sandboxes that give root.
+    verifiers' sandboxes that give root.  ``regrade`` grades a generated grader's score again, each time in a fresh
+    verifier, and the grade stands only while every regrade gives the same score.
     """
 
     # The docker_image names a runtime task may give, each with the image its sandboxes run, written as a task's own
@@ -169,6 +189,11 @@ class RuntimeTasksConfig:
     # (or provider_options), such as {rootfs_layout: copy, fakeroot: true} for verifiers that run as root on
     # Singularity; the entry's other tasks keep theirs.
     verifier_provider_options: Mapping[str, Any] = field(default_factory=dict)
+    # How many times a score of a runtime task's generated grader is graded again, each time in a fresh verifier after
+    # the one before: the score stands only while every regrade gives it again, and a regrade that scores otherwise
+    # makes the grade invalid (verifier_flaky), or the solver's 0 where the submission's replay wrote other outputs. 0
+    # grades once. A trusted grader is never regraded.
+    regrade: int = DEFAULT_REGRADE
     # The most a runtime task's files may hold, in bytes.
     max_bytes: int = DEFAULT_MAX_BYTES
     # The directory that keeps the runtime tasks, each in <store>/<digest>. None: runtime-tasks in the run's directory
@@ -198,6 +223,11 @@ class RuntimeTasksConfig:
                 f"runtime_tasks.verifier_provider_options must be a mapping, got {self.verifier_provider_options!r}"
             )
         object.__setattr__(self, "verifier_provider_options", dict(self.verifier_provider_options))
+        if isinstance(self.regrade, bool) or not isinstance(self.regrade, int) or self.regrade < 0:
+            raise ValueError(
+                "runtime_tasks.regrade must be how many times a generated grader's score is graded again, 0 or more, "
+                f"got {self.regrade!r}"
+            )
         if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes < 1:
             raise ValueError(f"runtime_tasks.max_bytes must be a positive number of bytes, got {self.max_bytes!r}")
         if self.store is not None and not isinstance(self.store, str | os.PathLike):
@@ -274,10 +304,11 @@ def materialize_task(
     is the name of the reward the launcher writes (the reward contract's first), and ``timeout_multiplier`` scales the
     verifier's time limit, as the environment's ``verifier_timeout_multiplier``.  ``grader_owner`` says who wrote the
     task's grader: ``generated`` (by the producer) or ``trusted`` (trusted code), which names the failure kinds of its
-    non-scores.  ``replay_address_space_bytes`` caps the address space each of the task's replay processes may reserve
-    (``RLIMIT_AS``; :data:`DEFAULT_REPLAY_ADDRESS_SPACE_BYTES`, None, sets no per-process cap).  Problems of ``source``
-    come back as problems; a ``ValueError`` for a replay address space that is not a positive integer, and an
-    ``OSError`` writing the store is raised."""
+    non-scores and says whether its scores are regraded (:func:`regrade_count`).  ``replay_address_space_bytes`` caps
+    the address space each of the task's replay processes may reserve (``RLIMIT_AS``;
+    :data:`DEFAULT_REPLAY_ADDRESS_SPACE_BYTES`, None, sets no per-process cap).  Problems of ``source`` come back as
+    problems; a ``ValueError`` for a replay address space that is not a positive integer, and an ``OSError`` writing
+    the store is raised."""
 
     if grader_owner not in GRADER_OWNERS:
         raise ValueError(f"grader_owner must be one of {GRADER_OWNERS}, got {grader_owner!r}")
@@ -488,12 +519,12 @@ def task_digest(task_dir: Path) -> str:
 
 
 def config_fingerprint(config: RuntimeTasksConfig, *, reward_key: str, timeout_multiplier: float) -> str:
-    """A SHA-256 of what a runtime task was checked and set up against: the config but for its store, the name of the
-    reward the launcher writes and the verifier's time multiplier.  ``materialize`` writes it into the task's launcher
-    settings, and an environment runs only the runtime tasks that carry its own (another entry's ``runtime_tasks``, or
-    this one's before they changed, never checked them)."""
+    """A SHA-256 of what a runtime task was checked and set up against: the config but for its store and ``regrade``,
+    the name of the reward the launcher writes and the verifier's time multiplier.  ``materialize`` writes it into the
+    task's launcher settings, and an environment runs only the runtime tasks that carry its own (another entry's
+    ``runtime_tasks``, or this one's before they changed, never checked them)."""
 
-    fields = {key: getattr(config, key) for key in _CONFIG_KEYS if key != "store"}
+    fields = {key: getattr(config, key) for key in _CONFIG_KEYS if key not in _UNFINGERPRINTED}
     text = json.dumps(
         {"config": fields, "reward_key": reward_key, "timeout_multiplier": float(timeout_multiplier)},
         sort_keys=True,
@@ -655,6 +686,99 @@ def grader_kind(settings: Mapping[str, Any]) -> str:
 
     owner = settings.get("grader_owner")
     return launcher.GRADER_KINDS[owner if owner in launcher.OWNERS else "generated"]
+
+
+def regrade_count(settings: Mapping[str, Any], config: RuntimeTasksConfig) -> int:
+    """How many times a score of a runtime task's grader is graded again (:func:`regraded`): the config's ``regrade``
+    where the grader is generated, by its owner in the task's launcher settings (``settings``, read as
+    :func:`grader_kind` reads them), and 0 for a trusted grader, whose grades the trusted code answers for."""
+
+    return config.regrade if grader_kind(settings) == launcher.GRADER_KINDS["generated"] else 0
+
+
+def grader_scored(outcome: Outcome) -> bool:
+    """Whether a runtime task's grade is its grader's score, which a regrade checks: a score the launcher gave from the
+    grader's verdict, and not a solver's 0 it gave before the grader ran (``solver_output_contract``,
+    ``solver_nonreproducible``), which names its reason."""
+
+    return outcome.trainable and outcome.reason is None
+
+
+def agrees(regrade: Outcome, first: Outcome) -> bool:
+    """Whether ``regrade``, a grade of the same artifacts as ``first``, a grader's score, is the grader's score of the
+    same rewards."""
+
+    return grader_scored(regrade) and regrade.rewards == first.rewards
+
+
+def regraded(first: Outcome, regrades: Sequence[Outcome]) -> Outcome:
+    """The grade of a runtime task whose grader's score, ``first`` (:func:`grader_scored`), was graded again, each time
+    in a fresh verifier after the one before (``regrades``, in order, up to the first that does not agree with it).
+
+    It is ``first`` while every regrade is the grader's score of the same rewards (:func:`agrees`).  A regrade that is
+    the grader's score of others makes it ``invalid`` :data:`FLAKY` where the grader judged the same bytes: the
+    artifacts, which every grade gets alike, and for a task with a replay, the same outputs of it, as their SHA-256 in
+    the launchers' reports says.  Where the replays wrote other outputs, the submission computed something else this
+    time, and the grade is the solver's 0 (``solver_nonreproducible``).  A regrade that is no score of the grader's
+    makes the grade its own outcome, attributed as any grade's: an infrastructure fault (its verifier did not start,
+    the launcher could not do its part), the solver's 0 (the replay did not reproduce the submission this time), or
+    the grader's non-score.
+
+    The outcome's metadata is that of the grade it is, ``first``'s, but where a regrade's own outcome stands, that
+    regrade's, with ``first`` in ``first_grade``; and ``regrades`` lists each regrade.  Each entry holds a grade's
+    status, reward (None where it is not scored), failure kind, reason and metadata, but for what that records of the
+    artifacts, which every grade gets alike and the outcome lists once."""
+
+    entries = [_grade_entry(regrade) for regrade in regrades]
+    for number, regrade in enumerate(regrades, start=1):
+        if agrees(regrade, first):
+            continue
+        if not grader_scored(regrade):
+            own = {key: value for key, value in regrade.metadata.items() if key not in _ARTIFACT_KEYS}
+            artifacts = {key: value for key, value in first.metadata.items() if key in _ARTIFACT_KEYS}
+            metadata = {**own, **artifacts, "first_grade": _grade_entry(first), "regrades": entries}
+            return replace(regrade, rewards=dict(regrade.rewards), metadata=metadata)
+        metadata = {**first.metadata, "regrades": entries}
+        replayed = _replayed_sha256(first)
+        if _replayed_sha256(regrade) != replayed:
+            return Outcome(
+                status="scored",
+                rewards={first.primary: 0.0},
+                primary=first.primary,
+                reason=launcher.NONREPRODUCIBLE,
+                metadata=metadata,
+            )
+        judged = "artifacts" if replayed is None else "artifacts and replayed outputs"
+        return Outcome.infra(
+            FLAKY,
+            status="invalid",
+            reason=(
+                f"the task's generated grader scored the same {judged} {first.reward:g}, then {regrade.reward:g} in a "
+                f"fresh verifier (regrade {number}): its score does not repeat, so neither stands"
+            ),
+            metadata=metadata,
+        )
+    return replace(first, rewards=dict(first.rewards), metadata={**first.metadata, "regrades": entries})
+
+
+def _replayed_sha256(grade: Outcome) -> str | None:
+    """The SHA-256 of the outputs a grade's replay wrote, as its launcher's report says; None for a task without a
+    replay."""
+
+    report = grade.metadata.get("launcher")
+    return report.get(launcher.REPLAYED_SHA256) if isinstance(report, Mapping) else None
+
+
+def _grade_entry(grade: Outcome) -> dict[str, Any]:
+    """What a regraded outcome records of one of its grades (:func:`regraded`)."""
+
+    return {
+        "status": grade.status,
+        "reward": grade.reward,
+        "failure_kind": grade.failure_kind,
+        "reason": grade.reason,
+        "metadata": {key: value for key, value in grade.metadata.items() if key not in _ARTIFACT_KEYS},
+    }
 
 
 def _failure_kinds(settings: Mapping[str, Any]) -> tuple[str, ...]:
