@@ -795,8 +795,10 @@ API_SECTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "Episode programs",
         "An episode program decides how one task's rollout runs its agents and grades the result. The default "
-        "program, `single`, runs the environment's harness on the root agent and grades the session.",
-        ("program", "EpisodeContext", "EpisodeProgram"),
+        "program, `single`, runs the environment's harness on the root agent and grades the session. A program may "
+        "declare options, which an environment sets in `program_options`, and a check that refuses, when the config "
+        "loads, an environment it cannot serve.",
+        ("program", "EpisodeContext", "EpisodeProgram", "CheckContext"),
     ),
     (
         "Environments",

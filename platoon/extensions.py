@@ -1132,12 +1132,15 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
     that gives its groups no verdict; and its entries' credit estimators (``kind: credit``), likewise, refused beside a
     workflow that does not apply them; agents bound to several policies are refused beside a workflow that binds one,
     as an entry's own settings are beside one that does not apply them.  A harness with an option schema (a TOML
-    spec's ``[options]``) also records the options each entry runs it with, defaults included, per phase
-    (``options``: ``{entry: {train: ..., eval: ...}}``, :mod:`platoon.options`): the phases the config runs
-    (:func:`platoon.options.config_phases`), or with ``split`` that split's phase only, for a command that runs one
-    split whatever the config says (``platoon rollout``).  A reference that does not resolve, and options its
-    component does not take, raise :class:`~platoon.utils.config.ConfigError` with every problem, which the CLI
-    reports with exit 78 before the run starts.
+    spec's ``[options]``), and a program that declares options (``@pt.program(name, options=...)``), also record the
+    options each entry runs it with, defaults included, per phase (``options``: ``{entry: {train: ..., eval: ...}}``,
+    :mod:`platoon.options`): the phases the config runs (:func:`platoon.options.config_phases`), or with ``split``
+    that split's phase only, for a command that runs one split whatever the config says (``platoon rollout``); and in
+    a training or an evaluation config, a program's ``check`` runs for each of those phases (a config of environments
+    alone, which ``platoon prepare`` loads, gives no run's rollout settings for a check to read).  A reference that
+    does not resolve, options its component does not take, and a check that refuses its entry raise
+    :class:`~platoon.utils.config.ConfigError` with every problem, which the CLI reports with exit 78 before the run
+    starts.
     """
 
     from platoon.options import config_phases
@@ -1195,6 +1198,7 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
             describe = functools.partial(_describe_registry_component, "workflow")
             add("workflow", environment.workflow, label, "workflow", describe)
     problems += _check_options(environments, records, phases=config_phases(config, split))
+    problems += _check_program_options(config, environments, records, phases=config_phases(config, split))
     problems += _check_service_options(environments, records)
     samplers: list[dict[str, Any]] = []
     rules: list[dict[str, Any]] = []
@@ -1365,6 +1369,61 @@ def _check_options(
             problems += [problem for problem in checked.problems if problem not in problems]
             if checked.values:
                 record.setdefault("options", {})[environment.label] = lock_record(checked.values)
+    return problems
+
+
+def _check_program_options(
+    config: Any,
+    environments: Sequence[Any],
+    records: Mapping[tuple[str, str], dict[str, Any]],
+    *,
+    phases: Sequence[Any],
+) -> list[str]:
+    """Check each entry's program options against the schema of its resolved program, run the program's check for
+    each of ``phases`` with that phase's rollout config (:func:`platoon.options.check_program_options`), and record
+    in the program's lock record, for a program that declares options, what each entry's rollouts of each phase run
+    with, defaults included (``options``: ``{entry label: {phase: options}}``).  The checks run for a training or an
+    evaluation config only, whose sections give each phase's rollout config: a config of environments alone (a file
+    that such configs extend, and what ``platoon prepare`` loads of any config) has its options checked, and its
+    checks wait for the configs that run it.  An entry without a harness runs no program, so options set for one are
+    refused.  Returns the problems, one line each, with dotted paths."""
+
+    from platoon.options import check_program_options, lock_record
+    from platoon.programs import resolve_program
+    from platoon.train.entry_settings import phase_rollout_configs
+
+    problems: list[str] = []
+    runs = getattr(config, "train", None) is not None or getattr(config, "inference", None) is not None
+    rollouts: dict[Any, dict[str, Any]] | None = None  # each phase's rollout configs by entry, once a check needs them
+    for index, environment in enumerate(environments):
+        where = f"environments.{index}"
+        if environment.harness is None:
+            for key, value in (
+                ("program_options", environment.program_options),
+                ("eval_overrides.program_options", environment.eval_overrides.program_options),
+            ):
+                if value:
+                    problems.append(
+                        f"{where}.{key}: the entry has no harness, so no episode program runs its rollouts to take "
+                        "them; leave program_options out"
+                    )
+            continue
+        record = records.get(("program", environment.program))
+        if record is None:  # it did not resolve, which is reported already
+            continue
+        program = resolve_program(environment.program)
+        if runs and program.check is not None and rollouts is None:
+            rollouts = {phase: phase_rollout_configs(config, phase) for phase in phases}
+        checked = check_program_options(
+            environment,
+            program,
+            where=where,
+            phases=phases,
+            rollouts=None if rollouts is None else {phase: rollouts[phase][environment.label] for phase in phases},
+        )
+        problems += checked.problems
+        if program.options_schema is not None and checked.values:
+            record.setdefault("options", {})[environment.label] = lock_record(checked.values)
     return problems
 
 

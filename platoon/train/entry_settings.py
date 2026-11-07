@@ -595,6 +595,24 @@ def evaluation_rollout_configs(config: Any, split: str | None = None) -> dict[st
     return configs
 
 
+def phase_rollout_configs(config: Any, phase: str) -> dict[str, Any]:
+    """Each entry's rollout config for its rollouts of ``phase`` (``train``, the train split's, or ``eval``, every
+    other split's), by label, as a run of ``config``, a training or an evaluation config, lays it: in a training
+    config, that of the entry's training groups for ``train`` and of its evaluation rollouts during training for
+    ``eval`` (:func:`run_settings`); in an evaluation config, ``platoon eval``'s (:func:`evaluation_rollout_configs`).
+    What an episode program's load-time check sees of the phase (``platoon.options.CheckContext``).  A config of
+    neither kind, such as a file of environments alone, gives none: ``ValueError``."""
+
+    if getattr(config, "inference", None) is not None:
+        return evaluation_rollout_configs(config, "train" if phase == "train" else "eval")
+    if getattr(config, "train", None) is not None:
+        return {
+            label: (settings.train if phase == "train" else settings.eval).rollout_config
+            for label, settings in run_settings(config).items()
+        }
+    raise ValueError("only a training or an evaluation config gives each entry's rollout settings of a phase")
+
+
 def evaluation_unapplied(config: Any, split: str | None = None) -> list[str]:
     """The entry keys ``platoon eval`` does not apply, one line each: it applies an entry's rollout settings only, so
     the rest of its ``workflow_config`` and ``eval_overrides.workflow_config``, and its ``max_staleness``, are

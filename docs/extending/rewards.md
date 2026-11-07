@@ -130,29 +130,34 @@ class StepCost:
                 trajectory.steps[-1].misc.setdefault("reward_misc", {})["reward/step_cost"] = charge
 
 
-@pt.program("my-step-cost")
-async def step_cost(ep: pt.EpisodeContext) -> pt.Outcome:
+@dataclass(frozen=True)
+class StepCostOptions:
+    """The program's options: an environments entry sets them in `program_options`."""
+
+    step_cost: float = 0.01  # reward charged per model call
+
+
+@pt.program("my-step-cost", options=StepCostOptions)
+async def step_cost(ep: pt.EpisodeContext[StepCostOptions]) -> pt.Outcome:
     """Run and grade the episode as the default program does, then charge for its model calls."""
 
     outcome = await single(ep)
-    ep.add_finalizer(StepCost(cost=float(ep.config.extra.get("step_cost", 0.01))))
+    ep.add_finalizer(StepCost(cost=ep.options.step_cost))
     return outcome
 ```
 
 The program composes with the built-in `single`: `single` runs and grades the root and adds the root-success
 finalizer when `propagate_root_success` is on, and the step cost is added after it, so it runs after it. Select the
-program and set its parameter in the config:
+program and set its option next to it in the config, where it is checked when the config loads (a misspelled
+`step_cots` fails with exit code 78 and a did-you-mean):
 
 ```yaml
 environments:
   - service: python://guess:GuessTheNumber      # the quickstart's environment
     harness: platoon-react
     program: my-step-cost
-    package: my_rewards.step_cost     # imported first, so @pt.program("my-step-cost") registers
-train:
-  workflow_config:
-    rollout_config:
-      extra: {step_cost: 0.02}        # read by the program as ep.config.extra
+    program_options: {step_cost: 0.02}  # read by the program, parsed, as ep.options
+    package: my_rewards.step_cost       # imported first, so @pt.program("my-step-cost") registers
 ```
 
 Rules:

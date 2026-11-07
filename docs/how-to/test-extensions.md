@@ -152,6 +152,12 @@ def test_the_program_records_the_number_of_guesses():
     assert run.root.misc["guesses"] == 7 and run.reward == 1.0
 ```
 
+A program that declares options (`@pt.program(name, options=...)`) takes them as `program_options=`, as an
+environment entry's `program_options`, and reads them as `ep.options`. `run_episode` resolves the program and parses
+the options against its schema before anything runs, as a config's are when it loads, so a program that does not
+resolve, options it does not take and a required option left out raise in the test (the options' problems as a
+`ConfigError`, a `ValueError`) rather than ending the episode with an error.
+
 ### 5. Test a config through the command line
 
 `serve_policy` makes `platoon rollout` and `platoon eval`, called in your test process, sample the scripted policy
@@ -397,7 +403,7 @@ experimental credit API (`platoon.experimental`), and changes with it.
 | `sample_response` | `sample_response(tokens, *, stop_reason="stop", routing_id=None, logprob=-0.25)`: a `tinker` `SampleResponse`, for samplers of your own |
 | `make_gateway` | `make_gateway(policy=(), *, tokenizer=None, renderer=None, renderer_kwargs=None, model_name="platoon/toy", **settings) -> ModelGateway`. `renderer`: a renderer or its name (default `qwen3_instruct`); `settings`: `ModelGateway` arguments such as `max_tokens`, `temperature` or `context_window_length` |
 | `serve_policy` | `serve_policy(policy=(), *, tokenizer=None, renderer=None, **settings)`: a context manager that yields the `ScriptedPolicy` |
-| `run_episode` | `async run_episode(task, *, service, harness, policy=(), service_kwargs=None, harness_options=None, program="single", agents=None, max_steps=None, rollout=None, output_dir=None) -> EpisodeRun`. `rollout`: a `RolloutConfig` or a mapping of its fields; `output_dir`: default a new temporary directory |
+| `run_episode` | `async run_episode(task, *, service, harness, policy=(), service_kwargs=None, harness_options=None, program="single", program_options=None, agents=None, max_steps=None, rollout=None, output_dir=None) -> EpisodeRun`. `program`: resolved, and `program_options` parsed against its schema, before anything runs, a `ValueError` for options it does not take or a required one left out; `rollout`: a `RolloutConfig` or a mapping of its fields; `output_dir`: default a new temporary directory |
 | `EpisodeRun` | `collection`, `interactions`, `gateway`, `output_dir`, and the properties `trajectories` (the root's first), `root`, `children`, `outcome`, `reward` and `policy` |
 | `toy_tokenizer`, `toy_renderer` | `toy_tokenizer()`; `toy_renderer(name="qwen3_instruct")` |
 | `TOY_MODEL_NAME`, `TOY_RENDERER_NAME`, `TOY_TOKENIZER_DIR` | `"platoon/toy"`, `"qwen3_instruct"`, and the directory of the toy tokenizer's files |

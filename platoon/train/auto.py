@@ -21,7 +21,15 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from platoon.options import PHASES, Phase, check_harness_options, harness_options, phase_of
+from platoon.options import (
+    PHASES,
+    Phase,
+    check_harness_options,
+    check_program_options,
+    harness_options,
+    phase_of,
+    program_options,
+)
 from platoon.registry import import_from_string, import_modules, resolve_component
 from platoon.task import Task
 from platoon.train.components import (
@@ -784,9 +792,9 @@ class TaskRouter:
 def check_environment_routes(environments: Sequence[EnvironmentConfig]) -> None:
     """Build the route of every entry that has one (:func:`environment_routes`), for each phase, before any task is
     listed or env server contacted, so that a harness that does not resolve, cannot run as configured, takes no such
-    options or could never train is refused first, with exit 78.  The train and eval commands call it once the
-    entries' packages are imported; the rollout command builds the same routes when it loads its task
-    (:class:`TaskRouter`)."""
+    options or could never train, and program options that the entry's program does not take, are refused first,
+    with exit 78.  The train and eval commands call it once the entries' packages are imported; the rollout command
+    builds the same routes when it loads its task (:class:`TaskRouter`)."""
 
     for phase in PHASES:
         environment_routes(environments, phase=phase, only_routed=True)
@@ -824,9 +832,10 @@ def environment_route(
     A harness that does not resolve (an unknown or ambiguous name, a malformed spec, a spec file that does not
     exist, a ``module:function`` that does not import or is not an ``@harness``), that cannot run as configured, or
     whose rollouts could never train (:func:`harness_setting_problems`), and options its harness does not take
-    (``platoon.options``), are a ``ConfigError``, which the CLI reports with one line per problem and exit 78.  The
-    route carries the harness options of ``phase`` (``eval``: with ``eval_overrides`` applied); ``index`` is the
-    entry's position in ``environments``, for the dotted paths of option problems.
+    (``platoon.options``), are a ``ConfigError``, which the CLI reports with one line per problem and exit 78; so are
+    program options that its program, resolved when the entry sets some, does not take.  The route carries the harness
+    and program options of ``phase`` (``eval``: with ``eval_overrides`` applied); ``index`` is the entry's position in
+    ``environments``, for the dotted paths of option problems.
     """
 
     from platoon.harness.registry import get_harness
@@ -847,6 +856,7 @@ def environment_route(
     where = f"environments.{index}" if index is not None else f"environments[{environment.label}]"
     for harness in harnesses:
         problems += check_harness_options(environment, harness, where=where, phases=(phase,)).problems
+    problems += _program_option_problems(environment, where=where, phase=phase)
     if problems:
         raise ConfigError(list(dict.fromkeys(problems)))
     return EnvironmentRoute(
@@ -864,9 +874,26 @@ def environment_route(
         on_harness_exit=environment.on_harness_exit,
         resolve_task=environment.service is not None and environment.task_loader is None,
         program=environment.program,
+        program_options=program_options(environment, phase),
         harness_options=harness_options(environment, phase),
         agents=environment.agents,
     )
+
+
+def _program_option_problems(environment: EnvironmentConfig, *, where: str, phase: Phase) -> list[str]:
+    """The problems of the program options an entry sets (``program_options``, ``eval_overrides.program_options``)
+    against its program's schema, the program resolved for them; none for an entry that sets none, whose program a
+    route never resolves (a rollout of a program that does not resolve fails where it runs it)."""
+
+    if not environment.program_options and not environment.eval_overrides.program_options:
+        return []
+    from platoon.programs import resolve_program
+
+    try:
+        program = resolve_program(environment.program)
+    except Exception as exc:  # noqa: BLE001 - an unknown name, or a module:attr that does not import
+        return [f"{where}.program: {exc}"]
+    return check_program_options(environment, program, where=where, phases=(phase,)).problems
 
 
 def check_harness_toolchains(environments: Sequence[EnvironmentConfig]) -> None:

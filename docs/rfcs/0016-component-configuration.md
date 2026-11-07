@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0013](0013-extension-model.md) (the extension model: this RFC is its milestone M5 and the callbacks of its section 12), the config loader (`platoon/utils/config.py`), environment entries (`platoon/train/components.py`), named environments (`platoon/envs/named.py`), the TOML harness spec format (`platoon/harness/spec.py`), the hooks (`platoon/hooks.py`), [RFC 0008](0008-config-and-cli.md) (config and CLI) |
 | Discussion | The pull request that added this RFC, and the pull request of M1, which revises it with the decisions of 2026-10-17 (open questions 1 to 4, 6 and 7) |
-| Implementation | M1 (strict loading), in the pull request that revises this RFC; a `trainer_config` that does not resolve is already a configuration error (section 8), from RFC 0013's follow-ups |
+| Implementation | M1 (strict loading), in the pull request that revises this RFC; a `trainer_config` that does not resolve is already a configuration error (section 8), from RFC 0013's follow-ups; M2's options of episode programs (`@pt.program(name, options=, check=)`, `program_options` and `eval_overrides.program_options`, `ep.options` and `pt.CheckContext`, recorded in `lock.json` and shown by `program show`), ahead of the rest of M2, in the pull request that adds program options |
 
 ## Summary
 

@@ -32,8 +32,11 @@ it, mappings key by key and anything else, lists included, replacing.  ``harness
 options: those of the entry's harness are the lowest layer of its ``harness_options``, so a config that picks
 another harness does not inherit options it cannot read.  A harness mixture shares one ``harness_options``
 mapping, so a mixture that includes a harness with defaults is a config error unless the entry sets that mapping
-itself (then no defaults apply).  The loaded config keeps ``env: name@version`` with the version the name
-resolved to, so ``config.resolved.yaml`` pins it.
+itself (then no defaults apply).  Likewise a named environment that names its ``program`` may set its
+``program_options``, and its ``eval_overrides.program_options`` for evaluation rollouts, each the lowest layer of the
+entry's key of the same name while the entry keeps that program (by name): an entry that picks another program
+inherits neither.  The loaded config keeps ``env: name@version`` with the version the name resolved to, so
+``config.resolved.yaml`` pins it.
 
 **Training settings.**  A named environment may ship the rollout settings its tasks were measured with, such as a
 calibrated step budget (``workflow_config: {rollout_config: {max_steps: 30}}``), as the lowest layer of its entry's
@@ -123,7 +126,9 @@ class EnvironmentEntry:
     not offer a task leaves it out of its own task lists, in a new version), ``harness_options``, for which
     ``harness_defaults`` maps a harness name to the options the environment needs from that harness, of
     ``workflow_config`` all but the rollout settings (``rollout_config``) its tasks were measured with, and
-    ``eval_overrides.workflow_config``.
+    ``eval_overrides.workflow_config``.  ``program_options`` and ``eval_overrides.program_options`` go with the
+    ``program`` beside them, and apply, each beneath the selecting entry's key of the same name, while that entry keeps
+    the program.
     """
 
     # The environment's name, ``<owner>-<name>``.
@@ -167,6 +172,16 @@ class EnvironmentEntry:
                 "go in harness_defaults, keyed by harness, and the entry that selects the environment sets its own "
                 "eval_overrides"
             )
+        evaluation = overrides.get("program_options") if isinstance(overrides, Mapping) else None
+        for key, value in (
+            ("program_options", keys.get("program_options")),
+            ("eval_overrides.program_options", evaluation),
+        ):
+            if value and "program" not in keys:
+                raise ValueError(
+                    f"{what} sets {key} without program: options go with the program they configure, so a named "
+                    "environment that sets them names its program beside them"
+                )
         settings = keys.get("workflow_config")
         if isinstance(settings, Mapping) and (strategy := sorted(set(settings) - SHIPPED_SETTINGS)):
             raise ValueError(
@@ -392,7 +407,10 @@ def expand_environment(entry: Mapping[str, Any]) -> dict[str, Any]:
     own = {key: value for key, value in entry.items() if key != "env"}
     from platoon.utils.config import deep_merge
 
-    merged = deep_merge(named.entry(), own)
+    keys = named.entry()
+    if not _same_program(own.get("program", keys.get("program")), keys.get("program")):
+        _drop_program_options(keys)  # options of the program the entry replaced: they apply only with it
+    merged = deep_merge(keys, own)
     harness = merged.get("harness")
     if isinstance(harness, Mapping) and len(harness) > 1 and "harness_options" in own:
         defaults: dict[str, Any] = {}  # the entry sets its mixture's shared options itself
@@ -402,6 +420,31 @@ def expand_environment(entry: Mapping[str, Any]) -> dict[str, Any]:
         options = merged.get("harness_options")
         merged["harness_options"] = deep_merge(defaults, options if isinstance(options, Mapping) else {})
     return {"env": ref if ":" in ref else named.ref, **merged}
+
+
+def _drop_program_options(keys: dict[str, Any]) -> None:
+    """Leave out of a named environment's ``keys`` the options of its program, its own and its evaluation
+    overrides', and the ``eval_overrides`` that held nothing else."""
+
+    keys.pop("program_options", None)
+    overrides = keys.get("eval_overrides")
+    if isinstance(overrides, Mapping) and "program_options" in overrides:
+        rest = {key: value for key, value in overrides.items() if key != "program_options"}
+        if rest:
+            keys["eval_overrides"] = rest
+        else:
+            del keys["eval_overrides"]
+
+
+def _same_program(ref: Any, named: Any) -> bool:
+    """Whether an entry's ``program`` (``ref``) is its named environment's (``named``): the same name, whatever version
+    either pins, as a harness's defaults go with its name; an import string only as itself."""
+
+    if not isinstance(ref, str) or not isinstance(named, str):
+        return ref == named
+    if ":" in ref or ":" in named:
+        return ref == named
+    return extensions.split_ref(ref)[0] == extensions.split_ref(named)[0]
 
 
 def expand_environments(data: Mapping[str, Any]) -> dict[str, Any]:

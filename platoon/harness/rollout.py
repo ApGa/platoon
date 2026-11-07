@@ -13,10 +13,12 @@ The task's ``EnvironmentRoute`` (attached by the Auto task loader) names the
 service and the harness drawn for the task:
 
 * a **function harness** (``@harness``) runs inline through the route's episode
-  program (``route.program``, default ``single``): the program runs the root
-  agent and grades, the collection is built with each agent's own outcome, and
-  the program's finalizers run on it before it is returned. A program that
-  raises is an ``error`` outcome, never a score.
+  program (``route.program``, default ``single``), with the route's
+  ``program_options`` parsed against its schema as ``ep.options``: the program
+  runs the root agent and grades, the collection is built with each agent's own
+  outcome, and the program's finalizers run on it before it is returned. A
+  program that raises, or options it does not take, is an ``error`` outcome,
+  never a score.
 * a **TOML spec** runs through ``HarnessRunner`` where the env wants it, with
   the placement and built-in tool settings.  Before the session opens, the
   rollout works out what the spec needs from the task sandbox
@@ -324,7 +326,7 @@ async def _run_function_rollout(
 
     from platoon.gateway.trace import attach_judge_audit, build_trajectory_collection
     from platoon.harness.inline import InlineRuntime, recorded_task
-    from platoon.programs import Episode, get_program
+    from platoon.programs import Episode, resolve_program
 
     model_gateway = getattr(gateway, "model_gateway", None)
     if model_gateway is None:
@@ -355,7 +357,14 @@ async def _run_function_rollout(
         )
         episode = Episode(task=task, session=session, config=config, route=route, runtime=runtime, root=root)
         try:
-            outcome = await get_program(route.program)(episode)
+            program = resolve_program(route.program)
+            try:  # the route's options, parsed again here against the program's schema: what ep.options gives
+                episode.options = program.parse_options(route.program_options)
+            except ValueError as exc:  # checked when the config loaded; a route built past that check gets here
+                refused = "; ".join(getattr(exc, "problems", None) or [str(exc)])
+                outcome = Outcome.infra("program_options", reason=f"program {route.program}: {refused}")
+            else:
+                outcome = await program.fn(episode)
             if not isinstance(outcome, Outcome):
                 raise TypeError(f"Program {route.program!r} returned {type(outcome).__name__}, not an Outcome")
         except Exception as exc:

@@ -191,8 +191,10 @@ FAIL broken.yaml
 It exits with 0 when every file is valid and 78 when any is not, so it fits in CI or a job script's first line.
 It checks the files and the named environments their entries select (`env:`), then resolves every harness,
 program and other component the config names, as a run does when it starts, which imports them, and checks the
-options set for them (a TOML spec's `[options]`, which `platoon harness show NAME` lists): run it where the config's
-extensions are installed, or pass `--no-resolve` to check only the files and the named environments. A service's
+options set for them (a TOML spec's `[options]`, which `platoon harness show NAME` lists, and a program's, which
+`platoon program show NAME` lists) and, in a training or an evaluation config, runs each program's check (a file of
+environments alone gives no run's rollout settings for a check to read): run it where the config's extensions are
+installed, or pass `--no-resolve` to check only the files and the named environments. A service's
 options (`service_kwargs`) are checked against what the service takes, without building it, so a misspelled one
 fails with a did-you-mean (`environments.0.service_kwargs.datset_dir: unknown key; did you mean
 environments.0.service_kwargs.dataset_dir?`), and so are the keys of `dataset_kwargs` and `eval_dataset_kwargs`
@@ -258,6 +260,8 @@ Some fields accept any keys, because their contents belong to something else:
 | `environments[].service_kwargs` | The environment service (for example `dataset_dir` and `provider` for Harbor), whose keys are checked against what it takes when the config loads |
 | `environments[].harness_options` | The harness: a TOML spec checks them against its `[options]` when the run starts; a function harness reads them as `ctx.options` |
 | `environments[].eval_overrides.harness_options` | The same harness, for evaluation rollouts: merged over `harness_options`, key by key |
+| `environments[].program_options` | The episode program, which checks them against the options it declares when the config loads (`platoon program show NAME` lists them) and reads them as `ep.options`; a program that declares none takes none |
+| `environments[].eval_overrides.program_options` | The same program, for evaluation rollouts: merged over `program_options`, key by key |
 | `environments[].dataset_kwargs`, `eval_dataset_kwargs` | The dataset loader, or a service's task listing, which takes `split_name`, `limit` and `shuffle_seed` |
 | `environments[].workflow_kwargs`, `eval_workflow_kwargs` | The rollout workflow |
 | `train.renderer_kwargs`, `inference.renderer_kwargs` | The renderer; unknown attributes fail when the renderer is built |
@@ -313,9 +317,10 @@ Two files go there, replacing any older copies:
   ([Choose a container runtime](clusters.md#5-choose-a-container-runtime-for-sandboxes));
   `components`, each component the config names (named environment, harnesses, program, reward processor, service
   and the other import strings) with what it resolved to and the distribution and version that provide it, and for
-  a harness with options (a TOML spec's `[options]`) the options each entry ran it with, defaults included, per
-  phase (`options: {<entry>: {train: {...}, eval: {...}}}`: a training run records `eval` only where
-  `eval_overrides` changes it, and an evaluation or a `platoon rollout` records the phase of the split it runs);
+  a harness with options (a TOML spec's `[options]`) and a program that declares options, the options each entry ran
+  it with, defaults included, per phase (`options: {<entry>: {train: {...}, eval: {...}}}`: a training run records
+  `eval` only where `eval_overrides` changes it, and an evaluation or a `platoon rollout` records the phase of the
+  split it runs);
   `extensions`, each of those distributions besides platoon with its requirements on platoon and how it was
   installed (`direct_url` shows an editable checkout); and `tool_call_parsing`, how the policy's responses are
   parsed: with the `chat_template` renderer, the tool-call parser chosen for the model's template ([Models and tool

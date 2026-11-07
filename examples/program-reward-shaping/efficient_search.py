@@ -4,7 +4,7 @@ The program runs the root agent with the environment's harness, grades it as usu
 Once the rollout's trajectories are built, the finalizer
 
 1. shapes the root's reward: a correct search keeps reward 1 within the guesses a binary search needs, and loses
-   ``penalty`` (``rollout_config.extra.guess_penalty``) for every guess beyond them;
+   ``guess_penalty``, the program's option (``program_options`` in the config), for every guess beyond them;
 2. asks a judge (``ep.judge_endpoint()``) for a one-line critique of the search and keeps it in the root's misc.
    The judge samples the policy model through the gateway; its calls are recorded for audit and never trained.
 
@@ -27,8 +27,19 @@ from platoon.utils.trajectory_status import trajectory_was_interrupted
 _RANGE = re.compile(r"between (-?\d+) and (-?\d+)")
 
 
-@pt.program("example-efficient-search")
-async def efficient_search(ep: pt.EpisodeContext) -> pt.Outcome:
+@dataclass(frozen=True)
+class SearchOptions:
+    """The program's options, which an environments entry sets in ``program_options``."""
+
+    guess_penalty: float = 0.1  # reward lost per guess beyond binary search's
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.guess_penalty <= 1:
+            raise ValueError(f"guess_penalty: must be between 0 and 1, got {self.guess_penalty}")
+
+
+@pt.program("example-efficient-search", options=SearchOptions)
+async def efficient_search(ep: pt.EpisodeContext[SearchOptions]) -> pt.Outcome:
     """Run and grade the root agent; once its trajectory is built, shape its reward (:class:`EfficiencyShaping`)."""
 
     await ep.run()
@@ -36,7 +47,7 @@ async def efficient_search(ep: pt.EpisodeContext) -> pt.Outcome:
         EfficiencyShaping(
             goal=ep.session.instruction,
             judge=ep.judge_endpoint(),
-            penalty=float(ep.config.extra.get("guess_penalty", 0.1)),  # rollout_config.extra in the config
+            penalty=ep.options.guess_penalty,  # program_options in the config, checked when it loads
         )
     )
     return await ep.grade()
