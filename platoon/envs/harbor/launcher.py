@@ -24,16 +24,29 @@ verifier's sandbox, with a umask that keeps what it writes root's alone.  In ord
    for a program), no core files, no file larger than an output may be, at most :data:`MAX_REPLAY_PROCESSES` processes
    of its user (threads count) and :data:`MAX_REPLAY_OPEN_FILES` open files, the most killable to the OOM killer
    (:data:`OOM_SCORE_ADJ`) and, where the settings give one, that much address space a process, for at most half the
-   time left.  It then kills what the replay left, below the launcher or of the replay's user (one of that user's it
-   cannot signal is a survivor, not foreign), removes what that user left where every user may write
-   (:data:`TEMPORARY`) and, in the replay's own copy, all but its outputs, which wait there as root's (:func:`_hold`,
-   :func:`remove_tree`, within :data:`CLEAR_WINDOW_S` past its time), and puts each output the replay wrote in its
-   place, with their SHA-256 in its report (:data:`REPLAYED_SHA256`), by which a regrade, which replays the submission
-   again, tells a submission that computes other outputs each time it runs from a grader that judges the same outputs
-   otherwise.  A violation, a submission too large to copy or too slow to check or copy, a replay that fails, outlives
-   its time, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a
-   filesystem, lacks its own program, and an output it does not write again score 0, the solver's fault (reason
-   ``solver_output_contract`` or ``solver_nonreproducible``);
+   time left (or the settings' ``replay_timeout_s``, below).  It then kills what the replay left, below the launcher or
+   of the replay's user (one of that user's it cannot signal is a survivor, not foreign), removes what that user left
+   where every user may write (:data:`TEMPORARY`) and, in the replay's own copy, all but its outputs, which wait there
+   as root's (:func:`_hold`, :func:`remove_tree`, within :data:`CLEAR_WINDOW_S` past its time), and, once the replay
+   checks below are done, puts each output the replay wrote in its place, with their SHA-256 in its report
+   (:data:`REPLAYED_SHA256`), by which a regrade, which replays the submission again, tells a submission that computes
+   other outputs each time it runs from a grader that judges the same outputs otherwise.  A violation, a submission
+   too large to copy or too slow to check or copy, a replay that fails, outlives its time, leaves processes that
+   cannot be killed, leaves more than the launcher removes in its time or fills a filesystem, lacks its own program,
+   and an output it does not write again score 0, the solver's fault (reason ``solver_output_contract`` or
+   ``solver_nonreproducible``).  A task may have **replay checks** (the settings' ``replay_checks``), whose data, the
+   grader owner's, lies in ``tests/gen`` (:func:`load_checks`; data it cannot use is ``<grader>_protocol``, below).
+   Before the replay, it scans the submission's sources that the checks name for **forbidden literals**: a number a
+   source states by :data:`LITERAL_SCAN` (:func:`source_literals`) within the tolerance of one of the task's scores 0
+   (reason ``solver_hardcoded``), and a source it cannot read as UTF-8 Python (by the verifier's ``python3``), or one
+   of more than :data:`MAX_SOURCE_BYTES`, breaks the contract.  Once the replay wrote every output again, it replays
+   each **variant** as the replay ran (:func:`_run_replay`: the same user, environment, limits, sweep and clearing), in
+   a fresh copy of the same clean inputs with the variant's own inputs laid over them, while what the replay wrote
+   waits in root's hands: the outputs a variant's replay writes must hold the numbers the variant expects, each within
+   its tolerance, or the submission scores 0 (reason ``solver_variant_failed``).  The replays share the replay's half
+   of the time left, each taking an equal part of what is left of it; with ``replay_timeout_s``, each takes at most
+   that long instead, and all of them end by ``1 + len(variants)`` times it after the launcher started, the grader
+   keeping the rest;
 3. runs the grader's command as root in ``/tests/gen``, with the verifier's own umask, for the rest of the verifier's
    time limit.  The grader judges the outputs in ``$PLATOON_WORKDIR``, the working directory, and writes its verdict
    to ``$PLATOON_VERDICT``: ``{"passed": true|false, "checks": [{"id": "...", "passed": true|false, "margin": 0.5}]}``,
@@ -44,26 +57,34 @@ verifier's sandbox, with a umask that keeps what it writes root's alone.  In ord
 5. writes the only reward file, ``reward.json``: the reward named ``reward_key``, 1 for a verdict that passed and 0
    for one that did not, or ``{"invalid": 1, "failure_kind": ...}``: ``<grader>_exit`` when the grader exits nonzero
    or cannot start, ``<grader>_timeout`` when it outlives its time, ``<grader>_protocol`` when it writes no verdict or
-   one beyond the schema (``invalid`` among them: a grader cannot censor a measurement) or the task's replay command
-   cannot start, ``<grader>_isolation`` when what it left cannot be killed, and ``<grader>_unfinished`` when the
-   launcher fails once the grader ran (as root, the grader may have broken what the launcher reads), ``<grader>``
-   being ``verifier_generated`` for a grader the generator wrote and ``verifier_trusted`` for a trusted one
-   (``grader_owner``); and ``verifier_trusted_launcher`` when the launcher cannot do its own part before the grader
-   runs (it does not run as root, cannot seal, cannot switch to the replay's user): a fault on the trusted side,
-   never the task's.  It removes everything else from ``/logs/verifier`` but ``test-stdout.txt`` and ``gen/``, writes
-   its report, ``launcher.json``, of at most :data:`MAX_REPORT_BYTES` (without the verdict's checks, then the
-   artifacts' names, where it would be larger), and exits 0, which the Harbor service checks.
+   one beyond the schema (``invalid`` among them: a grader cannot censor a measurement), the task's replay command
+   cannot start, or the data of its replay checks cannot be used, ``<grader>_isolation`` when what it left cannot be
+   killed, and ``<grader>_unfinished`` when the launcher fails once the grader ran (as root, the grader may have
+   broken what the launcher reads), ``<grader>`` being ``verifier_generated`` for a grader the generator wrote and
+   ``verifier_trusted`` for a trusted one (``grader_owner``); and ``verifier_trusted_launcher`` when the launcher
+   cannot do its own part before the grader runs (it does not run as root, cannot seal, cannot switch to the replay's
+   user): a fault on the trusted side, never the task's.  It removes everything else from ``/logs/verifier`` but
+   ``test-stdout.txt`` and ``gen/``, writes its report, ``launcher.json``, of at most :data:`MAX_REPORT_BYTES`
+   (without the verdict's checks, then the artifacts' names, the replay's outputs, the variants' records and the scan's
+   record, in that order, where it would be larger: :func:`bounded_report`), and exits 0, which the Harbor service
+   checks.
 
-Every file whose contents it reads (its settings, the artifacts' JSON, the replay's outputs, the verdict, the logs
-whose tails it keeps) is opened without following a link or waiting on a FIFO and checked on the open descriptor.
+Every file whose contents it reads (its settings, the artifacts' JSON, the sources it scans, the replay checks' data,
+the replays' outputs, the verdict, the logs whose tails it keeps) is opened without following a link or waiting on a
+FIFO and checked on the open descriptor.
 The launcher is no security boundary against the grader, which runs as root beside it: a grader may choose 0 or 1,
 which it may anyway and which controls check, and anything else is a non-score that attribution charges to it.
 """
 
 from __future__ import annotations
 
+import ast
+import bisect
+import codecs
+import contextlib
 import errno
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -90,15 +111,16 @@ GRADER_LOG = "grader.log"
 #: Where the agents publish what they leave besides the artifacts, which the verifier's sandbox may hold: sealed with
 #: ``/tests`` and ``/logs/verifier`` where they exist.
 PUBLISHED = ("/logs/agent", "/logs/artifacts")
-#: Where every user of the verifier's sandbox may write: after the replay, the launcher removes what the replay's user
-#: left there (:func:`clear_left`), so the grader neither finds it there nor goes without the room it took.  Besides the
-#: temporary directories, ``/run/lock`` (which Debian's images give every user, ``/var/lock`` linking to it) and the
-#: POSIX message queues' ``/dev/mqueue``; one the sandbox lacks is none, and one met twice through a link is cleared
-#: once.
+#: Where every user of the verifier's sandbox may write: after each replay (the replay's, and each variant's), the
+#: launcher removes what the replay's user left there (:func:`clear_left`), so that no later replay, nor the grader,
+#: finds it there or goes without the room it took.  Besides the temporary directories, ``/run/lock`` (which Debian's
+#: images give every user, ``/var/lock`` linking to it) and the POSIX message queues' ``/dev/mqueue``; one the sandbox
+#: lacks is none, and one met twice through a link is cleared once.
 TEMPORARY = ("/tmp", "/var/tmp", "/dev/shm", "/run/lock", "/var/lock", "/dev/mqueue")
 #: The user the replay runs as in the verifier's sandbox, and its group: no one else's, and never root (0).
 REPLAY_UID = 65533
-#: The share of the time left that the replay may take; the grader has the rest.
+#: The share of the time left that the replay may take, with its variants' replays if it has any; the grader has the
+#: rest.  The settings' ``replay_timeout_s`` gives each replay a time of its own instead.
 REPLAY_SHARE = 0.5
 #: The most processes the replay's user may have, its threads counted (``RLIMIT_NPROC``), and the most files a process
 #: of the replay may hold open (``RLIMIT_NOFILE``): room for threaded numerics, never enough to starve the launcher and
@@ -170,16 +192,58 @@ UNFINISHED = "unfinished"
 LAUNCHER_FAULT = "verifier_trusted_launcher"
 OUTPUT_CONTRACT = "solver_output_contract"
 NONREPRODUCIBLE = "solver_nonreproducible"
+#: The reasons of the solver's 0s that the replay checks give: a variant's replay that does not give what the variant
+#: expects, and a source that states a forbidden literal.
+VARIANT_FAILED = "solver_variant_failed"
+HARDCODED = "solver_hardcoded"
 #: The key of the report that holds the SHA-256 of the outputs the replay wrote, which the grader judged
 #: (:func:`outputs_sha256`); a task without a replay leaves it out.
 REPLAYED_SHA256 = "replayed_sha256"
 OUTPUTS_RULE = "platoon-replayed-outputs-v1"
+#: Where the data of a task's replay checks lies, relative to the task's directory: in ``tests/gen``, beside its grader,
+#: sealed with ``/tests`` and never in the agents' sandbox.
+CHECK_DATA = "tests/gen/"
+#: The rule by which the forbidden-literals check reads a source (:func:`source_literals`); a task producer that checks
+#: its own reference solution by the same rule knows that the reference states none.
+LITERAL_SCAN = "python-numeric-literals/v1"
+#: The largest source the scan reads: Python's parser takes up to about a kilobyte of memory for each byte of a source,
+#: and the launcher parses beside the grader, so it stays small; a larger source breaks the output contract.
+MAX_SOURCE_BYTES = 256 << 10
+#: The most sources one scan reads, variants a task has, forbidden literals one list holds, keys one variant expects
+#: and characters one key holds; the largest variant's expected outputs or forbidden-literals list read; the most a
+#: variant's ``meta`` holds as JSON, and how deeply it nests.
+MAX_SOURCES = 64
+MAX_VARIANTS = 32
+MAX_FORBIDDEN = 10_000
+MAX_EXPECTED_KEYS = 10_000
+MAX_KEY_CHARS = 2048
+MAX_CHECK_BYTES = 1 << 20
+MAX_META_BYTES = 8 << 10
+MAX_META_DEPTH = 16
+#: What the report keeps of a failed check: the first keys a variant's replay missed, and the first hits of the scan.
+REPORTED_MISSES = 10
+REPORTED_HITS = 10
+#: How many literals the scan matches between two looks at the clock.
+_SCAN_BATCH = 1024
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_SET_NO_NEW_PRIVS = 38
 _VERDICT_KEYS = ("passed", "checks")
 _CHECK_KEYS = ("id", "passed", "margin")
 _VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+#: A variant's name, and what its settings and a forbidden literal hold.
+VARIANT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_VARIANT_KEYS = ("name", "inputs", "expected", "tolerance", "meta")
+_FORBIDDEN_KEYS = ("path", "sources", "scan")
+_LITERAL_KEYS = ("value", "tolerance")
+_INDEX = re.compile(r"0|[1-9][0-9]{0,17}")  # a JSON Pointer's array index, below any length a list could have
+# What reading a source as Python raises for a source that is none (or no UTF-8), or one too deep or large for the
+# parser.
+_UNPARSABLE = (SyntaxError, ValueError, RecursionError, MemoryError, OverflowError, LookupError)
+_SIGNS = (ast.USub, ast.UAdd)
+# A coding line (PEP 263), and a line a coding line may follow, as Python's own tokenizer finds them.
+_CODING_LINE = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*([-\w.]+)", re.ASCII)
+_BLANK_LINE = re.compile(rb"^[ \t\f]*(?:[#\r\n]|$)", re.ASCII)
 
 
 class LauncherFault(Exception):
@@ -381,9 +445,124 @@ def read_config(path):
     keep = config.get("replay_env", [])
     if not (_strings(keep, empty=True) and all(_VARIABLE.fullmatch(name) for name in keep)):
         problems.append("replay_env")
+    checks = config.get("replay_checks")
+    if checks is not None:
+        why = "the task has no replay" if replay is None else checks_problem(checks)
+        if why is not None:
+            problems.append(f"replay_checks ({why})")
+    if "replay_timeout_s" in config and not problems:
+        why = replay_time_problem(config)
+        if why is not None:
+            problems.append(f"replay_timeout_s ({why})")
     if problems:
         raise LauncherFault(f"its settings {path} hold no usable {', '.join(problems)}")
     return config
+
+
+def replay_time_problem(config):
+    """Why the settings' ``replay_timeout_s``, the time each replay of the task takes at most (the replay's and each of
+    its variants'), is none the launcher can give, or None: a finite number above 0, for a task with a replay, whose
+    replays together leave the grader some of the time the launcher's steps have (:func:`_budget`)."""
+
+    each = config.get("replay_timeout_s")
+    if config.get("replay") is None:
+        return "the task has no replay"
+    if not number(each) or each <= 0:
+        return f"{each!r} is no finite number of seconds above 0"
+    count = 1 + len((config.get("replay_checks") or {}).get("variants", []))
+    budget = _budget(float(config["timeout_s"]))
+    if count * each >= budget:
+        return f"{count} replays of {each:g} s leave the grader none of the {budget:g} s the launcher's steps have"
+    return None
+
+
+def checks_problem(checks):
+    """Why ``checks``, the replay checks of a task's settings, are none the launcher can run, or None: ``{"variants":
+    [{"name", "inputs", "expected", "tolerance": {"default", "keys"}, "meta"}], "forbidden_literals": {"path",
+    "sources", "scan"} or null}``, as ``materialize`` writes them, every path of their data below :data:`CHECK_DATA`
+    and every name of a variant its own."""
+
+    if not isinstance(checks, dict) or sorted(checks) != ["forbidden_literals", "variants"]:
+        return "they are not an object of variants and forbidden_literals"
+    variants = checks["variants"]
+    if not isinstance(variants, list) or len(variants) > MAX_VARIANTS:
+        return f"their variants are not a list of at most {MAX_VARIANTS}"
+    names = set()
+    for index, variant in enumerate(variants):
+        if not isinstance(variant, dict) or sorted(variant) != sorted(_VARIANT_KEYS):
+            return f"variant {index} is not an object of {', '.join(_VARIANT_KEYS)}"
+        name = variant["name"]
+        if not isinstance(name, str) or not VARIANT_NAME.fullmatch(name) or name in names:
+            return f"variant {index} has no name of its own"
+        names.add(name)
+        if not (check_data_path(variant["inputs"]) and check_data_path(variant["expected"])):
+            return f"variant {name} names its inputs or expected outputs outside {CHECK_DATA}"
+        tolerance = variant["tolerance"]
+        if (
+            not isinstance(tolerance, dict)
+            or sorted(tolerance) != ["default", "keys"]
+            or not tolerance_value(tolerance["default"])
+            or not isinstance(tolerance["keys"], dict)
+            or not all(isinstance(key, str) and tolerance_value(value) for key, value in tolerance["keys"].items())
+        ):
+            return f"variant {name} has no tolerance of a default and keys, each a finite number of 0 or more"
+        if json_depth(variant["meta"]) > MAX_META_DEPTH:
+            return f"variant {name}'s meta nests more than {MAX_META_DEPTH} levels deep"
+    forbidden = checks["forbidden_literals"]
+    if forbidden is not None:
+        if not isinstance(forbidden, dict) or sorted(forbidden) != sorted(_FORBIDDEN_KEYS):
+            return f"their forbidden_literals are not an object of {', '.join(_FORBIDDEN_KEYS)}"
+        sources = forbidden["sources"]
+        if not _paths(sources) or len(sources) > MAX_SOURCES or len(set(sources)) != len(sources):
+            return f"their forbidden literals' sources are not at most {MAX_SOURCES} distinct relative paths"
+        if not all(source.endswith(".py") for source in sources):
+            return f"their forbidden literals' sources are not all Python (.py), which {LITERAL_SCAN} reads"
+        if not check_data_path(forbidden["path"]):
+            return f"their forbidden literals lie outside {CHECK_DATA}"
+        if forbidden["scan"] != LITERAL_SCAN:
+            return f"their forbidden literals are scanned by {forbidden['scan']!r}, not {LITERAL_SCAN}"
+    return None
+
+
+def check_data_path(path):
+    """Whether ``path`` names data of a replay check: a normalized path relative to the task's directory, below
+    :data:`CHECK_DATA`."""
+
+    return relative_path(path) and path.startswith(CHECK_DATA) and len(path) <= MAX_KEY_CHARS
+
+
+def tolerance_value(value):
+    """Whether ``value`` is a tolerance: a finite number of 0 or more, never a boolean."""
+
+    return number(value) and value >= 0
+
+
+def number(value):
+    """Whether ``value`` is a finite int or float, never a boolean (nor an int too large for a float)."""
+
+    try:
+        return type(value) in (int, float) and math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def json_depth(value, limit=MAX_META_DEPTH):
+    """How many levels of objects and arrays (dicts, lists and tuples) ``value``, JSON as Python holds it, nests,
+    counted without recursion and only up to one past ``limit``."""
+
+    deepest, pending = 0, [(value, 1)]
+    while pending:
+        item, depth = pending.pop()
+        if isinstance(item, dict):
+            items = item.values()
+        elif isinstance(item, (list, tuple)):
+            items = item
+        else:
+            continue
+        deepest = max(deepest, depth)
+        if depth <= limit:
+            pending.extend((inner, depth + 1) for inner in items)
+    return deepest
 
 
 def relative_path(path):
@@ -450,13 +629,20 @@ def _launch(config, paths, ops, report, started, umask):
     report["contract"] = {"artifacts": list(config["artifacts"]), "violation": violation}
     if violation is not None:
         return Result.solver(OUTPUT_CONTRACT, violation)
+    checks, problem = load_checks(config.get("replay_checks"), replay, paths.tests)
+    if problem is not None:  # the data of the task's replay checks, which the grader's owner wrote
+        return Result.invalid(GRADER_KINDS[owner] + "_protocol", problem)
+    if checks.forbidden is not None:
+        found = _scan(checks, paths.workdir, report, deadline)
+        if found is not None:
+            return found
     env = dict(os.environ)
     env.update(PLATOON_WORKDIR=paths.workdir, PLATOON_VERDICT=os.path.join(gen, VERDICT))
     if replay is not None:
         submitted = os.path.join(scratch, "submitted")
-        replay_deadline = time.monotonic() + max(0.0, deadline - time.monotonic()) * REPLAY_SHARE
+        replays = Replays.of(config, started, deadline, len(checks.variants))
         try:
-            found = _replay(config, paths, ops, report, scratch, submitted, replay_deadline)
+            found = _replay(config, paths, ops, report, scratch, submitted, replays, checks.variants)
         except SolverFault as exc:
             return Result.solver(exc.reason, str(exc))
         if found is not None:
@@ -617,18 +803,21 @@ def _within(path, directory):
     return path == directory or path.startswith(directory.rstrip("/") + "/")
 
 
-def _replay(config, paths, ops, report, scratch, submitted, deadline):
-    """Run the task's replay in a copy of the working directory without its outputs, and put back what it wrote: the
-    solver's 0 when it fails, leaves what the launcher cannot remove in its time or fills a filesystem, a protocol
-    fault when its command (the image's) cannot start, None when it wrote every output again.  Before the replay the
-    working directory is made the replay user's to write nothing in (:func:`Ops.harden`); after it, what the replay's
-    user left where every user may write is removed, and its copy all but the outputs (which wait as root's), before
-    the grader reads them.  A :class:`SolverFault` for a working directory too large to copy, or one that takes past
-    ``deadline`` to copy."""
+def _replay(config, paths, ops, report, scratch, submitted, replays, variants=()):
+    """Run the task's replay in a copy of the working directory without its outputs, then the replay of each of
+    ``variants`` (:attr:`Checks.variants`), and put back what the replay wrote: the solver's 0 when one fails, leaves
+    what the launcher cannot remove in its time or fills a filesystem, a protocol fault when its command (the image's)
+    cannot start, None when the replay wrote every output again and every variant's replay gave what the variant
+    expects.  Before the replay the working directory is made the replay user's to write nothing in
+    (:func:`Ops.harden`), and nothing changes it until the outputs go back; each replay runs as :func:`_run_replay`
+    runs it and takes the time ``replays`` gives it (:class:`Replays`), and what each left is removed before the next
+    one starts or the grader runs (:func:`_clear`), the replay's own copy all but its outputs, which wait as root's
+    while the variants replay.  A :class:`SolverFault` for a working directory too large to copy, or one that takes
+    past the replay's time to copy."""
 
-    replay, owner, cap = config["replay"], config["grader_owner"], int(config["max_output_bytes"])
+    outputs = config["replay"]["outputs"]
+    deadline = replays.deadline()
     limits = {"skip": scratch, "deadline": deadline, "limit": int(config["max_copy_bytes"])}
-    outputs = replay["outputs"]
     exposed = _exposed_directory(paths.workdir)
     if exposed is not None:  # the image's, or the template's: no file of a submission makes a directory so
         raise LauncherFault(
@@ -644,65 +833,37 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
             os.makedirs(os.path.dirname(target), exist_ok=True)
             _move(here, target, **limits)
     stage = os.path.join(scratch, "replay")
-    os.mkdir(stage, 0o700)
-    _copy_tree(paths.workdir, stage, **limits)
-    try:
-        ops.give(stage, REPLAY_UID)
-    except OSError as exc:
-        raise LauncherFault(f"it cannot give the replay's directory to its user: {exc}") from exc
-    log = os.path.join(scratch, "replay.log")
-    env = _replay_env(stage, config.get("replay_env", ()))
-    try:
-        preexec = ops.demote(cap, config.get("max_address_space_bytes"))
-        ran = _run(replay["command"], cwd=stage, env=env, deadline=deadline, log=log, preexec=preexec)
-    except OSError as exc:
-        report["replay"] = {"error": str(exc)}
-        if _submitted_program(replay["command"]):  # a program of the submission's, which it lacks or cannot run
-            return Result.solver(NONREPRODUCIBLE, f"the replay's command cannot start: {exc}")
-        return Result.invalid(GRADER_KINDS[owner] + "_protocol", f"the replay's command cannot start: {exc}")
-    # What the replay left, a daemon that detached among it, ends before its outputs are read, wherever it went.
-    ran["swept"], left = kill_left(lambda: ops.processes_of(REPLAY_UID))
-    ran["output_tail"] = _tail(log)
+    ran, found = _run_replay(config, paths, ops, scratch, stage, deadline, replays)
     report["replay"] = ran
-    if left:
-        ran["survivors"] = left
-        return Result.solver(NONREPRODUCIBLE, f"processes the replay left could not be killed ({left})")
-    if ran["timed_out"]:
-        return Result.solver(NONREPRODUCIBLE, f"the replay outlived its {ran['timeout_s']} s")
-    if ran["exit_code"] != 0:
-        return Result.solver(NONREPRODUCIBLE, f"the replay exited {ran['exit_code']}")
-    for output in outputs:
-        problem = _output_problem(stage, output, cap)
-        if problem is not None:
-            return Result.solver(NONREPRODUCIBLE, f"after the replay, {problem}")
+    if found is not None:
+        return found
     # What the replay left where every user may write is removed, and its copy all but the outputs, which then wait as
-    # root's: a replay that left more than the launcher removes in its time, or that filled a filesystem, is the
-    # solver's 0, never a launcher fault that would censor the measurement.  A filesystem found full from here on, as
-    # the outputs are held or copied back, is judged one way: the solver's once the replay left files of its user
-    # where every user may write, else the trusted side's, as it is before any replay ran, since by then what the
-    # replay left in its copy is gone too.
+    # root's, renamed beside it, where no variant's replay reaches or changes them: a replay that left more than the
+    # launcher removes in its time, or that filled a filesystem, is the solver's 0, never a launcher fault that would
+    # censor the measurement.  A filesystem found full from here on, as the outputs are held or copied back, or as a
+    # variant's copy is made, is judged one way: the solver's once the replays left files of their user where every
+    # user may write, else the trusted side's, as it is before any replay ran, since by then what the replays left in
+    # their copies is gone too.
     held = os.path.join(scratch, "replayed")
-    until = max(deadline, time.monotonic()) + CLEAR_WINDOW_S
-    cleared, where = 0, "where the launcher holds them"
+    found = _clear(paths, ops, scratch, replays, ran, deadline, (NONREPRODUCIBLE, "the replay"), stage, held, outputs)
+    if found is not None:
+        return found
+    if variants:
+        found = _replay_variants(config, paths, ops, report, scratch, replays, variants)
+        if found is not None:
+            return found
     try:
-        cleared = clear_left(paths.temporary, ops.replays_own, _writable_by_replay, scratch, until)
-        if cleared:
-            ran["cleared"] = cleared
-        _hold(stage, held, outputs, ops, until)
-        where = "in the working directory"
         for output in outputs:  # moved aside above, below nothing but directories (layout_violation); nothing else runs
             target = os.path.join(paths.workdir, output)
             _make_directories(os.path.dirname(target), 0o755)
             _copy_file(os.path.join(held, output), target, 0o644)
-    except Leftover as exc:
-        return Result.solver(NONREPRODUCIBLE, f"the replay left what the launcher cannot remove in its time: {exc}")
     except OSError as exc:
-        if exc.errno not in _NO_ROOM or not cleared:
-            raise  # a full filesystem with nothing of the replay's left is the trusted side's, as before any replay ran
+        if exc.errno not in _NO_ROOM or not replays.cleared:
+            raise  # a full filesystem with nothing of the replays' left is the trusted side's, as before any replay ran
         return Result.solver(
             NONREPRODUCIBLE,
-            f"the replay's outputs find no room {where}, once the replay left files of its user where every user may "
-            f"write: {exc}",
+            "the replay's outputs find no room in the working directory, once the replays left files of their user "
+            f"where every user may write: {exc}",
         )
     ran["outputs"] = list(outputs)
     report[REPLAYED_SHA256] = outputs_sha256(paths.workdir, outputs)  # before the grader, root, could change them
@@ -711,6 +872,631 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
     except Leftover:
         pass  # root's copies of the outputs, which the grader finds in the working directory anyway
     return None
+
+
+class Replays:
+    """The replays of one grade, the replay's own and then its variants', one after the other: the time each takes
+    (:meth:`deadline`), and how many entries their user left where every user may write that the launcher removed
+    (``cleared``), by which it tells a full filesystem their doing (:func:`_replay`)."""
+
+    def __init__(self, end, count, each=None):
+        self.end = end
+        self.count = count
+        self.each = each
+        self.cleared = 0
+
+    @classmethod
+    def of(cls, config, started, deadline, variants):
+        """The replays of a task with ``variants`` variants whose launcher started at ``started`` and must be done by
+        ``deadline`` (``time.monotonic()`` values): they share :data:`REPLAY_SHARE` of the time left, each an equal
+        part of what is left of it; with the settings' ``replay_timeout_s``, each takes at most that long, and all end
+        by ``1 + variants`` times it after the launcher started, which :func:`replay_time_problem` checked leaves the
+        grader the rest."""
+
+        count = 1 + variants
+        each = config.get("replay_timeout_s")
+        if each is None:
+            now = time.monotonic()
+            return cls(now + max(0.0, deadline - now) * REPLAY_SHARE, count)
+        return cls(min(deadline, started + count * float(each)), count, float(each))
+
+    def deadline(self):
+        """The deadline (a ``time.monotonic()``) of the next replay: an equal part of what is left until ``end``, or,
+        with ``each``, ``each`` seconds; never past ``end``."""
+
+        now = time.monotonic()
+        share = self.each if self.each is not None else max(0.0, self.end - now) / max(1, self.count)
+        self.count -= 1
+        return min(now + share, max(now, self.end))
+
+
+def _run_replay(config, paths, ops, scratch, stage, deadline, replays, variant=None):
+    """Copy the working directory, without the replay's outputs (moved aside), into the new directory ``stage``, lay a
+    ``variant``'s inputs over it, give it to the replay's user, run the replay's command there as that user until
+    ``deadline`` and kill what it left: a record of the run, and the solver's 0 (``solver_nonreproducible``, for a
+    variant ``solver_variant_failed``) where it fails, outlives its time, leaves what cannot be killed or does not write
+    every output again, a protocol fault where its command (the image's) cannot start or a variant's inputs cannot be
+    laid over the copy, or None.  Every replay, the replay's and each variant's, runs this one way: with the thin
+    environment and its absolute ``PATH`` (:func:`_replay_env`), demoted with the replay's limits, address space and
+    disfavor for the OOM killer (:meth:`Ops.demote`), and swept of every process of its user, none excluded as foreign
+    (:func:`kill_left`).  A :class:`SolverFault` for a copy too large or too slow.  A variant's copy (its directory, its
+    files, the file of its output, its change of owner) that finds its filesystem full once the replays' user left
+    files where every user may write (``replays.cleared``) is the solver's 0 too: the room it lacks is what those
+    replays took."""
+
+    replay, owner, cap = config["replay"], config["grader_owner"], int(config["max_output_bytes"])
+    if variant is None:
+        who, where, reason = "the replay", "", NONREPRODUCIBLE
+    else:
+        who, where, reason = (
+            f"the replay of variant {variant['name']}",
+            f" for variant {variant['name']}",
+            VARIANT_FAILED,
+        )
+    limit = int(config["max_copy_bytes"])
+    log = stage + ".log"
+    no_room = f"{who} finds no room for its copy of the working directory, once the replays left files of their user "
+    try:
+        os.mkdir(stage, 0o700)
+        _copy_tree(paths.workdir, stage, skip=scratch, deadline=deadline, limit=limit, replay=who)
+        problem = None if variant is None else _lay_over(_check_file(paths.tests, variant["inputs"]), stage, config)
+        if variant is not None and problem is None:
+            open(log, "wb").close()  # its output's file, made here so that no room for it is judged as for its copy
+    except OSError as exc:
+        if variant is None or exc.errno not in _NO_ROOM or not replays.cleared:
+            raise
+        return {"error": str(exc)}, Result.solver(reason, no_room + f"where every user may write: {exc}")
+    if variant is not None and problem is not None:
+        detail = f"variant {variant['name']}'s inputs cannot be laid over the working inputs: {problem}"
+        return {}, Result.invalid(GRADER_KINDS[owner] + "_protocol", detail)
+    try:
+        ops.give(stage, REPLAY_UID)
+    except OSError as exc:
+        if variant is not None and exc.errno in _NO_ROOM and replays.cleared:  # a change of owner may need room too
+            return {"error": str(exc)}, Result.solver(reason, no_room + f"where every user may write: {exc}")
+        raise LauncherFault(f"it cannot give the replay's directory to its user: {exc}") from exc
+    env = _replay_env(stage, config.get("replay_env", ()))
+    try:
+        preexec = ops.demote(cap, config.get("max_address_space_bytes"))
+        ran = _run(replay["command"], cwd=stage, env=env, deadline=deadline, log=log, preexec=preexec)
+    except OSError as exc:
+        detail = f"the replay's command cannot start{where}: {exc}"
+        if _submitted_program(replay["command"]):  # a program of the submission's, which it lacks or cannot run
+            return {"error": str(exc)}, Result.solver(reason, detail)
+        return {"error": str(exc)}, Result.invalid(GRADER_KINDS[owner] + "_protocol", detail)
+    # What the replay left, a daemon that detached among it, ends before its outputs are read, wherever it went.
+    ran["swept"], left = kill_left(lambda: ops.processes_of(REPLAY_UID))
+    ran["output_tail"] = _tail(log)
+    with contextlib.suppress(OSError):  # its tail is kept: the rest takes room the next replays may need
+        os.unlink(log)
+    if left:
+        ran["survivors"] = left
+        return ran, Result.solver(reason, f"processes {who} left could not be killed ({left})")
+    if ran["timed_out"]:
+        return ran, Result.solver(reason, f"{who} outlived its {ran['timeout_s']} s")
+    if ran["exit_code"] != 0:
+        return ran, Result.solver(reason, f"{who} exited {ran['exit_code']}")
+    for output in replay["outputs"]:
+        problem = _output_problem(stage, output, cap)
+        if problem is not None:
+            return ran, Result.solver(reason, f"after {who}, {problem}")
+    return ran, None
+
+
+def _replay_variants(config, paths, ops, report, scratch, replays, variants):
+    """Replay each variant (:func:`_run_replay`), one after the other, each in a fresh copy of the working directory
+    with its inputs laid over it, match what it wrote to what it expects, and remove what it left (:func:`_clear`):
+    the solver's 0 (``solver_variant_failed``) for the first that fails, misses or leaves what cannot be removed, else
+    None.  The report lists each variant that ran; the one that failed keeps its ``meta``, the tail of its output and
+    the keys it missed."""
+
+    ran_variants = report.setdefault("replay_checks", {}).setdefault("variants", [])
+    cap = int(config["max_output_bytes"])
+    for number, (variant, expected) in enumerate(variants):
+        deadline = replays.deadline()
+        stage = os.path.join(scratch, f"variant-{number}")
+        who = f"the replay of variant {variant['name']}"
+        try:
+            ran, found = _run_replay(config, paths, ops, scratch, stage, deadline, replays, variant=variant)
+        except SolverFault as exc:  # its copy outlived its time: the variant's, as its replay's time would be
+            ran, found = {}, Result.solver(VARIANT_FAILED if exc.reason == NONREPRODUCIBLE else exc.reason, str(exc))
+        missed = []
+        if found is None:
+            missed = missed_keys(stage, expected, cap)
+            if missed:
+                shown = ", ".join(missed[:3]) + (f" and {len(missed) - 3} more" if len(missed) > 3 else "")
+                found = Result.solver(
+                    VARIANT_FAILED, f"{who} gave {shown} outside the tolerance of what the variant expects"
+                )
+        if found is None:
+            found = _clear(paths, ops, scratch, replays, ran, deadline, (VARIANT_FAILED, who), stage)
+        entry = {"name": variant["name"], "passed": found is None}
+        entry.update(
+            (key, ran[key])
+            for key in ("exit_code", "timed_out", "seconds", "timeout_s", "swept", "cleared")
+            if key in ran
+        )
+        ran_variants.append(entry)
+        if found is not None:
+            entry.update(meta=variant["meta"], missed=missed[:REPORTED_MISSES], output_tail=ran.get("output_tail", ""))
+            entry.update((key, ran[key]) for key in ("survivors", "error") if key in ran)
+            return found
+    return None
+
+
+def _clear(paths, ops, scratch, replays, ran, deadline, fault, stage, held=None, outputs=()):
+    """Remove what a replay that ran in ``stage`` until ``deadline`` left, for at most :data:`CLEAR_WINDOW_S` past
+    that: what its user left where every user may write (:func:`clear_left`, counted in ``ran["cleared"]`` and
+    ``replays.cleared``), and ``stage``: all of it, or with ``held`` all but ``outputs``, which then wait in ``held``
+    as root's (:func:`_hold`).  The solver's 0 (``fault``: its reason and who left it) where it cannot remove them, or
+    not in that time, and where holding the outputs finds the filesystem full once the replays left files of their
+    user where every user may write; else None.  A full filesystem with nothing of the replays' left is raised, the
+    trusted side's, as it is before any replay ran."""
+
+    until = max(deadline, time.monotonic()) + CLEAR_WINDOW_S
+    reason, who = fault
+    try:
+        cleared = clear_left(paths.temporary, ops.replays_own, _writable_by_replay, scratch, until)
+        if cleared:
+            ran["cleared"] = cleared
+            replays.cleared += cleared
+        if held is None:
+            remove_tree(stage, until)
+        else:
+            _hold(stage, held, outputs, ops, until)
+    except Leftover as exc:
+        return Result.solver(reason, f"{who} left what the launcher cannot remove in its time: {exc}")
+    except OSError as exc:  # _hold's: a filesystem found full as it holds the outputs (a rename, a change of owner)
+        if exc.errno not in _NO_ROOM or not replays.cleared:
+            raise
+        return Result.solver(
+            reason,
+            f"{who}'s outputs find no room where the launcher holds them, once {who} left files of its user where "
+            f"every user may write: {exc}",
+        )
+    return None
+
+
+class Checks:
+    """A task's replay checks with their data read (:func:`load_checks`): ``variants``, each a variant's settings and
+    what it expects (:func:`expected_keys`); ``forbidden``, the forbidden literals as ``(value, tolerance)`` pairs, or
+    None; and ``sources``, the submission's files the scan reads."""
+
+    def __init__(self, variants=(), forbidden=None, sources=()):
+        self.variants = list(variants)
+        self.forbidden = forbidden
+        self.sources = list(sources)
+
+
+def load_checks(settings, replay, tests):
+    """The replay checks of a task (``settings``, the ``replay_checks`` that :func:`read_config` checked; None: there
+    are none) with their data read from ``tests``, the task's ``/tests``, and None; or no checks and why the data,
+    which the grader's owner wrote, cannot be used: a variant's inputs that are no directory, expected outputs that
+    are no object of the replay's output keys (``replay``'s outputs) and numbers, a key of a tolerance they lack, and
+    forbidden literals that are no list of ``{value, tolerance}``."""
+
+    if settings is None:
+        return Checks(), None
+    outputs = replay["outputs"]
+    variants = []
+    for variant in settings["variants"]:
+        name = variant["name"]
+        try:
+            info = os.lstat(_check_file(tests, variant["inputs"]))
+        except OSError as exc:
+            return Checks(), f"variant {name}'s inputs, {variant['inputs']}, cannot be read: {exc}"
+        if not stat.S_ISDIR(info.st_mode):
+            return Checks(), f"variant {name}'s inputs, {variant['inputs']}, are {_kind(info)}, not a directory"
+        expected, problem = _check_json(tests, variant["expected"])
+        if problem is None:
+            problem = expected_problem(expected, outputs)
+        if problem is None and (unknown := sorted(set(variant["tolerance"]["keys"]) - set(expected))):
+            problem = f"lack {_shown(unknown[0])}, which the variant's tolerance names"
+        if problem is not None:
+            return Checks(), f"variant {name}'s expected outputs, {variant['expected']}, {problem}"
+        variants.append((variant, expected_keys(expected, outputs, variant["tolerance"])))
+    forbidden = settings["forbidden_literals"]
+    if forbidden is None:
+        return Checks(variants), None
+    entries, problem = _check_json(tests, forbidden["path"])
+    if problem is None:
+        problem = forbidden_problem(entries)
+    if problem is not None:
+        return Checks(), f"the forbidden literals, {forbidden['path']}, {problem}"
+    pairs = [(entry["value"], entry["tolerance"]) for entry in entries]
+    return Checks(variants, pairs, forbidden["sources"]), None
+
+
+def expected_problem(expected, outputs):
+    """Why ``expected``, a variant's expected outputs read as JSON, is no object that maps from 1 to
+    :data:`MAX_EXPECTED_KEYS` output keys of the replay (:func:`output_key`, each naming one of ``outputs``, a ``.json``
+    file, which the output contract reads as JSON) to a finite number or a list of them; None when it is one."""
+
+    if not isinstance(expected, dict) or not expected or len(expected) > MAX_EXPECTED_KEYS:
+        return f"are no object of 1 to {MAX_EXPECTED_KEYS} output keys, each with the number expected there"
+    for key, value in expected.items():
+        named = output_key(key, outputs)
+        if named is None:
+            return (
+                f"hold the key {_shown(key)}, which names no output of the replay: an output's path, or the path, # "
+                "and a JSON Pointer into it (answer.json#/rows/0)"
+            )
+        if not named[0].endswith(".json"):
+            return f"hold the key {_shown(key)}, whose output {named[0]} is no .json file, which a variant reads"
+        if not (number(value) or (isinstance(value, list) and all(number(item) for item in value))):
+            return f"expect {_shown(key)} to be {_shown(value)}, which is no finite number or list of them"
+    return None
+
+
+def forbidden_problem(entries):
+    """Why ``entries``, a task's forbidden literals read as JSON, is no list of at most :data:`MAX_FORBIDDEN` objects
+    of a finite ``value`` and a ``tolerance`` of 0 or more; None when it is one."""
+
+    if not isinstance(entries, list) or len(entries) > MAX_FORBIDDEN:
+        return f"are no list of at most {MAX_FORBIDDEN} objects of value and tolerance"
+    for index, entry in enumerate(entries):
+        if (
+            not isinstance(entry, dict)
+            or sorted(entry) != sorted(_LITERAL_KEYS)
+            or not number(entry["value"])
+            or not tolerance_value(entry["tolerance"])
+        ):
+            return f"hold, as literal {index}, no object of a finite value and a tolerance of 0 or more"
+    return None
+
+
+def output_key(key, outputs):
+    """The output (one of ``outputs``, the replay's) and the reference tokens of the RFC 6901 JSON Pointer into it that
+    an output key names: an output's path alone, for the whole of its JSON, or its path, ``#`` and a pointer
+    (``answer.json#/rows/0``).  None for a key that names no output, or more than one."""
+
+    if not isinstance(key, str) or not key or len(key) > MAX_KEY_CHARS:
+        return None
+    found = []
+    for output in outputs:
+        if key == output:
+            found.append((output, []))
+        elif key.startswith(output + "#"):
+            tokens = pointer_tokens(key[len(output) + 1 :])
+            if tokens is not None:
+                found.append((output, tokens))
+    return found[0] if len(found) == 1 else None
+
+
+def pointer_tokens(pointer):
+    """The reference tokens of the JSON Pointer ``pointer`` (RFC 6901: empty, or ``/`` before each token, in which
+    ``~1`` stands for ``/`` and ``~0`` for ``~``), or None for a string that is none."""
+
+    if pointer == "":
+        return []
+    if not pointer.startswith("/"):
+        return None
+    tokens = pointer[1:].split("/")
+    if any(re.search(r"~(?![01])", token) for token in tokens):
+        return None
+    return [token.replace("~1", "/").replace("~0", "~") for token in tokens]
+
+
+def resolve(document, tokens):
+    """Whether ``tokens`` (:func:`pointer_tokens`) point to something in ``document``, and what: an object's member by
+    its name, an array's item by its index (``0``, ``12``; never ``-`` or ``012``)."""
+
+    value = document
+    for token in tokens:
+        if isinstance(value, dict) and token in value:
+            value = value[token]
+        elif isinstance(value, list) and _INDEX.fullmatch(token) and int(token) < len(value):
+            value = value[int(token)]
+        else:
+            return False, None
+    return True, value
+
+
+def expected_keys(expected, outputs, tolerance):
+    """What a variant expects (``expected``, which :func:`expected_problem` found good), key by key: the key, its
+    output and pointer's tokens (:func:`output_key`), the value expected and its tolerance (``tolerance``'s for the
+    key, else its default)."""
+
+    return [
+        (key, *output_key(key, outputs), value, tolerance["keys"].get(key, tolerance["default"]))
+        for key, value in sorted(expected.items())
+    ]
+
+
+def missed_keys(directory, expected, cap):
+    """The keys of ``expected`` (:func:`expected_keys`) whose values the outputs in ``directory`` do not hold within
+    their tolerances: an output that is no JSON of at most ``cap`` bytes, nothing at the key, no number there (no
+    list of as many numbers, for a list), or one too far from what is expected."""
+
+    documents, missed = {}, []
+    for key, output, tokens, value, tolerance in expected:
+        if output not in documents:
+            try:
+                documents[output] = (True, json.loads(_read_regular(os.path.join(directory, output), cap).decode()))
+            except (OSError, ValueError, RecursionError):
+                documents[output] = (False, None)
+        readable, document = documents[output]
+        found, actual = resolve(document, tokens) if readable else (False, None)
+        if not (found and within(actual, value, tolerance)):
+            missed.append(key)
+    return missed
+
+
+def within(actual, expected, tolerance):
+    """Whether ``actual`` holds ``expected``, a number or a list of numbers, within ``tolerance``: a number at most
+    ``tolerance`` from it, or a list of as many numbers, each at most ``tolerance`` from its own."""
+
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(expected)
+            and all(_close(item, wanted, tolerance) for item, wanted in zip(actual, expected))
+        )
+    return _close(actual, expected, tolerance)
+
+
+def _close(actual, expected, tolerance):
+    try:
+        return number(actual) and abs(actual - expected) <= tolerance
+    except OverflowError:
+        return False
+
+
+def _check_file(tests, path):
+    """Where a path of the replay checks' data (relative to the task's directory, below :data:`CHECK_DATA`) is in the
+    verifier: below ``tests``, the task's ``/tests``."""
+
+    return os.path.join(tests, path[len("tests/") :])
+
+
+def _check_json(tests, path):
+    """The JSON of a file of the replay checks' data (:func:`_check_file`), at most :data:`MAX_CHECK_BYTES`, and None;
+    or None and why it cannot be read."""
+
+    try:
+        return json.loads(_read_regular(_check_file(tests, path), MAX_CHECK_BYTES).decode("utf-8")), None
+    except RecursionError:
+        return None, "are nested too deeply to read as JSON"
+    except (OSError, ValueError) as exc:
+        return None, f"cannot be read as JSON: {exc}"
+
+
+def overlay_conflict(path, directory, protected):
+    """Why a variant's input at ``path`` (relative to the working directory, a ``directory`` or a file) would change
+    what the submission holds or the replay writes (``protected``: the artifacts and the replay's outputs), or None: a
+    file at one of their paths, below one or above one, or a directory at or below one."""
+
+    for other in protected:
+        if path == other or path.startswith(other + "/") or (not directory and other.startswith(path + "/")):
+            return f"{path} would change {other}, which the submission holds or the replay writes"
+    return None
+
+
+def _lay_over(source, target, config):
+    """Copy the regular files and directories below ``source``, a variant's inputs, over ``target``, a copy of the
+    working directory: each file in place of the one at its path, executable where the input is.  Why it cannot, or
+    None: an input that is a link or a special file, a directory where the copy holds a file or the reverse, or one
+    that would change the submission (:func:`overlay_conflict`)."""
+
+    protected = [*config["artifacts"], *config["replay"]["outputs"]]
+    for directory, directories, files in os.walk(source):
+        relative = os.path.relpath(directory, source)
+        for name in sorted(directories + files):
+            path = os.path.join(directory, name)
+            shown = name if relative == "." else os.path.join(relative, name)
+            info = os.lstat(path)
+            if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                return f"{shown} is {_kind(info)}"
+            conflict = overlay_conflict(shown, stat.S_ISDIR(info.st_mode), protected)
+            if conflict is not None:
+                return conflict
+            there = os.path.join(target, shown)
+            try:
+                present = os.lstat(there)
+            except FileNotFoundError:
+                present = None
+            if stat.S_ISDIR(info.st_mode):
+                if present is None:
+                    os.mkdir(there, 0o755)
+                elif not stat.S_ISDIR(present.st_mode):
+                    return f"{shown} is a directory of the variant's and a file of the working directory's"
+                continue
+            if present is not None:
+                if stat.S_ISDIR(present.st_mode):
+                    return f"{shown} is a file of the variant's and a directory of the working directory's"
+                os.unlink(there)
+            _copy_file(path, there, 0o755 if info.st_mode & stat.S_IXUSR else 0o644)
+    return None
+
+
+def source_text(data):
+    """The text of a source the scan reads, from its bytes: UTF-8, with or without a byte-order mark, as a coding line
+    on one of its first two lines (PEP 263), if it has one, must say, so that the scan never runs another codec, some
+    of which are slow; the coding line is found without decoding anything.  A ``ValueError`` for a coding line of
+    another encoding, or bytes that are no UTF-8."""
+
+    body = data[len(codecs.BOM_UTF8) :] if data.startswith(codecs.BOM_UTF8) else data
+    for number, line in enumerate(body.split(b"\n", 2)[:2]):
+        found = _CODING_LINE.match(line)
+        if found is not None:
+            name = found.group(1).decode("ascii")
+            try:
+                canonical = codecs.lookup(name).name  # finds the codec, and runs none of it
+            except LookupError:
+                raise ValueError(f"its coding line names {name}, a codec Python lacks") from None
+            if canonical not in ("utf-8", "utf-8-sig"):  # Python reads the one as the other
+                raise ValueError(f"its coding line names {name}, and the scan reads UTF-8 alone")
+            break
+        if number == 0 and not _BLANK_LINE.match(line):  # a coding line on the second line follows a blank or comment
+            break
+    return body.decode("utf-8")
+
+
+def source_literals(source):
+    """The numbers that ``source``, Python (text, or bytes read as :func:`source_text` reads them), states by
+    :data:`LITERAL_SCAN`, each with its line: each constant's numbers (:func:`constant_numbers`), and for an int,
+    float or complex constant under a chain of unary ``-`` and ``+`` the numbers of the whole chain, negative where it
+    holds an odd number of ``-`` (``--5.46`` and ``-(-5.46)`` state 5.46, ``+-5.46`` states -5.46), on the line where
+    the chain starts.  Comments and the rest of the text are not read, so a source may cite a published value in a
+    comment, and nothing is evaluated (``-~5`` states 5).  What ``ast.parse`` raises for a source that is not
+    Python."""
+
+    tree = ast.parse(source if isinstance(source, str) else source_text(source))
+    found, signed, inner = [], set(), set()
+    for node in ast.walk(tree):  # breadth first: a chain's outermost sign comes before the signs below it
+        if not (isinstance(node, ast.UnaryOp) and isinstance(node.op, _SIGNS)) or id(node) in inner:
+            continue
+        negative, operand = isinstance(node.op, ast.USub), node.operand
+        while isinstance(operand, ast.UnaryOp) and isinstance(operand.op, _SIGNS):
+            inner.add(id(operand))
+            negative ^= isinstance(operand.op, ast.USub)
+            operand = operand.operand
+        if isinstance(operand, ast.Constant) and _signable(operand.value):
+            signed.add(id(operand))
+            found += [(node.lineno, -value if negative else value) for value in constant_numbers(operand.value)]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and id(node) not in signed:
+            found += [(node.lineno, value) for value in constant_numbers(node.value)]
+    return found
+
+
+def constant_numbers(value):
+    """The finite numbers a constant of a source states by :data:`LITERAL_SCAN`: an int or a float itself (never a
+    bool, nor an int too large for a float); a complex number's imaginary part, and its real part where it is not 0;
+    and what ``float()`` reads, once stripped, of a string, or of bytes that are ASCII, whatever their length."""
+
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, (int, float)):
+        return [value] if number(value) else []
+    if isinstance(value, complex):
+        return [part for part in ((value.real,) if value.real else ()) + (value.imag,) if math.isfinite(part)]
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError:
+            return []
+    if not isinstance(value, str):
+        return []
+    try:
+        parsed = float(value.strip())
+    except ValueError:
+        return []
+    return [parsed] if math.isfinite(parsed) else []
+
+
+def _signable(value):
+    """Whether a constant takes a sign: an int, a float or a complex number (never a bool, a string or bytes)."""
+
+    return isinstance(value, (int, float, complex)) and not isinstance(value, bool)
+
+
+class Windows:
+    """The windows of forbidden literals, each ``value ± tolerance`` of a ``(value, tolerance)`` pair, widened by a
+    margin for rounding.  Their ends cut the numbers into pieces, the ends themselves and the open intervals between
+    them, and each piece knows the first window it lies in, so that :meth:`first` takes a binary search and one exact
+    test of a match (:func:`_close`), whatever the windows and however they overlap."""
+
+    def __init__(self, forbidden):
+        self.forbidden = list(forbidden)
+        windows = [_window(value, tolerance) for value, tolerance in self.forbidden]
+        self.ends = sorted({end for window in windows for end in window})
+        # Piece 2 * j + 1 is self.ends[j]; piece 2 * j the open interval below it, above the end before it; piece
+        # 2 * len(self.ends) the numbers above every end.  A window covers the pieces from its low end to its high one.
+        spans = sorted(
+            (2 * bisect.bisect_left(self.ends, low) + 1, 2 * bisect.bisect_left(self.ends, high) + 1, index)
+            for index, (low, high) in enumerate(windows)
+        )
+        self.firsts = [None] * (2 * len(self.ends) + 1)
+        covering, next_span = [], 0  # a heap of (index, last piece) of the windows that began by the piece at hand
+        for piece in range(len(self.firsts)):
+            while next_span < len(spans) and spans[next_span][0] == piece:
+                heapq.heappush(covering, (spans[next_span][2], spans[next_span][1]))
+                next_span += 1
+            while covering and covering[0][1] < piece:
+                heapq.heappop(covering)
+            if covering:
+                self.firsts[piece] = covering[0][0]
+
+    def first(self, literal):
+        """The index of the first forbidden literal that ``literal`` lies within the tolerance of, or None."""
+
+        position = bisect.bisect_left(self.ends, literal)
+        on_end = position < len(self.ends) and self.ends[position] == literal
+        index = self.firsts[2 * position + 1 if on_end else 2 * position]
+        if index is None or _close(literal, *self.forbidden[index]):
+            return index
+        # The literal lies in that window's margin for rounding, outside it: each window it may lie in decides.
+        return next((other for other, pair in enumerate(self.forbidden) if _close(literal, *pair)), None)
+
+
+def _window(value, tolerance):
+    """A forbidden literal's window, ``value ± tolerance`` widened by a margin for the rounding of its ends, which the
+    exact test of a match (:func:`_close`) settles."""
+
+    pad = (abs(value) + tolerance) * 1e-12 + 1e-300
+    return value - tolerance - pad, value + tolerance + pad
+
+
+def _scan(checks, workdir, report, deadline):
+    """Scan the submission's sources (``checks.sources``, relative to ``workdir``) for its forbidden literals
+    (:func:`source_literals`): the solver's 0 for a source that states one (``solver_hardcoded``), and for one that is
+    missing, no regular file, larger than :data:`MAX_SOURCE_BYTES` or no UTF-8 Python that this ``python3`` parses, or
+    sources that take past ``deadline`` to scan (``solver_output_contract``); else None.  The report counts the
+    literals the sources state and says where the first hits are, never what was forbidden, and which Python parsed
+    them."""
+
+    record = {
+        "scan": LITERAL_SCAN,
+        "python": "%d.%d.%d" % sys.version_info[:3],
+        "sources": list(checks.sources),
+        "literals": 0,
+        "hits": [],
+    }
+    report.setdefault("replay_checks", {})["forbidden_literals"] = record
+    late = Result.solver(OUTPUT_CONTRACT, "the sources take longer to scan than the verifier's time limit allows")
+    windows = Windows(checks.forbidden)
+    hits, count = record["hits"], 0
+    for source in checks.sources:
+        if _past(deadline):
+            return late
+        named = f"{source}, a source the task scans for forbidden literals,"
+        try:
+            data = _read_regular(os.path.join(workdir, source), MAX_SOURCE_BYTES)
+        except (FileNotFoundError, NotADirectoryError):
+            return Result.solver(OUTPUT_CONTRACT, f"{named} is missing")
+        except (OSError, ValueError) as exc:
+            return Result.solver(OUTPUT_CONTRACT, f"{named} cannot be read: {exc}")
+        try:
+            literals = source_literals(source_text(data))
+        except _UNPARSABLE as exc:
+            return Result.solver(OUTPUT_CONTRACT, f"{named} is no Python the scan reads: {type(exc).__name__}: {exc}")
+        record["literals"] += len(literals)
+        for position, (line, literal) in enumerate(sorted(literals, key=lambda item: item[0]), start=1):
+            if position % _SCAN_BATCH == 0 and _past(deadline):
+                return late
+            index = windows.first(literal)
+            if index is None:
+                continue
+            count += 1
+            if len(hits) < REPORTED_HITS:
+                hits.append({"source": source, "line": line, "literal": repr(literal), "forbidden": index})
+    if not count:
+        return None
+    first = hits[0]
+    more = f", and {count - 1} more" if count > 1 else ""
+    return Result.solver(
+        HARDCODED,
+        f"{first['source']} states {first['literal']} on line {first['line']}, within the tolerance of forbidden "
+        f"literal {first['forbidden']}{more}",
+    )
+
+
+def _shown(value):
+    """``value`` as JSON (ASCII) of at most 80 characters, for a detail."""
+
+    text = json.dumps(value, sort_keys=True, default=str)
+    return text if len(text) <= 80 else text[:77] + "..."
 
 
 def outputs_sha256(directory, outputs):
@@ -1047,16 +1833,23 @@ def _say(text):
 
 def bounded_report(report, limit=MAX_REPORT_BYTES):
     """``report`` as JSON (ASCII) of at most ``limit`` bytes, so that grading always reads it whole: as it is where it
-    fits, else without the verdict's checks, then without the artifacts' names and the replay's outputs, then with only
-    what the outcome needs (the SHA-256 of the replayed outputs among it, which a regrade compares); ``truncated`` names
-    what was left out."""
+    fits, else without the verdict's checks, then without the artifacts' names, the replay's outputs, the variants'
+    replays and the scan's record, then with only what the outcome needs (the SHA-256 of the replayed outputs among
+    it, which a regrade compares); ``truncated`` names what was left out."""
 
     text = _dumps(report)
     if len(text) <= limit:
         return text
     report = dict(report)
     left_out = []
-    for part, key in (("verdict", "checks"), ("contract", "artifacts"), ("replay", "outputs")):
+    parts = (
+        ("verdict", "checks"),
+        ("contract", "artifacts"),
+        ("replay", "outputs"),
+        ("replay_checks", "variants"),
+        ("replay_checks", "forbidden_literals"),
+    )
+    for part, key in parts:
         value = report.get(part)
         if isinstance(value, dict) and key in value:
             report[part] = {name: item for name, item in value.items() if name != key}
@@ -1129,13 +1922,17 @@ def _read_regular(path, limit):
     ``OSError`` when it cannot be opened (a link among them), a ``ValueError`` when it is no regular file, holds more
     than ``limit`` bytes or grew while it was read."""
 
-    with os.fdopen(os.open(path, _READ_FLAGS), "rb") as stream:
-        info = os.fstat(stream.fileno())
+    descriptor = os.open(path, _READ_FLAGS)
+    try:
+        info = os.fstat(descriptor)  # before a stream, which a directory could not be
         if not stat.S_ISREG(info.st_mode):
             raise ValueError(f"{os.path.basename(path)} is not a regular file")
         if info.st_size > limit:
             raise ValueError(f"{os.path.basename(path)} holds more than {limit} bytes")
-        data = stream.read(info.st_size + 1)
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            data = stream.read(info.st_size + 1)
+    finally:
+        os.close(descriptor)
     if len(data) > info.st_size:
         raise ValueError(f"{os.path.basename(path)} grew while it was read")
     return data
@@ -1169,11 +1966,11 @@ def _tail(path):
         return ""
 
 
-def _copy_tree(source, target, skip, deadline=None, limit=None):
+def _copy_tree(source, target, skip, deadline=None, limit=None, replay="the replay"):
     """Copy the regular files and directories below ``source`` into ``target``, never following a link, and leaving
     out ``skip`` (the launcher's own directory, should ``source`` hold it).  A :class:`SolverFault` for files of more
     than ``limit`` bytes, which only a submission brings past the task's own files (``max_copy_bytes``), and for a copy
-    that takes past ``deadline``, the replay's."""
+    that takes past ``deadline``, the time of the replay it is for (``replay`` names it)."""
 
     total = 0
     skipped = os.path.realpath(skip)
@@ -1188,7 +1985,7 @@ def _copy_tree(source, target, skip, deadline=None, limit=None):
             os.mkdir(os.path.join(into, name), 0o755)
         for name in files:
             if _past(deadline):
-                raise SolverFault(NONREPRODUCIBLE, "copying the working directory for the replay outlived its time")
+                raise SolverFault(NONREPRODUCIBLE, f"copying the working directory for {replay} outlived its time")
             path = os.path.join(directory, name)
             info = os.lstat(path)
             if not stat.S_ISREG(info.st_mode):

@@ -1847,9 +1847,9 @@ directory, where the artifacts are, and writes its verdict to `$PLATOON_VERDICT`
 `margin` may be left out, an `id` holds at most 256 characters, and nothing else may be there, `invalid` included: a
 grader cannot censor a measurement it does not like. A replay runs the submission's own code again (`analysis.py`
 above), in a copy of the working directory without the replay's `outputs`, which it must write again, and for at most
-half the time left; the grader then grades what the replay wrote, and finds what was submitted in
-`$PLATOON_SUBMITTED`. The replay runs as a user of its own, never root, without supplementary groups or new
-privileges, and with no more than it needs: an environment of a few variables (the path, the locale and time zone,
+half the time left (or `replay_timeout_s`, below); the grader then grades what the replay wrote, and finds what was
+submitted in `$PLATOON_SUBMITTED`. The replay runs as a user of its own, never root, without supplementary groups or
+new privileges, and with no more than it needs: an environment of a few variables (the path, the locale and time zone,
 the search paths and prefixes of Python and the dynamic linker, numeric libraries' thread counts, and the variables of
 the template's `[environment] env` that the verifier's sandbox shares and its `[verifier] env` does not set, the path
 kept to its absolute entries alone so nothing in the replay's directory stands in for a program), no file larger than
@@ -1861,6 +1861,17 @@ command whose program is a path into the working directory (`./analysis.sh`) run
 one that cannot start is the solver's fault; one that names a program of the image's (`python3`) and cannot start is
 the task's.
 
+`materialize(source, replay_timeout_s=300)` gives each of the task's replays, its own and each variant's (**Replay
+checks**, below), at most that long, its copy of the working directory included, rather than an equal part of half the
+time left: the time a producer tells its solver. The replays then end at most `(1 + variants) × replay_timeout_s`
+after the launcher started, so that its checks of the submission before them take from their time, never the
+grader's, and the grader gets the rest; `materialize` raises `ValueError` where that leaves the grader none of the time
+the launcher's steps have (the verifier's time limit, scaled by `verifier_timeout_multiplier`, less a margin of 5 to
+30 s for the launcher to kill what is left and write the reward). So a producer that tells its solver `R` seconds a
+replay sizes the template's `[verifier] timeout_sec` for `(1 + variants) × R`, the grader and that margin. Without
+it, the replay and its variants share half of what is left once the artifacts are checked and the sources scanned:
+each gets about `((T - m) / 2) / (1 + variants)` of a time limit `T` with the margin `m`.
+
 **How a runtime task runs.** Its sessions run the image `images` binds its `docker_image` to, with its
 `environment/` uploaded into the working directory, as Harbor does for a task with a prebuilt image. It grades in its
 separate verifier, which starts with `runtime_tasks.verifier_provider_options` laid over the entry's and needs `python3`
@@ -1870,27 +1881,31 @@ directory, never a link, open to no other user, in a directory where the replay'
 declared artifacts against the output contract (regular files and directories, every file at most 64 MiB, a `.json` file
 JSON, nothing but directories above an output of the replay), checks that the replay's user may write in no directory of
 the working directory and makes the working directory root's with the group and other write bits stripped so nothing
-there is the replay's user's to write (files and directories, at any depth), runs the replay and kills what it left
-(below the launcher, or of the replay's user — one of that user's it cannot signal is a survivor, the solver's 0, never
-excluded as foreign), removes what that user left where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`,
-`/run/lock` and `/dev/mqueue`) and all of the replay's copy but the outputs (which wait as root's), puts the outputs
-back and notes their SHA-256 (`replayed_sha256`) before the grader reads them, runs the grader for the rest of the
+there is the replay's user's to write (files and directories, at any depth), scans the sources that its replay checks
+name for forbidden literals, runs the replay and kills what it left (below the launcher, or of the replay's user — one
+of that user's it cannot signal is a survivor, the solver's 0, never excluded as foreign), removes what that user left
+where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and `/dev/mqueue`) and all of the replay's copy
+but the outputs (which wait as root's), replays each variant of its replay checks the same way, puts the outputs back
+and notes their SHA-256 (`replayed_sha256`) before the grader reads them, runs the grader for the rest of the
 verifier's time limit, kills every process the grader left, and writes the only reward file, with its report,
 `/logs/verifier/launcher.json` (at most 64 KiB: a larger one leaves out the verdict's checks, then the artifacts'
-names), which the outcome's metadata holds as `launcher`. It reads every file whose contents it uses (its settings, a
-JSON artifact, a replayed output, the verdict, a log's tail) without following a link or waiting on a FIFO, checking
-the open file. That report is the grade: the entry's `verifier_classifiers`, its reading of reward files that are not
-regular files and its reward contract's `check` hook apply to its curated tasks only, since a grader that runs as root
-could write what they read.
+names, the replay's outputs, the variants' records and the scan's record, in that order, before it keeps only the
+outcome), which the outcome's metadata holds as `launcher`. It reads every file whose contents it uses (its settings, a
+JSON artifact, a source it scans, the replay checks' data, a replayed output, the verdict, a log's tail) without
+following a link or waiting on a FIFO, checking the open file. That report is the grade: the entry's
+`verifier_classifiers`, its reading of reward files that are not regular files and its reward contract's `check` hook
+apply to its curated tasks only, since a grader that runs as root could write what they read.
 
 | What happened | Outcome |
 |---|---|
 | The verdict passed, or did not | `scored`, 1 or 0, as the reward contract's first name (`reward` by default) |
-| A declared artifact breaks the output contract; the working directory is more than a replay copies (4 GiB beyond the task's own files), or the artifacts take longer to check than the verifier's time limit allows | `scored` 0, reason `solver_output_contract` |
+| A declared artifact breaks the output contract; the working directory is more than a replay copies (4 GiB beyond the task's own files), or the artifacts take longer to check than the verifier's time limit allows; a source the replay checks scan is missing, larger than 256 KiB, no UTF-8 or no Python, or the sources take longer to scan than that time limit allows (**Replay checks**, below) | `scored` 0, reason `solver_output_contract` |
 | The replay fails, outlives its time, lacks its own program, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a filesystem (disk, inode or memory exhaustion it causes is its own, never the launcher's), or does not write an output again; or a regrade's replay writes other outputs than the first grade's, which the grader scores otherwise (**Regrades**, below) | `scored` 0, reason `solver_nonreproducible` |
+| A source the replay checks scan states a forbidden literal (**Replay checks**, below) | `scored` 0, reason `solver_hardcoded` |
+| The replay of a variant fails, outlives its time, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a filesystem, or does not give what the variant expects (**Replay checks**, below) | `scored` 0, reason `solver_variant_failed` |
 | The grader exits nonzero, or cannot start | `invalid`, `verifier_generated_exit` |
 | The grader outlives its time | `invalid`, `verifier_generated_timeout` |
-| No verdict, or one beyond the schema; a replay command of the image's that cannot start | `invalid`, `verifier_generated_protocol` |
+| No verdict, or one beyond the schema; a replay command of the image's that cannot start; data of the replay checks that cannot be used | `invalid`, `verifier_generated_protocol` |
 | What the grader left could not be killed | `invalid`, `verifier_generated_isolation` |
 | The launcher fails once the grader ran; it exits nonzero, leaves no report it writes, or outlives the verifier's time limit; grading cannot kill what was left in the verifier, or read its output | `invalid`, `verifier_generated_unfinished`, whatever the reward file says: the grader, root beside the launcher, may have stopped it |
 | The launcher cannot do its own part before the grader runs: no `python3`, no root, no other user to replay as, a seal that does not take, a working directory inside what it seals or one the replay's user may write in | `invalid`, `verifier_trusted_launcher` |
@@ -1930,6 +1945,69 @@ first grade is in `first_grade`, as an entry of `regrades` is. The artifacts, wh
 once, in `artifacts`. Each regrade costs a verifier's start and up to the verifier's time limit, which deadlines on
 whole rollouts count; `regrade: 0` grades once. A trusted grader (`grader_owner="trusted"`) is never regraded, and
 neither are the environment's curated tasks, whose grading a regrade would change.
+
+**Replay checks.** A replay shows that the submission's code writes its outputs again, not that it computes them: code
+that states the answer writes it again too. `materialize(source, replay_checks=...)` gives a task with a replay two
+checks of it, whose data lie in the task's `tests/gen`, as sealed as its grader's:
+
+```python
+from platoon.experimental import ReplayChecks
+
+checks = ReplayChecks.coerce({
+    "variants": [{
+        "name": "rescaled",
+        "inputs": "tests/gen/variants/rescaled/inputs",          # holds data/table.csv, rescaled
+        "expected": "tests/gen/variants/rescaled/expected.json",  # {"answer.json#/rows/2/value": 4.12}
+        "tolerance": {"default": 0.1, "keys": {"answer.json#/rows/2/value": 0.25}},
+        "meta": {"covers": [[2, 1]]},                              # recorded, never read
+    }],
+    "forbidden_literals": {"path": "tests/gen/forbidden-literals.json", "sources": ["analysis.py"]},
+})
+made = await service.materialize(directory, grader_owner="trusted", replay_checks=checks)
+```
+
+- **Forbidden literals.** Before the replay, the launcher reads each of `sources`, Python files (`.py`) the submission
+  holds (an artifact or below one, never an output of the replay), as UTF-8 Python, and finds the numbers it states by
+  the rule `python-numeric-literals/v1`: its int and float constants and a complex constant's parts, each under the
+  whole chain of unary signs before it (`--4.12` states 4.12, `+-4.12` states -4.12), and its string constants, and
+  bytes constants that are ASCII, that `float()` reads, once stripped, as a finite number, whatever their length; never
+  its comments, and nothing is evaluated. A number within the `tolerance` of a `value` of the list in `path`
+  (`[{"value": 4.12, "tolerance": 0.004}]`) scores 0, reason `solver_hardcoded`, and a source that is missing, larger
+  than 256 KiB, no UTF-8 (a coding line of another encoding included) or no Python breaks the output contract, as do
+  sources that take longer to scan than the verifier's time limit allows. The verifier image's `python3` parses the
+  sources, so a replay that runs another interpreter must run code that `python3` parses too; the report's
+  `replay_checks.forbidden_literals.python` names its version. The report says where the first ten hits are, by
+  source, line, literal and the index of the forbidden literal, counts them all, and never says what is forbidden.
+- **Variants.** Once the replay wrote every output again, the launcher replays the submission on each variant, one
+  after the other and as it replayed it (the same user, thin environment and limits, the same sweep, and what each
+  replay leaves in its copy and where every user may write removed after it), in a fresh copy of the working directory
+  without the outputs, with the files of the variant's `inputs` laid over it in place of those at their paths,
+  executable where they are. That replay's outputs must hold, at each key of
+  `expected`, the number or list of numbers given there, within the key's tolerance (absolute: its own in
+  `tolerance.keys`, else `tolerance.default`, or the number `tolerance` is; every variant gives one, since outputs
+  computed in floating point on another machine rarely match to the last bit, and 0 compares exactly). An output key
+  names an output of the replay, a `.json` file, for the whole of its JSON, or the output, `#` and a JSON Pointer into
+  it (`answer.json#/rows/2/value`). A variant whose replay fails, outlives its time, leaves processes that cannot be
+  killed or more than the launcher removes in its time, or misses a key scores 0, reason `solver_variant_failed`; the
+  report lists each variant that replayed (`replay_checks.variants`), and the one that failed with its `meta`, the
+  keys it missed and the tail of its output. What the replay wrote waits meanwhile alone in its own directory, root's
+  and open to no other user, where no variant's replay reaches it. The replay and its variants share the replay's half
+  of the time left, each an equal part of what is left of it, unless `replay_timeout_s` gives each its own (above). A
+  submission whose code reads its inputs by paths relative to the working directory reads the variant's; one that
+  reads them by absolute paths reads the working directory's own.
+- Both run in every grade, a regrade's too, and before the grader: a submission that fails one scores 0 whatever its
+  verdict would have been, so a wrong answer may miss a variant as well, and is then `solver_variant_failed`. The
+  checks are the caller's word, as `grader_owner` is, and the task's launcher settings record them: the same directory
+  with other checks is another task. A task has at most 32 variants, each named by at most 128 letters, digits, `_`,
+  `.` and `-`, with `meta` of at most 8 KiB of JSON nested at most 16 levels deep; at most 64 sources to scan; and each
+  file of their data, an `expected` or a `path`, at most 1 MiB, of at most 10,000 keys or literals, each key at most
+  2,048 characters, and as `launch.json` holds them, the checks take at most 256 KiB. `materialize` refuses checks
+  whose data the launcher could not use: a variant's inputs that are no directory, hold no file, or hold one at or
+  around a path the submission holds or the replay writes, or one the task's `environment/` holds as a directory where
+  the inputs hold a file (or the reverse); expected outputs that are no object of the replay's output keys and
+  numbers, name an output that is no `.json` file, or lack a key the tolerance names; forbidden literals that are no
+  list of values and tolerances; a source the submission does not hold. Data that a grade finds unusable all the same
+  are the protocol fault of the grader's owner (`verifier_generated_protocol`, `verifier_trusted_protocol`).
 
 **Before a run.** `platoon train`, `eval` and `rollout` refuse an environment whose provider options could not run its
 runtime tasks when they list its tasks (exit 78): sandboxes without a network, the verifiers' root filesystem layout,

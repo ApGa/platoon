@@ -103,6 +103,16 @@ def test_a_materialize_that_takes_artifacts_outside_the_working_directory_fails_
     assert "fail 1 red-team case(s)" in message and "\n  outside_artifact: materialize took it in, as " in message
 
 
+def test_a_materialize_that_lets_a_variant_replace_the_submission_fails_that_case(options, monkeypatch):
+    monkeypatch.setattr(runtime, "_overlay_problem", lambda task_dir, variant, protected: None)
+
+    with pytest.raises(AssertionError) as failed:
+        check_runtime_tasks(options, grade=False)
+
+    message = str(failed.value)
+    assert "fail 1 red-team case(s)" in message and "\n  variant_overlay: materialize took it in, as " in message
+
+
 def test_the_grading_cases_run_each_task_and_name_every_grade_that_comes_out_otherwise(options):
     """These sandboxes give the launcher no root, so it grades nothing: every grading case says so."""
 
@@ -237,7 +247,8 @@ def test_the_cases_scripts_are_python_that_compiles():
     from platoon.testing import runtime_tasks
 
     scripts = {f"grader {name}": source for name, source in runtime_tasks._GRADERS.items()}
-    for name in ("_HONEST_GRADER", "_FRACTION_GRADER", "_SOLVE", "_PRYING_SOLVE", "_FAILING_SOLVE", "_SHADOW"):
+    names = ("_HONEST_GRADER", "_FRACTION_GRADER", "_SOLVE", "_PRYING_SOLVE", "_FAILING_SOLVE", "_SHADOW")
+    for name in (*names, "_IGNORING_SOLVE", "_HARDCODED_SOLVE", "_SEALED_SOLVE"):
         scripts[name] = getattr(runtime_tasks, name)
     for name, source in scripts.items():
         compile(source, name, "exec")

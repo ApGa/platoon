@@ -57,6 +57,28 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   trusted grader and the environment's curated tasks are never regraded, and `regrade` is no part of the
   `runtime_tasks` fingerprint a stored task carries. `check_runtime_tasks` gains a coin-flip grader, which must come
   out `verifier_flaky` ([Runtime tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
+- **Replay checks of runtime tasks** (experimental, RFC 0022). `materialize(source, replay_checks=...)`
+  (`platoon.experimental.ReplayChecks`, with `ReplayVariant` and `ForbiddenLiterals`) gives a runtime task with a
+  replay two checks of it, whose data lie in the task's `tests/gen` and which its launcher settings record. Before the
+  replay, the launcher scans the Python sources the checks name, files the submission holds, for forbidden literals
+  (`[{value, tolerance}]`), reading each as UTF-8 by the rule `python-numeric-literals/v1` (its numeric constants, each
+  under its chain of unary signs, and its numeric strings and bytes, never its comments): a source that states one
+  scores 0, reason `solver_hardcoded`, and one that is missing, larger than 256 KiB or no UTF-8 Python breaks the
+  output contract. Once the replay wrote its outputs again, the launcher replays the submission on each variant, in a
+  fresh copy of the working directory with the variant's inputs laid over it, and the outputs must hold the numbers
+  the variant expects at its output keys (a `.json` output, or one, `#` and a JSON Pointer into it), each within the
+  absolute tolerance every variant gives: a variant that fails scores 0, reason `solver_variant_failed`. The replay
+  and its variants share the replay's half of the time left, or with `materialize(..., replay_timeout_s=)` each gets
+  that long and the grader the rest. Both checks run in every grade, a regrade's too, before the grader, and are the
+  solver's faults, never a censored measurement; `materialize` refuses check data the launcher could not use, and
+  data that a grade finds unusable all the same are the grader owner's `_protocol` fault. Each variant's replay runs
+  as the replay does (the same user, thin environment, limits and sweep, and what it leaves removed before the next
+  replay starts), while what the replay wrote waits as root's, so that no variant's replay sees what an earlier
+  replay left or reaches what the grader grades. `check_runtime_tasks` gains a
+  variant whose inputs replace the submission's code, which must be refused, and four grading cases: the honest
+  solution passes its checks, one that ignores its input fails the variant, one that states its answer is hardcoded,
+  and a variant's replay that tries to replace what the replay wrote finds it sealed ([Runtime
+  tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
 
 ## 0.5.0 (2026-10-29)
 

@@ -60,8 +60,10 @@ And runtime Harbor tasks (RFC 0022): task directories written while a run runs, 
 which a Harbor environment entry takes in under its ``service_kwargs.runtime_tasks`` (:class:`RuntimeTasksConfig`):
 ``HarborEnvironmentService.materialize(source)`` checks one against them and refuses it, never rewriting it, or keeps
 it in their store under its digest with platoon's launcher, which replays the submission before the task's grader
-grades it (:class:`MaterializedTask`); ``platoon.testing.check_runtime_tasks`` checks an environment's runtime tasks
-against a suite of sabotaged tasks.  ``docs/how-to/sandboxes-and-harbor.md`` is the guide.
+grades it (:class:`MaterializedTask`), and gives it the replay checks the caller names (:class:`ReplayChecks`): the
+literals its sources may not state (:class:`ForbiddenLiterals`) and variants of its inputs, on which its replay must
+give what each expects (:class:`ReplayVariant`); ``platoon.testing.check_runtime_tasks`` checks an environment's
+runtime tasks against a suite of sabotaged tasks.  ``docs/how-to/sandboxes-and-harbor.md`` is the guide.
 
 This module imports neither ``tinker`` nor ``datasets``, and the Harbor service only when a runtime task's name is
 first used.
@@ -217,10 +219,16 @@ __all__ = [
     # runtime Harbor tasks (RFC 0022)
     "MaterializedTask",
     "RuntimeTasksConfig",
+    "ReplayChecks",
+    "ReplayVariant",
+    "ForbiddenLiterals",
 ]
 
 # Public name -> the module that defines it, imported on first use: the Harbor service is not cheap to import.
-_LAZY = dict.fromkeys(("MaterializedTask", "RuntimeTasksConfig"), "platoon.envs.harbor.runtime")
+_LAZY = dict.fromkeys(
+    ("MaterializedTask", "RuntimeTasksConfig", "ReplayChecks", "ReplayVariant", "ForbiddenLiterals"),
+    "platoon.envs.harbor.runtime",
+)
 
 
 def __getattr__(name: str) -> Any:
@@ -235,4 +243,10 @@ def __getattr__(name: str) -> Any:
 
 
 if TYPE_CHECKING:
-    from platoon.envs.harbor.runtime import MaterializedTask, RuntimeTasksConfig
+    from platoon.envs.harbor.runtime import (
+        ForbiddenLiterals,
+        MaterializedTask,
+        ReplayChecks,
+        ReplayVariant,
+        RuntimeTasksConfig,
+    )

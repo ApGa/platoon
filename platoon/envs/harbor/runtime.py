@@ -25,9 +25,9 @@ them patched:
 
 It then writes the launcher's settings (``tests/platoon/launch.json``: who wrote the grader, the reward's name, the
 verifier's time limit, the artifacts, the grader's command and the replay, the template's variables the replay keeps
-(:func:`replay_variables`), and the fingerprint of the ``runtime_tasks`` it was checked against,
-:func:`config_fingerprint`), computes the task's digest (:func:`task_digest`) and renames the copy into
-``<store>/<digest>``, so that two producers that write the same task share it.  The task it returns
+(:func:`replay_variables`), the task's replay checks, if any, and the fingerprint of the ``runtime_tasks`` it was
+checked against, :func:`config_fingerprint`), computes the task's digest (:func:`task_digest`) and renames the copy
+into ``<store>/<digest>``, so that two producers that write the same task share it.  The task it returns
 (:class:`MaterializedTask`) has the digest as its id and the stored directory in ``misc["harbor"]["task_dir"]``.
 
 A runtime task's directory says it is one: its launcher's settings, which only ``materialize`` writes
@@ -47,6 +47,14 @@ stands only while every regrade gives the same score.  A regrade that scores oth
 (``solver_nonreproducible``) where it wrote others; one that gives no score of the grader's makes the grade that
 regrade's outcome (:func:`regraded`).  A trusted grader is never regraded, nor is any of the entry's other tasks, whose
 grading a regrade would change.
+
+A task with a replay may also have **replay checks** (:class:`ReplayChecks`), which the caller of ``materialize``
+gives and the task's launcher settings record, with their data in the task's ``tests/gen`` (checked first,
+:func:`replay_check_problems`): the literals its submission's sources may not state (:class:`ForbiddenLiterals`), and
+variants of its inputs, on which the replay must give what each expects (:class:`ReplayVariant`).  Each grade runs
+them, a regrade's too; one that fails is the solver's 0 (``solver_hardcoded``, ``solver_variant_failed``).  The
+caller may also give each replay, the replay's own and each variant's, a time of its own (``replay_timeout_s``), such
+as the time a producer told its solver, which the settings record too.
 """
 
 from __future__ import annotations
@@ -125,10 +133,12 @@ FINGERPRINT_RULE = "platoon-runtime-tasks-config-v1"
 MAX_SETTINGS_BYTES = 1 << 20
 #: ``misc["harbor"]`` of a runtime task marks it so: the service refuses such a task whose directory is none.
 RUNTIME_MISC_KEY = "runtime"
+#: The most the replay checks of one task (:class:`ReplayChecks`) record in its launcher settings, as JSON.
+MAX_CHECK_SETTINGS_BYTES = 256 * 1024
 # The longest reason a runtime task's outcome takes from the launcher's detail, in characters.
 _REASON_CHARS = 2000
 # The reasons of a score of 0 the launcher gives, the solver's faults.
-_SOLVER_FAULTS = (launcher.OUTPUT_CONTRACT, launcher.NONREPRODUCIBLE)
+_SOLVER_FAULTS = (launcher.OUTPUT_CONTRACT, launcher.NONREPRODUCIBLE, launcher.VARIANT_FAILED, launcher.HARDCODED)
 # The keys of a runtime task's task.toml that are its own; everything else is the template's.
 _OWN_KEYS = (("task", "name"), ("artifacts",))
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -284,8 +294,253 @@ class MaterializedTask:
         return not self.problems
 
 
+@dataclass(frozen=True)
+class ReplayVariant:
+    """A variant of a runtime task's replay (:class:`ReplayChecks`): once the replay wrote every output again, the
+    launcher replays the submission once more, as it replayed it, in a fresh copy of the working directory with
+    ``inputs`` laid over it, and the outputs that replay writes must hold what ``expected`` lists, each within its
+    ``tolerance``.  A submission that ignores its inputs, such as one that states the answer, writes the working
+    inputs' answer again, and fails (``solver_variant_failed``)."""
+
+    # The variant's name, its own among the task's: letters, digits, _, . and -, at most 128 characters.
+    name: str
+    # A directory of the task below tests/gen, such as tests/gen/variants/rescaled/inputs, whose files the launcher lays
+    # over the working inputs for this variant's replay, each in place of the file at its path (its data/table.csv for
+    # the working directory's data/table.csv). It holds at least one file, and none at a path of the submission's.
+    inputs: str
+    # A JSON file of the task below tests/gen, outside every variant's inputs: an object that maps output keys to the
+    # number, or the list of numbers, the variant's replay must write there. An output key names a .json output of the
+    # replay, for the whole of its JSON, or the output, # and a JSON Pointer into it (answer.json#/rows/2/value).
+    expected: str
+    # How far a value may be from what is expected, absolutely: a number for every key, or {"default": number,
+    # "keys": {output key: number}}, where keys of expected get their own. Required, since outputs a replay computes in
+    # floating point on another machine rarely match to the last bit; 0 compares exactly.
+    tolerance: float | Mapping[str, Any]
+    # Anything the task's producer wants recorded with the variant, such as the cells it covers: JSON of at most
+    # 8 KiB, nested at most 16 levels deep, which the task's launcher settings keep, as does the report of a grade
+    # whose replay of the variant failed.
+    meta: Any = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not launcher.VARIANT_NAME.fullmatch(self.name):
+            raise ValueError(
+                "a replay variant's name must be letters, digits, _, . and -, at most 128 characters, starting with a "
+                f"letter or digit, got {self.name!r}"
+            )
+        where = f"replay variant {self.name}"
+        for field_name in ("inputs", "expected"):
+            value = getattr(self, field_name)
+            if not launcher.check_data_path(value):
+                raise ValueError(
+                    f"{where}: {field_name} must be a path of the task below {launcher.CHECK_DATA}, normalized and "
+                    f"relative to the task's directory, got {value!r}"
+                )
+        if self.expected == self.inputs or _below(self.expected, self.inputs):
+            raise ValueError(f"{where}: its expected outputs lie in its inputs, which its replay would read")
+        object.__setattr__(self, "tolerance", _tolerance(self.tolerance, where))
+        object.__setattr__(self, "meta", _recorded(self.meta, where))
+
+
+@dataclass(frozen=True)
+class ForbiddenLiterals:
+    """The forbidden literals of a runtime task (:class:`ReplayChecks`): numbers its submission's sources may not
+    state, such as the answers it must compute.  Before the replay, the launcher reads each source as Python, by the
+    rule ``scan`` names, and a number one states within the tolerance of a forbidden one scores 0
+    (``solver_hardcoded``)."""
+
+    # A JSON file of the task below tests/gen, outside every variant's inputs, that lists the forbidden literals:
+    # [{"value": number, "tolerance": number}], a number of a source being forbidden within tolerance of a value.
+    path: str
+    # The submission's files the launcher scans, as paths relative to the working directory: each a Python file (.py)
+    # that is a declared artifact or below one, never an output of the replay (or above or below one), at most 64.
+    sources: Sequence[str]
+    # The rule a source is scanned by: python-numeric-literals/v1, the only one. A source's int, float and complex
+    # constants (each with the chain of unary signs applied to it), and its string and ASCII bytes constants that
+    # read as a finite number; never its comments.
+    scan: str = launcher.LITERAL_SCAN
+
+    def __post_init__(self) -> None:
+        if not launcher.check_data_path(self.path):
+            raise ValueError(
+                f"forbidden_literals.path must be a JSON file of the task below {launcher.CHECK_DATA}, normalized and "
+                f"relative to the task's directory, got {self.path!r}"
+            )
+        sources = self.sources
+        if (
+            isinstance(sources, str | bytes)
+            or not isinstance(sources, Sequence)
+            or not 0 < len(sources) <= launcher.MAX_SOURCES
+            or not all(launcher.relative_path(source) and len(source) <= MAX_ARTIFACT_CHARS for source in sources)
+            or len(set(sources)) != len(sources)
+        ):
+            raise ValueError(
+                f"forbidden_literals.sources must list 1 to {launcher.MAX_SOURCES} distinct paths relative to the "
+                f"working directory, normalized, of at most {MAX_ARTIFACT_CHARS} characters, got {sources!r}"
+            )
+        if not all(source.endswith(".py") for source in sources):
+            raise ValueError(
+                f"forbidden_literals.sources must be Python files (.py), which {launcher.LITERAL_SCAN} reads, got "
+                f"{sources!r}"
+            )
+        object.__setattr__(self, "sources", tuple(sources))
+        if self.scan != launcher.LITERAL_SCAN:
+            raise ValueError(
+                f"forbidden_literals.scan must be {launcher.LITERAL_SCAN}, the only rule, got {self.scan!r}"
+            )
+
+
+@dataclass(frozen=True)
+class ReplayChecks:
+    """The replay checks of a runtime task, which ``materialize(source, replay_checks=...)`` gives it, beside its
+    replay: the task's launcher scans the submission's sources for ``forbidden_literals`` before the replay, and once
+    the replay wrote every output again, replays each of ``variants`` on its own inputs.  A check that fails is the
+    solver's 0 (``solver_hardcoded``, ``solver_variant_failed``), never a censored measurement.  Their data lie in the
+    task's ``tests/gen``, beside its grader and as sealed as it is; ``materialize`` refuses data the launcher could not
+    use, as data that a grade finds unusable all the same is the protocol fault of the grader's owner
+    (``verifier_generated_protocol``, ``verifier_trusted_protocol``).  Built from a mapping of its fields
+    (:meth:`coerce`), whose variants and forbidden literals may be mappings too."""
+
+    # The variants of the replay, at most 32, one after the other: each a ReplayVariant, or a mapping of its fields.
+    variants: Sequence[ReplayVariant] = ()
+    # The literals the submission's sources may not state: a ForbiddenLiterals, a mapping of its fields, or None.
+    forbidden_literals: ForbiddenLiterals | None = None
+
+    def __post_init__(self) -> None:
+        variants = self.variants
+        if isinstance(variants, str | bytes | Mapping) or not isinstance(variants, Sequence):
+            raise ValueError(f"replay_checks.variants must be a list of replay variants, got {variants!r}")
+        if len(variants) > launcher.MAX_VARIANTS:
+            raise ValueError(
+                f"replay_checks hold {len(variants)} variants, more than a task may ({launcher.MAX_VARIANTS})"
+            )
+        built = tuple(_built(ReplayVariant, variant, "a replay variant") for variant in variants)
+        object.__setattr__(self, "variants", built)
+        names = [variant.name for variant in built]
+        if len(set(names)) != len(names):
+            raise ValueError(f"replay_checks name two variants alike: {sorted(names)}")
+        forbidden = self.forbidden_literals
+        if forbidden is not None:
+            forbidden = _built(ForbiddenLiterals, forbidden, "forbidden_literals")
+            object.__setattr__(self, "forbidden_literals", forbidden)
+        for variant in built:
+            for other in built:
+                if other is not variant and (other.inputs == variant.inputs or _below(other.inputs, variant.inputs)):
+                    raise ValueError(f"replay variant {other.name}'s inputs lie in variant {variant.name}'s")
+                if _below(other.expected, variant.inputs):
+                    raise ValueError(
+                        f"replay variant {other.name}'s expected outputs lie in variant {variant.name}'s inputs"
+                    )
+            if forbidden is not None and _below(forbidden.path, variant.inputs):
+                raise ValueError(f"the forbidden literals lie in replay variant {variant.name}'s inputs")
+        size = len(_settings_text({"replay_checks": self.settings()}))  # as the task's launch.json holds them
+        if size > MAX_CHECK_SETTINGS_BYTES:
+            raise ValueError(
+                f"replay_checks hold {size} bytes of settings, more than a task's launcher settings take "
+                f"({MAX_CHECK_SETTINGS_BYTES})"
+            )
+
+    @classmethod
+    def coerce(cls, value: ReplayChecks | Mapping[str, Any]) -> ReplayChecks:
+        """The checks ``value`` gives: itself, or a mapping of its fields."""
+
+        if isinstance(value, ReplayChecks):
+            return value
+        if not isinstance(value, Mapping):
+            raise ValueError(f"replay_checks must be a mapping of variants and forbidden_literals, got {value!r}")
+        if unknown := sorted(set(value) - {"variants", "forbidden_literals"}):
+            raise ValueError(f"replay_checks take variants and forbidden_literals, not {', '.join(map(str, unknown))}")
+        return cls(**value)
+
+    def settings(self) -> dict[str, Any]:
+        """What the task's launcher settings record of the checks, as ``replay_checks``."""
+
+        forbidden = self.forbidden_literals
+        return {
+            "variants": [
+                {
+                    "name": variant.name,
+                    "inputs": variant.inputs,
+                    "expected": variant.expected,
+                    "tolerance": _plain(variant.tolerance),
+                    "meta": variant.meta,
+                }
+                for variant in self.variants
+            ],
+            "forbidden_literals": None
+            if forbidden is None
+            else {"path": forbidden.path, "sources": list(forbidden.sources), "scan": forbidden.scan},
+        }
+
+
+def _built(kind: type, value: Any, what: str) -> Any:
+    """``value`` as a ``kind`` (a check's dataclass): itself, or one built from a mapping of its fields."""
+
+    if isinstance(value, kind):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{what} must be a {kind.__name__} or a mapping of its fields, got {value!r}")
+    try:
+        return kind(**value)
+    except TypeError as exc:  # a field it does not take, or one it needs
+        raise ValueError(f"{what}: {exc}") from exc
+
+
+def _below(path: str, directory: str) -> bool:
+    """Whether the relative path ``path`` lies in the relative ``directory``."""
+
+    return path.startswith(directory + "/")
+
+
+def _tolerance(value: Any, where: str) -> dict[str, Any]:
+    """A variant's tolerance as the launcher's settings hold it, ``{"default": number, "keys": {key: number}}``, from a
+    number or such a mapping (which must give its default; its keys are none where it gives none); a ``ValueError``
+    for anything else."""
+
+    if launcher.tolerance_value(value):
+        return {"default": value, "keys": {}}
+    if not isinstance(value, Mapping) or set(value) - {"default", "keys"} or "default" not in value:
+        raise ValueError(
+            f"{where}: tolerance must be a number of 0 or more, or a mapping of a default and keys, got {value!r}"
+        )
+    default, keys = value["default"], value.get("keys", {})
+    if not launcher.tolerance_value(default):
+        raise ValueError(f"{where}: its tolerance's default must be a finite number of 0 or more, got {default!r}")
+    if not isinstance(keys, Mapping) or not all(
+        isinstance(key, str) and 0 < len(key) <= launcher.MAX_KEY_CHARS and launcher.tolerance_value(number)
+        for key, number in keys.items()
+    ):
+        raise ValueError(
+            f"{where}: its tolerance's keys must map output keys to finite numbers of 0 or more, got {keys!r}"
+        )
+    return {"default": default, "keys": dict(keys)}
+
+
+def _recorded(meta: Any, where: str) -> Any:
+    """``meta`` as the JSON the task's launcher settings record, of at most 8 KiB and nested at most 16 levels deep;
+    a ``ValueError`` for any other."""
+
+    try:
+        text = json.dumps(meta, allow_nan=False)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{where}: meta must be JSON: {exc}") from exc
+    if len(text) > launcher.MAX_META_BYTES:
+        raise ValueError(
+            f"{where}: meta holds {len(text)} bytes of JSON, more than a variant records ({launcher.MAX_META_BYTES})"
+        )
+    recorded = json.loads(text)
+    if launcher.json_depth(recorded) > launcher.MAX_META_DEPTH:
+        raise ValueError(f"{where}: meta nests more than {launcher.MAX_META_DEPTH} levels deep")
+    return recorded
+
+
 def _refused(problems: list[str]) -> MaterializedTask:
     return MaterializedTask(task=None, digest=None, problems=tuple(problems[:MAX_PROBLEMS]))
+
+
+def _settings_text(settings: Mapping[str, Any]) -> str:
+    """Launcher settings as a task's ``tests/platoon/launch.json`` holds them."""
+
+    return json.dumps(settings, indent=1, sort_keys=True)
 
 
 def materialize_task(
@@ -298,6 +553,8 @@ def materialize_task(
     timeout_multiplier: float = 1.0,
     grader_owner: str = "generated",
     replay_address_space_bytes: int | None = DEFAULT_REPLAY_ADDRESS_SPACE_BYTES,
+    replay_checks: ReplayChecks | Mapping[str, Any] | None = None,
+    replay_timeout_s: float | None = None,
 ) -> MaterializedTask:
     """Make the task directory ``source`` a runtime task in ``store`` under ``config`` (the module docstring), or say
     why it cannot be one.  ``load`` reads a task directory as the environment reads its runtime tasks; ``reward_key``
@@ -305,16 +562,26 @@ def materialize_task(
     verifier's time limit, as the environment's ``verifier_timeout_multiplier``.  ``grader_owner`` says who wrote the
     task's grader: ``generated`` (by the producer) or ``trusted`` (trusted code), which names the failure kinds of its
     non-scores and says whether its scores are regraded (:func:`regrade_count`).  ``replay_address_space_bytes`` caps
-    the address space each of the task's replay processes may reserve (``RLIMIT_AS``;
-    :data:`DEFAULT_REPLAY_ADDRESS_SPACE_BYTES`, None, sets no per-process cap).  Problems of ``source`` come back as
-    problems; a ``ValueError`` for a replay address space that is not a positive integer, and an ``OSError`` writing
-    the store is raised."""
+    the address space each process of the task's replays may reserve, the replay's own and each variant's
+    (``RLIMIT_AS``; :data:`DEFAULT_REPLAY_ADDRESS_SPACE_BYTES`, None, sets no per-process cap).  ``replay_checks``
+    (:class:`ReplayChecks`) are the task's replay checks, whose data the directory must hold
+    (:func:`replay_check_problems`).  ``replay_timeout_s`` is the most each replay of the task takes, its own and each
+    variant's, such as the time a producer told its solver: without it, the replays share half of the time the
+    launcher has; with it, the grader gets what they leave, which must be some (:func:`launcher.replay_time_problem`).
+    Problems of ``source`` come back as problems; a ``ValueError`` for an owner, a replay address space that is not a
+    positive integer, checks or a replay time that are none, or replays that would leave the grader no time, and an
+    ``OSError`` writing the store, are raised."""
 
     if grader_owner not in GRADER_OWNERS:
         raise ValueError(f"grader_owner must be one of {GRADER_OWNERS}, got {grader_owner!r}")
     space = replay_address_space_bytes
     if space is not None and (isinstance(space, bool) or not isinstance(space, int) or space <= 0):
         raise ValueError(f"replay_address_space_bytes must be a positive integer or None, got {space!r}")
+    checks = ReplayChecks.coerce(replay_checks) if replay_checks is not None else None
+    if checks is not None and not (checks.variants or checks.forbidden_literals):
+        checks = None  # nothing to check: the task's settings are those of a task without checks
+    if replay_timeout_s is not None and not (launcher.number(replay_timeout_s) and replay_timeout_s > 0):
+        raise ValueError(f"replay_timeout_s must be a finite number of seconds above 0, got {replay_timeout_s!r}")
     source = Path(source)
     try:
         if not stat.S_ISDIR(source.lstat().st_mode):
@@ -331,6 +598,12 @@ def materialize_task(
             toml = _task_toml(staging, problems)
             problems += template_differences(toml, config.template)
             problems += artifact_problems(toml)
+            if checks is not None and manifest is not None:
+                problems += replay_check_problems(checks, staging, manifest["replay"], _artifact_sources(toml))
+            if replay_timeout_s is not None and manifest is not None and manifest["replay"] is None:
+                problems.append(
+                    f"replay_timeout_s needs a replay, and {TESTS_DIR}/{GEN_DIR}/{GRADER_MANIFEST} gives none"
+                )
         if problems:
             return _refused(problems)
         assert manifest is not None
@@ -354,7 +627,22 @@ def materialize_task(
             "replay_env": replay_variables(harbor_task),
             "max_address_space_bytes": replay_address_space_bytes,
         }
-        _write(staging / TESTS_DIR / LAUNCHER_DIR / launcher.CONFIG, json.dumps(settings, indent=1, sort_keys=True))
+        if checks is not None:
+            settings["replay_checks"] = checks.settings()
+        if replay_timeout_s is not None:
+            settings["replay_timeout_s"] = replay_timeout_s
+            if (why := launcher.replay_time_problem(settings)) is not None:
+                raise ValueError(f"replay_timeout_s cannot be given: {why} (the verifier's time limit, scaled)")
+        text = _settings_text(settings)
+        if len(text) > min(launcher.MAX_CONFIG_BYTES, MAX_SETTINGS_BYTES):
+            return _refused(
+                [
+                    f"the task's launcher settings would hold {len(text)} bytes, more than its launcher reads "
+                    f"({min(launcher.MAX_CONFIG_BYTES, MAX_SETTINGS_BYTES)}): declare fewer or shorter artifacts, a "
+                    "shorter grader command or replay, or smaller replay checks"
+                ]
+            )
+        _write(staging / TESTS_DIR / LAUNCHER_DIR / launcher.CONFIG, text)
         digest = task_digest(staging)
         stored = store / digest
         try:
@@ -459,6 +747,80 @@ def artifact_problems(config: Mapping[str, Any] | None) -> list[str]:
                 f"{MAX_ARTIFACT_CHARS} characters"
             )
     return problems
+
+
+def replay_check_problems(
+    checks: ReplayChecks, task_dir: Path, replay: Mapping[str, Any] | None, artifacts: Sequence[str]
+) -> list[str]:
+    """Why the task in ``task_dir``, whose grader manifest gives ``replay`` and whose ``task.toml`` declares
+    ``artifacts``, cannot have ``checks``, each one sentence: it has no replay; data the launcher could not use, read as
+    it reads them (``launcher.load_checks``: inputs that are no directory, expected outputs that are no object of the
+    replay's output keys and numbers or lack a key the tolerance names, forbidden literals that are no list of values
+    and tolerances); inputs that hold no file, one at or around a path the submission holds or the replay writes, or one
+    the task's ``environment/`` holds as a directory where the inputs hold a file, or the reverse; a source to scan that
+    is no artifact, nor below one, or one the replay writes."""
+
+    if replay is None:
+        return [f"replay_checks need a replay, and {TESTS_DIR}/{GEN_DIR}/{GRADER_MANIFEST} gives none"]
+    tests, outputs = str(task_dir / TESTS_DIR), list(replay["outputs"])
+    settings = checks.settings()
+    problems = []
+    for variant, recorded in zip(checks.variants, settings["variants"], strict=True):
+        _, problem = launcher.load_checks({"variants": [recorded], "forbidden_literals": None}, replay, tests)
+        if problem is None:
+            problem = _overlay_problem(task_dir, variant, [*artifacts, *outputs])
+        if problem is not None:
+            problems.append(_without(problem, task_dir))
+    forbidden = checks.forbidden_literals
+    if forbidden is not None:
+        only = {"variants": [], "forbidden_literals": settings["forbidden_literals"]}
+        if (problem := launcher.load_checks(only, replay, tests)[1]) is not None:
+            problems.append(_without(problem, task_dir))
+        for source in forbidden.sources:
+            if not any(source == artifact or _below(source, artifact) for artifact in artifacts):
+                problems.append(
+                    f"the forbidden literals' source {source} is no artifact of the task, nor below one: the scan "
+                    "reads what the submission holds"
+                )
+            elif any(source == output or _below(source, output) or _below(output, source) for output in outputs):
+                problems.append(f"the forbidden literals' source {source} is what the replay writes again")
+    return problems
+
+
+def _overlay_problem(task_dir: Path, variant: ReplayVariant, protected: Sequence[str]) -> str | None:
+    """Why ``variant``'s inputs, a directory of the task in ``task_dir``, cannot be laid over the working inputs: they
+    hold no file; one at or around a path of ``protected`` (the artifacts and the replay's outputs,
+    ``launcher.overlay_conflict``); or a directory where the task's ``environment/`` holds a file, or the reverse."""
+
+    inputs, environment = task_dir / variant.inputs, task_dir / ENVIRONMENT_DIR
+    where = f"variant {variant.name}'s inputs cannot be laid over the working inputs:"
+    files = 0
+    for directory, directories, names in os.walk(inputs):
+        relative = Path(directory).relative_to(inputs)
+        for name in sorted(directories + names):
+            shown, is_directory = (relative / name).as_posix(), name in directories
+            if (conflict := launcher.overlay_conflict(shown, is_directory, protected)) is not None:
+                return f"{where} {conflict}"
+            there = environment / shown
+            if is_directory and there.exists() and not there.is_dir():
+                return f"{where} {shown} is a directory of the variant's and a file of {ENVIRONMENT_DIR}/'s"
+            if not is_directory and there.is_dir():
+                return f"{where} {shown} is a file of the variant's and a directory of {ENVIRONMENT_DIR}/'s"
+            files += not is_directory
+    if not files:
+        return f"variant {variant.name}'s inputs, {variant.inputs}, hold no file to lay over the working inputs"
+    return None
+
+
+def _artifact_sources(config: Mapping[str, Any] | None) -> list[str]:
+    """The paths of a runtime task's ``artifacts`` (``config``, its ``task.toml``; None: there is none), as
+    ``HarborTask.load`` reads them; entries it refuses are left to it."""
+
+    entries = (config or {}).get("artifacts")
+    if not isinstance(entries, list):
+        return []
+    sources = (entry.get("source") if isinstance(entry, Mapping) else entry for entry in entries)
+    return [source for source in sources if isinstance(source, str) and source]
 
 
 def read_grader_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
@@ -625,8 +987,9 @@ def launcher_outcome(
     is the launcher's too, and the entry's verifier classifiers, its reading of reward files that are not regular files
     and its reward check apply to its other tasks only, since the grader, root beside the launcher, could write what
     they read (``test-stdout.txt`` among it).  A score of 0 the launcher gave keeps the solver's fault it names
-    (``reason``: ``solver_output_contract``, ``solver_nonreproducible``); a non-score keeps its failure kind, with the
-    launcher's detail as its reason.  A launcher that outlived the verifier's time, exited nonzero or left no report
+    (``reason``: ``solver_output_contract``, ``solver_nonreproducible``, and for a task with replay checks
+    ``solver_variant_failed`` and ``solver_hardcoded``); a non-score keeps its failure kind, with the launcher's detail
+    as its reason.  A launcher that outlived the verifier's time, exited nonzero or left no report
     it writes did not finish (:func:`unfinished`), whatever the reward file says."""
 
     report = _report(files.get(launcher.REPORT))
@@ -699,7 +1062,7 @@ def regrade_count(settings: Mapping[str, Any], config: RuntimeTasksConfig) -> in
 def grader_scored(outcome: Outcome) -> bool:
     """Whether a runtime task's grade is its grader's score, which a regrade checks: a score the launcher gave from the
     grader's verdict, and not a solver's 0 it gave before the grader ran (``solver_output_contract``,
-    ``solver_nonreproducible``), which names its reason."""
+    ``solver_nonreproducible``, ``solver_variant_failed``, ``solver_hardcoded``), which names its reason."""
 
     return outcome.trainable and outcome.reason is None
 

@@ -9,11 +9,13 @@ Where unprivileged user namespaces work, it also runs with its own operations, a
 from __future__ import annotations
 
 import ast
+import codecs
 import contextlib
 import errno
 import hashlib
 import json
 import os
+import re
 import resource
 import shutil
 import signal
@@ -136,6 +138,54 @@ class Verifier:
 
     def replay(self, outputs: tuple[str, ...] = ("answer.json",)) -> None:
         self.config["replay"] = {"command": [sys.executable, "solve.py"], "outputs": list(outputs)}
+
+    def variant(
+        self,
+        name: str = "fifty",
+        inputs: dict[str, str] | None = None,
+        expected: Any = None,
+        tolerance: dict[str, Any] | None = None,
+        meta: Any = None,
+    ) -> Path:
+        """Give the task a replay variant whose data lie in ``tests/gen/variants/<name>``: ``inputs`` (by default a
+        ``data.txt`` of 50) laid over the working inputs, and what it ``expected`` (by default an answer of 100);
+        the directory of its data."""
+
+        root = self.tests / "gen" / "variants" / name
+        for relative, text in (inputs if inputs is not None else {"data.txt": "50"}).items():
+            path = root / "inputs" / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        (root / "inputs").mkdir(parents=True, exist_ok=True)
+        wanted = expected if expected is not None else {"answer.json#/answer": 100}
+        (root / "expected.json").write_text(wanted if isinstance(wanted, str) else json.dumps(wanted))
+        self.checks()["variants"].append(
+            {
+                "name": name,
+                "inputs": f"tests/gen/variants/{name}/inputs",
+                "expected": f"tests/gen/variants/{name}/expected.json",
+                "tolerance": tolerance or {"default": 0, "keys": {}},
+                "meta": meta,
+            }
+        )
+        return root
+
+    def forbid(self, literals: Any, sources: tuple[str, ...] = ("solve.py",)) -> None:
+        """Give the task forbidden literals, ``(value, tolerance)`` pairs (or the text of their file), for the scan of
+        ``sources``."""
+
+        text = (
+            literals if isinstance(literals, str) else json.dumps([{"value": v, "tolerance": t} for v, t in literals])
+        )
+        (self.tests / "gen" / "forbidden.json").write_text(text)
+        self.checks()["forbidden_literals"] = {
+            "path": "tests/gen/forbidden.json",
+            "sources": list(sources),
+            "scan": launcher.LITERAL_SCAN,
+        }
+
+    def checks(self) -> dict[str, Any]:
+        return self.config.setdefault("replay_checks", {"variants": [], "forbidden_literals": None})
 
     def run(
         self,
@@ -1724,3 +1774,1355 @@ def test_the_replay_runs_with_a_path_of_absolute_entries_alone(verifier):
 
     assert reward == {"reward": 1}, report
     assert json.loads((verifier.workdir / "answer.json").read_text())["path"] == "/usr/bin:/bin"
+
+
+# ---------------------------------------------------------------------------------------------------- replay checks
+
+# A submission that computes its answer without reading its inputs: its replay writes 42 again, on any data.
+IGNORING_SOLVE = """
+import json
+with open("answer.json", "w") as stream:
+    json.dump({"answer": 6 * 7}, stream)
+"""
+# The SHA-256 of the replayed outputs of SOLVE over a data.txt of 21: {"answer": 42}.
+SOLVED_SHA256 = hashlib.sha256(
+    launcher.OUTPUTS_RULE.encode() + b"\0answer.json\0" + hashlib.sha256(b'{"answer": 42}').hexdigest().encode()
+).hexdigest()
+
+
+def _checked(verifier: Verifier, solve: str = SOLVE) -> None:
+    """A task with a replay, whose submission is ``solve`` (and its answer) over a working input data.txt of 21."""
+
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    verifier.submit(42, **{"solve.py": solve, "data.txt": "21"})
+
+
+def _in_variants(code: str) -> str:
+    """Python that runs ``code`` only in the replay of a variant, whose data.txt holds 50."""
+
+    return f"\nimport json, os, sys\nif open('data.txt').read().strip() == '50':\n    {code}\n"
+
+
+def _leaving(verifier: Verifier, solve: str = SOLVE) -> str:
+    """``solve``, then lines that leave a directory of the replay's user in each of the verifier's temporary
+    directories (its /tmp, which holds the launcher's own directory, and the others), and note in the answer how many
+    of those an earlier replay left there are still to be seen."""
+
+    places = [str(path) for path in verifier.temporary[1:]]
+    return solve + textwrap.dedent(
+        f"""
+        import json, os
+        places = [os.path.abspath(os.path.join(os.environ["TMPDIR"], "..", "..")), *{places!r}]
+        data = open("data.txt").read().strip()
+        seen = sum(os.path.exists(os.path.join(place, "left-21")) for place in places)
+        for place in places:
+            os.makedirs(os.path.join(place, "left-" + data, "inner"))
+            open(os.path.join(place, "left-" + data, "inner", "junk"), "w").write("x")
+        answer = json.load(open("answer.json"))
+        json.dump({{**answer, "seen": seen}}, open("answer.json", "w"))
+        """
+    )
+
+
+_ANSWER_GRADER = HONEST_GRADER.replace('json.load(stream) == {"answer": 42}', 'json.load(stream)["answer"] == 42')
+
+
+def test_what_a_replays_user_leaves_where_every_user_may_write_is_removed_after_each_replay(verifier):
+    """What the replay's user left in /tmp, /var/tmp and /dev/shm is gone before the next replay starts, and before the
+    grader runs: no variant's replay sees what the replay left there, and nothing a replay left takes room."""
+
+    _checked(verifier, _leaving(verifier))
+    verifier.variant(expected={"answer.json#/answer": 100, "answer.json#/seen": 0})
+    verifier.grader(_ANSWER_GRADER)
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert report["replay"]["cleared"] == 3 and report["replay_checks"]["variants"][0]["cleared"] == 3
+    assert [sorted(path.name for path in place.iterdir()) for place in verifier.temporary[1:]] == [[], []]
+    assert [path.name for path in verifier.scratch.iterdir()] == [report_directory(verifier)]
+
+
+def report_directory(verifier: Verifier) -> str:
+    """The name of the launcher's own directory in the verifier's /tmp, which it leaves there."""
+
+    (directory,) = (path.name for path in verifier.scratch.iterdir() if path.name.startswith("platoon-launcher-"))
+    return directory
+
+
+def test_with_a_time_of_their_own_each_replay_takes_at_most_that_and_the_grader_the_rest(verifier):
+    """``replay_timeout_s`` gives each replay its own time, here 2 s for the replay and each of two variants, rather
+    than a share of half of the time left; the grader gets what they leave, most of 108 s."""
+
+    _checked(verifier)
+    verifier.variant()
+    verifier.variant("seven", inputs={"data.txt": "7"}, expected={"answer.json#/answer": 14})
+    verifier.config["replay_timeout_s"] = 2
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    times = [report["replay"]["timeout_s"]] + [entry["timeout_s"] for entry in report["replay_checks"]["variants"]]
+    assert all(1.5 < each <= 2.0 for each in times), times
+    assert report["grader"]["timeout_s"] > 100.0
+
+
+def test_a_replay_that_outlives_its_own_time_scores_zero(verifier):
+    verifier.replay()
+    verifier.submit(42, **{"solve.py": "import time\ntime.sleep(30)\n", "data.txt": "21"})
+    verifier.config["replay_timeout_s"] = 1
+
+    _, reward, report = verifier.run()
+
+    assert (reward, report["reason"]) == ({"reward": 0}, "solver_nonreproducible")
+    assert report["detail"].startswith("the replay outlived its 0.9") and 0.9 < report["replay"]["timeout_s"] <= 1.0
+
+
+def test_replays_with_a_time_of_their_own_end_by_that_many_times_it_after_the_launcher_started(monkeypatch):
+    """The launcher's checks before the replays take from the replays' time, never the grader's: replays of 3 s each,
+    a replay and a variant, end 6 s after the launcher started, which was 5 s ago, so the replay has 1 s left."""
+
+    monkeypatch.setattr(launcher.time, "monotonic", lambda: 1000.0)
+    replays = launcher.Replays.of({"replay_timeout_s": 3}, started=995.0, deadline=1100.0, variants=1)
+
+    assert (replays.deadline(), replays.deadline()) == (1001.0, 1001.0)
+    shared = launcher.Replays.of({}, started=995.0, deadline=1100.0, variants=1)  # half of the 100 s left, in turn
+    assert shared.deadline() == 1025.0 and shared.deadline() == 1050.0
+
+
+@pytest.mark.parametrize(
+    ("timeout", "problem"),
+    [
+        (0, "0 is no finite number of seconds above 0"),
+        (-1, "-1 is no finite number of seconds above 0"),
+        (True, "True is no finite number"),
+        ("5", "'5' is no finite number"),
+        (float("nan"), "nan is no finite number"),
+        (54, "2 replays of 54 s leave the grader none of the 108 s the launcher's steps have"),
+    ],
+)
+def test_a_replay_time_the_launcher_cannot_give_is_settings_it_cannot_use(verifier, timeout, problem):
+    _checked(verifier)
+    verifier.variant()
+    verifier.config["replay_timeout_s"] = timeout
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}
+    assert f"hold no usable replay_timeout_s ({problem}" in report["detail"], report["detail"]
+
+
+def test_a_replay_time_without_a_replay_is_settings_the_launcher_cannot_use(verifier):
+    verifier.submit(42)
+    verifier.config["replay_timeout_s"] = 5
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}
+    assert "hold no usable replay_timeout_s (the task has no replay)" in report["detail"]
+
+
+def _tmpfs_works() -> bool:
+    if shutil.which("unshare") is None:
+        return False
+    with tempfile.TemporaryDirectory() as directory:
+        mount = 'mount -t tmpfs -o size=1m tmpfs "$0"'
+        return (
+            subprocess.run(["unshare", "-rm", "sh", "-c", mount, directory], capture_output=True, timeout=60).returncode
+            == 0
+        )
+
+
+_TMPFS = pytest.mark.skipif(not _tmpfs_works(), reason="unprivileged mount namespaces with tmpfs are unavailable")
+
+
+def _on_a_small_tmpfs(verifier: Verifier, size: str) -> tuple[str, ...]:
+    """The command prefix that runs the launcher as root of a user and mount namespace whose verifier's /tmp, where
+    the replays run, is a tmpfs of ``size``."""
+
+    return (
+        "unshare",
+        "-rm",
+        "sh",
+        "-c",
+        f'mount -t tmpfs -o size={size} tmpfs "$0" && exec "$@"',
+        str(verifier.scratch),
+    )
+
+
+# A replay that fills its filesystem with files of 1 MiB until none fits: in its own directory, or (``where`` its
+# grandparent) in the verifier's /tmp beside the launcher's directory.
+_FILLING = """
+import os
+where = {where}
+n = 0
+try:
+    while True:
+        with open(os.path.join(where, "junk-%d-%d" % (os.getpid(), n)), "wb") as stream:
+            stream.write(b"x" * (1 << 20))
+        n += 1
+except OSError:
+    pass
+"""
+
+
+@_TMPFS
+@pytest.mark.parametrize("variants", [False, True], ids=["alone", "with-a-variant"])
+def test_a_replay_that_fills_its_directorys_filesystem_is_graded_and_its_variants_replay(verifier, variants):
+    """On a /tmp of 16 MiB, a replay that writes its outputs, then fills its own directory: what it left is removed
+    before any variant replays, and holding what it wrote takes no room, so the honest submission scores 1."""
+
+    _checked(verifier, SOLVE + _FILLING.format(where='"."'))
+    if variants:
+        verifier.variant()
+
+    _, reward, report = verifier.run(prefix=_on_a_small_tmpfs(verifier, "16m"))
+
+    assert reward == {"reward": 1}, report
+    assert [entry["passed"] for entry in report.get("replay_checks", {}).get("variants", [])] == [True] * variants
+
+
+@_TMPFS
+@pytest.mark.parametrize("variants", [False, True], ids=["alone", "with-a-variant"])
+def test_a_replay_that_fills_tmp_beside_its_directory_keeps_the_solvers_zero(verifier, variants):
+    """On a /tmp of 3 MiB, a submission that ignores its inputs and whose replay fills /tmp beside its own directory:
+    what it left there is removed before its variant replays, which then fails, the solver's 0, never the trusted
+    side's fault; without the variant, it is graded."""
+
+    leaving = _FILLING.format(where='os.path.join(os.environ["TMPDIR"], "..", "..")')
+    _checked(verifier, IGNORING_SOLVE + leaving)
+    if variants:
+        verifier.variant()
+
+    _, reward, report = verifier.run(prefix=_on_a_small_tmpfs(verifier, "3m"))
+
+    assert report["failure_kind"] is None, report
+    assert report["replay"]["cleared"] >= 1
+    if variants:
+        assert (reward, report["reason"]) == ({"reward": 0}, "solver_variant_failed"), report
+    else:
+        assert (reward, report["detail"]) == ({"reward": 1}, "the verdict passed"), report
+
+
+# Fills the filesystem of a variant's copy (or with ``workdir``, of the outputs put back in the working directory)
+# before it is made, as an earlier replay that filled it from somewhere the launcher does not clear would have: its
+# files (``variant``), or with no inode left, its directory itself (``variant-directory``) or the file of its output
+# (``variant-log``), or a change of owner that needs room (``variant-owner``, on a filesystem that copies on write).
+_NO_ROOM = """
+import builtins, errno
+copy, copy_file, mkdir = launcher._copy_tree, launcher._copy_file, os.mkdir
+
+def full(source, target, skip, deadline=None, limit=None, replay="the replay"):
+    if replay != "the replay":
+        raise OSError(errno.ENOSPC, "No space left on device")
+    return copy(source, target, skip, deadline, limit, replay)
+
+def full_workdir(source, target, mode):
+    if target.startswith({workdir!r}):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    return copy_file(source, target, mode)
+
+def no_inode(path, mode=0o777, **kwargs):
+    if os.path.basename(path).startswith("variant-"):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    return mkdir(path, mode, **kwargs)
+
+def no_log(path, *args, **kwargs):
+    if os.path.basename(str(path)).startswith("variant-") and str(path).endswith(".log"):
+        raise OSError(errno.ENOSPC, "No space left on device")
+    return builtins.open(path, *args, **kwargs)
+
+class FullOnGive(WithoutRoot):
+    def give(self, path, uid):
+        if os.path.basename(path).startswith("variant-"):
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+{assignment}
+"""
+_FULL = {
+    "variant": ("launcher._copy_tree = full", "WithoutRoot()"),
+    "variant-directory": ("os.mkdir = no_inode", "WithoutRoot()"),
+    "variant-log": ("launcher.open = no_log", "WithoutRoot()"),
+    "variant-owner": ("", "FullOnGive()"),
+    "workdir": ("launcher._copy_file = full_workdir", "WithoutRoot()"),
+}
+
+
+@pytest.mark.parametrize("left", [True, False], ids=["the-replays-left-files", "nothing-left"])
+@pytest.mark.parametrize("where", list(_FULL))
+def test_a_full_filesystem_after_the_replays_left_files_is_the_solvers_zero(verifier, left, where):
+    """I2 for a variant: where a replay's user left files where every user may write, a variant's copy (its files, its
+    directory, the file of its output, its change of owner), or the replay's outputs put back in the working directory,
+    that finds its filesystem full is the solver's 0, never the grader owner's protocol fault; with nothing left, the
+    trusted side's fault, as a full filesystem is before any replay ran."""
+
+    shm = verifier.temporary[2]
+    _checked(verifier, SOLVE + (f"\nopen({str(shm / 'left')!r}, 'w').write('x')\n" if left else ""))
+    verifier.variant()
+    assignment, ops = _FULL[where]
+    extra = _NO_ROOM.format(workdir=str(verifier.workdir), assignment=assignment)
+
+    _, reward, report = verifier.run(extra=extra, ops=ops)
+
+    if not left:
+        assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}, report
+        assert "No space left on device" in report["detail"]
+    elif where.startswith("variant"):
+        assert (reward, report["reason"]) == ({"reward": 0}, "solver_variant_failed"), report
+        assert report["detail"].startswith("the replay of variant fifty finds no room for its copy")
+    else:
+        assert (reward, report["reason"]) == ({"reward": 0}, "solver_nonreproducible"), report
+        assert report["detail"].startswith("the replay's outputs find no room in the working directory")
+
+
+def test_a_submission_that_follows_its_inputs_passes_every_variant_and_its_replay_is_graded(verifier):
+    """Each variant replays the submission on its own inputs (a data.txt of 50, then of 7), which gives what it
+    expects; the grader then grades what the replay wrote from the working inputs, whose SHA-256 the report holds."""
+
+    _checked(verifier)
+    verifier.variant("fifty", meta={"covers": [[0, 1]]})
+    verifier.variant("seven", inputs={"data.txt": "7"}, expected={"answer.json#/answer": 14})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    ran = report["replay_checks"]["variants"]
+    assert [(entry["name"], entry["passed"], entry["exit_code"]) for entry in ran] == [
+        ("fifty", True, 0),
+        ("seven", True, 0),
+    ]
+    assert not {"meta", "output_tail", "missed"} & set(ran[0])  # a variant that passed keeps a short record
+    assert json.loads((verifier.workdir / "answer.json").read_text()) == {"answer": 42}  # the replay's, no variant's
+    assert report[launcher.REPLAYED_SHA256] == SOLVED_SHA256
+
+
+def test_a_submission_that_ignores_its_inputs_fails_a_variant_as_the_solvers_fault(verifier):
+    _checked(verifier, IGNORING_SOLVE)
+    verifier.variant("fifty", meta={"covers": [[0, 1]]})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 0}
+    assert (report["reason"], report["detail"]) == (
+        "solver_variant_failed",
+        "the replay of variant fifty gave answer.json#/answer outside the tolerance of what the variant expects",
+    )
+    (entry,) = report["replay_checks"]["variants"]
+    assert (entry["passed"], entry["missed"], entry["meta"]) == (False, ["answer.json#/answer"], {"covers": [[0, 1]]})
+    assert report["replay"]["exit_code"] == 0 and "output_tail" in entry
+    assert "grader" not in report and launcher.REPLAYED_SHA256 not in report
+
+
+def test_each_variant_replays_from_the_clean_inputs_with_its_own_laid_over_them(verifier):
+    """A variant's replay starts from the working inputs as the replay found them: without the replay's outputs or
+    what an earlier replay left there, with the variant's inputs in place of the files at their paths (data.txt) and
+    beside them (notes/extra.txt), which neither the replay nor another variant's replay sees."""
+
+    probe = """
+        import json, os, sys
+        if os.path.exists("answer.json") or os.path.exists("left.txt"):
+            sys.exit(7)
+        open("left.txt", "w").write("left by a replay")
+        with open("data.txt") as stream:
+            value = 2 * int(stream.read())
+        with open("answer.json", "w") as stream:
+            json.dump({"answer": value, "extra": int(os.path.exists("notes/extra.txt"))}, stream)
+    """
+    _checked(verifier, probe)
+    verifier.variant(
+        inputs={"data.txt": "50", "notes/extra.txt": "seen"},
+        expected={"answer.json#/answer": 100, "answer.json#/extra": 1},
+    )
+    verifier.variant("seven", inputs={"data.txt": "7"}, expected={"answer.json#/answer": 14, "answer.json#/extra": 0})
+    verifier.grader(HONEST_GRADER.replace('json.load(stream) == {"answer": 42}', 'json.load(stream)["answer"] == 42'))
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert [entry["passed"] for entry in report["replay_checks"]["variants"]] == [True, True]
+    assert json.loads((verifier.workdir / "answer.json").read_text()) == {"answer": 42, "extra": 0}
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        ("sys.exit(3)", "the replay of variant fifty exited 3"),
+        ("os.remove('answer.json')", "after the replay of variant fifty, answer.json is missing"),
+        ("open('answer.json', 'w').write('{nope')", "after the replay of variant fifty, answer.json is not JSON"),
+        ("json.dump({'answer': True}, open('answer.json', 'w'))", "gave answer.json#/answer outside the tolerance"),
+        ("json.dump({'answers': 100}, open('answer.json', 'w'))", "gave answer.json#/answer outside the tolerance"),
+    ],
+    ids=["exits", "no-output", "not-json", "a-boolean", "no-such-key"],
+)
+def test_a_variants_replay_that_does_not_give_what_it_expects_scores_zero_as_the_solvers_fault(verifier, code, detail):
+    _checked(verifier, SOLVE + _in_variants(code))
+    verifier.variant()
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 0}
+    assert report["reason"] == "solver_variant_failed" and detail in report["detail"], report["detail"]
+    assert report["replay"]["exit_code"] == 0 and "grader" not in report
+
+
+def test_a_variants_replay_that_outlives_its_time_scores_zero_and_takes_what_the_replay_left_of_theirs(verifier):
+    """12 s leave the launcher's steps 7 s, and the replays half of it: the replay may take half of that, and the
+    variant has whatever is left."""
+
+    _checked(verifier, SOLVE + _in_variants("__import__('time').sleep(60)"))
+    verifier.variant()
+    verifier.config["timeout_s"] = 12.0
+
+    report = verifier.run()[2]
+
+    assert (
+        report["reason"] == "solver_variant_failed" and "the replay of variant fifty outlived its" in report["detail"]
+    )
+    (entry,) = report["replay_checks"]["variants"]
+    assert entry["timed_out"] and report["replay"]["timeout_s"] <= 1.8 < entry["timeout_s"] <= 3.5
+
+
+def test_the_replays_share_the_replays_time_each_an_equal_part_of_what_is_left(verifier):
+    """The replay and two variants share half of the time the launcher's steps have (108 s of 120): the replay a third
+    of it, the first variant half of what is left then, the second the rest."""
+
+    _checked(verifier)
+    verifier.variant()
+    verifier.variant("seven", inputs={"data.txt": "7"}, expected={"answer.json#/answer": 14})
+
+    report = verifier.run()[2]
+
+    first, second = (entry["timeout_s"] for entry in report["replay_checks"]["variants"])
+    assert 17.0 < report["replay"]["timeout_s"] <= 18.0 and 26.0 < first <= 27.0 and 52.0 < second <= 54.0, report
+
+
+def test_a_variants_copy_past_its_time_scores_zero_as_the_solvers_fault(verifier):
+    _checked(verifier)
+    verifier.variant()
+    extra = """
+        copy = launcher._copy_tree
+
+        def slow(source, target, skip, deadline=None, limit=None, replay="the replay"):
+            if replay != "the replay":
+                raise launcher.SolverFault(
+                    launcher.NONREPRODUCIBLE, f"copying the working directory for {replay} outlived its time"
+                )
+            return copy(source, target, skip, deadline, limit, replay)
+
+        launcher._copy_tree = slow
+    """
+
+    _, reward, report = verifier.run(extra=extra)
+
+    assert reward == {"reward": 0}
+    assert (report["reason"], report["detail"]) == (
+        "solver_variant_failed",
+        "copying the working directory for the replay of variant fifty outlived its time",
+    )
+
+
+def test_what_a_variants_replay_leaves_running_is_swept(verifier):
+    marker = verifier.root / "daemon.pid"
+    daemonizing = f"""
+        import os, time
+        if open("data.txt").read().strip() == "50":
+            if os.fork() == 0:
+                os.setsid()
+                if os.fork() == 0:
+                    with open({str(marker)!r}, "w") as stream:
+                        stream.write(str(os.getpid()))
+                    time.sleep(120)
+                os._exit(0)
+            os.wait()
+            while not os.path.exists({str(marker)!r}):
+                time.sleep(0.01)
+    """
+    _checked(verifier, SOLVE + textwrap.dedent(daemonizing))
+    verifier.variant()
+
+    try:
+        _, reward, report = verifier.run()
+
+        assert reward == {"reward": 1}, report
+        (entry,) = report["replay_checks"]["variants"]
+        assert entry["swept"] == 1 and report["replay"]["swept"] == 0
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(marker.read_text()), 0)
+    finally:  # a daemon the launcher failed to kill must not outlive the test
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(marker.read_text()), signal.SIGKILL)
+
+
+def test_no_variant_replays_once_the_replay_failed(verifier):
+    """The scan ran before the replay, and found nothing; no variant replayed after the replay failed."""
+
+    _checked(verifier, "import sys\nsys.exit(4)\n")
+    verifier.variant()
+    verifier.forbid([(7.5, 0)])
+
+    _, reward, report = verifier.run()
+
+    assert (reward, report["reason"], report["detail"]) == (
+        {"reward": 0},
+        "solver_nonreproducible",
+        "the replay exited 4",
+    )
+    assert list(report["replay_checks"]) == ["forbidden_literals"]
+    assert {**report["replay_checks"]["forbidden_literals"], "python": None} == {
+        "scan": launcher.LITERAL_SCAN,
+        "python": None,
+        "sources": ["solve.py"],
+        "literals": 1,
+        "hits": [],
+    }
+
+
+def test_each_grade_replays_the_variants_again_as_a_regrade_does(tmp_path):
+    """Two grades of one submission, each in a verifier of its own: the second replays the variants again, and catches
+    a submission that follows its inputs only the first time."""
+
+    once = tmp_path / "followed-once"
+    solve = f"""
+import json, os
+with open("data.txt") as stream:
+    value = 2 * int(stream.read())
+if value == 100:
+    if os.path.exists({str(once)!r}):
+        value = 42
+    open({str(once)!r}, "w").close()
+with open("answer.json", "w") as stream:
+    json.dump({{"answer": value}}, stream)
+"""
+    grades = []
+    for grade in ("first", "regrade"):
+        verifier = Verifier(tmp_path / grade)
+        _checked(verifier, solve)
+        verifier.variant()
+        report = verifier.run()[2]
+        grades.append(
+            (report["reward"], report["reason"], [entry["passed"] for entry in report["replay_checks"]["variants"]])
+        )
+
+    assert grades == [(1, None, [True]), (0, "solver_variant_failed", [False])]
+
+
+def test_what_the_replay_wrote_waits_as_roots_alone_while_the_variants_replay(verifier):
+    """What the replay wrote waits beside the variants' directories, alone in the replay's own directory, renamed (what
+    else the replay left there is gone), the directory 700 and its files 600, which the seal makes root's.  Run as this
+    user, a variant's replay can look; one of the replay's user never can."""
+
+    code = (
+        "held = os.path.join('..', 'replayed')\n    "
+        "json.dump({'answer': 100, 'directory': os.stat(held).st_mode & 0o777, "
+        "'file': os.stat(os.path.join(held, 'answer.json')).st_mode & 0o777, "
+        "'entries': len(os.listdir(held))}, open('answer.json', 'w'))"
+    )
+    _checked(verifier, SOLVE + _in_variants(code))
+    expected = {"answer": 100, "directory": 0o700, "file": 0o600, "entries": 1}
+    verifier.variant(expected={f"answer.json#/{key}": value for key, value in expected.items()})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert json.loads((verifier.workdir / "answer.json").read_text()) == {"answer": 42}
+
+
+def test_an_output_below_directories_waits_with_them_and_nothing_else_of_the_replays(verifier):
+    """An output below directories keeps them while the variants replay, each 700, and nothing else the replay left
+    there; the grader then grades it back in its place."""
+
+    nested = """
+import json, os
+with open("data.txt") as stream:
+    value = 2 * int(stream.read())
+os.makedirs("out/deep", exist_ok=True)
+open("out/notes.txt", "w").write("left beside the output")
+with open("out/deep/answer.json", "w") as stream:
+    json.dump({"answer": value}, stream)
+"""
+    held = "held = os.path.join('..', 'replayed', 'out')\n    "
+    code = held + (
+        "json.dump({'answer': 100, 'entries': int(os.listdir(held) == ['deep']), "
+        "'mode': os.stat(held).st_mode & 0o777}, open('out/deep/answer.json', 'w'))"
+    )
+    verifier.replay(("out/deep/answer.json",))
+    verifier.config["artifacts"] = ["out", "solve.py"]
+    (verifier.workdir / "out" / "deep").mkdir(parents=True)
+    (verifier.workdir / "out" / "deep" / "answer.json").write_text(json.dumps({"answer": 42}))
+    verifier.submit(None, **{"solve.py": nested + _in_variants(code), "data.txt": "21"})
+    verifier.grader(HONEST_GRADER.replace('"answer.json"', '"out", "deep", "answer.json"'))
+    expected = {"answer": 100, "entries": 1, "mode": 0o700}
+    verifier.variant(expected={f"out/deep/answer.json#/{key}": value for key, value in expected.items()})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert sorted(path.name for path in (verifier.workdir / "out").iterdir()) == ["deep"]
+
+
+def test_a_variants_replay_that_leaves_processes_that_cannot_be_killed_scores_zero(verifier):
+    _checked(verifier)
+    verifier.variant()
+    extra = """
+        kill, sweeps = launcher.kill_left, []
+
+        def stubborn(also=None, window_s=launcher.KILL_WINDOW_S):
+            if also is None:
+                return kill(also, window_s)
+            sweeps.append(also)
+            return (2, 1) if len(sweeps) == 2 else (0, 0)  # the variant's replay's sweep, after the replay's
+
+        launcher.kill_left = stubborn
+    """
+
+    _, reward, report = verifier.run(extra=extra)
+
+    assert (reward, report["reason"], report["detail"]) == (
+        {"reward": 0},
+        "solver_variant_failed",
+        "processes the replay of variant fifty left could not be killed (1)",
+    )
+    (entry,) = report["replay_checks"]["variants"]
+    assert (entry["passed"], entry["survivors"], entry["swept"]) == (False, 1, 2) and "grader" not in report
+
+
+def test_a_laid_over_input_keeps_its_executable_bit(verifier):
+    code = (
+        "json.dump({'answer': 100, 'tool': int(os.access('tool.sh', os.X_OK)), "
+        "'data': int(os.access('data.txt', os.X_OK))}, open('answer.json', 'w'))"
+    )
+    _checked(verifier, SOLVE + _in_variants(code))
+    expected = {"answer.json#/answer": 100, "answer.json#/tool": 1, "answer.json#/data": 0}
+    root = verifier.variant(inputs={"data.txt": "50", "tool.sh": "#!/bin/sh\n"}, expected=expected)
+    (root / "inputs" / "tool.sh").chmod(0o755)
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+
+
+def test_a_source_whose_literals_take_past_the_deadline_breaks_the_output_contract(verifier):
+    """The scan looks at the time before each source and every 1,024 literals: here the second look finds it past."""
+
+    _checked(verifier, SOLVE + "x = [" + ", ".join(str(n) for n in range(2000)) + "]\n")
+    verifier.forbid([(4.2e9, 0)])
+    extra = """
+        looks = []
+
+        def past(deadline):
+            looks.append(deadline)
+            return len(looks) > 1
+
+        launcher._past = past
+    """
+
+    _, reward, report = verifier.run(extra=extra)
+
+    assert (reward, report["reason"], report["detail"]) == (
+        {"reward": 0},
+        "solver_output_contract",
+        "the sources take longer to scan than the verifier's time limit allows",
+    )
+    assert "replay" not in report
+
+
+def test_a_source_that_is_a_directory_breaks_the_output_contract(verifier):
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py", "lib.py"]
+    (verifier.workdir / "lib.py").mkdir()
+    verifier.submit(42, **{"solve.py": SOLVE, "data.txt": "21"})
+    verifier.forbid([(42, 0.5)], sources=("lib.py",))
+
+    _, reward, report = verifier.run()
+
+    assert (reward, report["reason"], report["detail"]) == (
+        {"reward": 0},
+        "solver_output_contract",
+        "lib.py, a source the task scans for forbidden literals, cannot be read: lib.py is not a regular file",
+    )
+
+
+def test_the_windows_find_a_match_with_one_exact_test_however_they_overlap(monkeypatch):
+    """A wide window over 9,999 narrow ones: a number in the wide one alone, between two narrow ones, and one in both
+    each take one exact test, and one outside every window none."""
+
+    forbidden = [(0.0, 1e300)] + [(1000.0 + n, 0.4) for n in range(launcher.MAX_FORBIDDEN - 1)]
+    windows, narrow = launcher.Windows(forbidden), launcher.Windows(forbidden[1:])
+    close, tests = launcher._close, []
+    monkeypatch.setattr(launcher, "_close", lambda *args: tests.append(args) or close(*args))
+
+    assert (windows.first(10998.5), windows.first(10998.3), windows.first(-1e301)) == (0, 0, None)
+    assert len(tests) == 2
+    assert (narrow.first(10998.5), narrow.first(10998.3), narrow.first(999.6), narrow.first(999.5)) == (
+        None,
+        9998,
+        0,
+        None,
+    )
+
+
+def test_an_overlay_conflicts_with_a_path_of_the_submissions_at_it_below_it_or_above_it():
+    protected = ["answer.json", "src", "pkg/mod.py"]
+
+    assert launcher.overlay_conflict("src/extra.py", False, protected) == (
+        "src/extra.py would change src, which the submission holds or the replay writes"
+    )
+    assert launcher.overlay_conflict("pkg", False, protected).startswith("pkg would change pkg/mod.py")
+    assert launcher.overlay_conflict("pkg", True, protected) is None  # the directory around it, which it holds too
+    assert launcher.overlay_conflict("data/answer.json", False, protected) is None
+
+
+def _inputs_a_file(verifier: Verifier) -> None:
+    root = verifier.variant()
+    shutil.rmtree(root / "inputs")
+    (root / "inputs").write_text("not a directory")
+
+
+@pytest.mark.parametrize(("owner", "prefix"), [("generated", "verifier_generated"), ("trusted", "verifier_trusted")])
+@pytest.mark.parametrize(
+    ("setup", "problem"),
+    [
+        (
+            lambda v: v.variant(expected="{nope"),
+            "fifty's expected outputs, tests/gen/variants/fifty/expected.json, cannot",
+        ),
+        (lambda v: v.variant(expected=[100]), "are no object of 1 to 10000 output keys"),
+        (lambda v: v.variant(expected={"result.json": 100}), 'hold the key "result.json", which names no output'),
+        (lambda v: v.variant(expected={"answer.json#answer": 100}), "which names no output of the replay"),
+        (lambda v: v.variant(expected={"answer.json#/answer": "100"}), "which is no finite number or list of them"),
+        (
+            lambda v: v.variant(tolerance={"default": 0, "keys": {"answer.json#/other": 1}}),
+            'lack "answer.json#/other", which the variant\'s tolerance names',
+        ),
+        (
+            lambda v: shutil.rmtree(v.variant() / "inputs"),
+            "variant fifty's inputs, tests/gen/variants/fifty/inputs, cannot",
+        ),
+        (_inputs_a_file, "are a file, not a directory"),
+        (lambda v: v.forbid("{}"), "the forbidden literals, tests/gen/forbidden.json, are no list of at most"),
+        (lambda v: v.forbid("[1, 2]"), "hold, as literal 0, no object of a finite value and a tolerance"),
+        (lambda v: v.forbid([(42, -1)]), "hold, as literal 0, no object"),
+        (lambda v: v.forbid('[{"value": NaN, "tolerance": 1}]'), "hold, as literal 0, no object"),
+        (lambda v: v.forbid('[{"value": 1, "tolerance": 1, "cell": 3}]'), "hold, as literal 0, no object"),
+        (lambda v: v.variant(expected={}), "are no object of 1 to 10000 output keys"),
+        (
+            lambda v: v.variant(expected={f"answer.json#/{n}": 1 for n in range(launcher.MAX_EXPECTED_KEYS + 1)}),
+            "are no object of 1 to 10000 output keys",
+        ),
+        (
+            lambda v: v.variant(expected=" " * launcher.MAX_CHECK_BYTES + "{}"),
+            f"cannot be read as JSON: expected.json holds more than {launcher.MAX_CHECK_BYTES} bytes",
+        ),
+        (lambda v: v.forbid([(n, 0) for n in range(launcher.MAX_FORBIDDEN + 1)]), "are no list of at most 10000"),
+        (
+            lambda v: (v.replay(("answer.json", "notes.txt")), v.variant(expected={"notes.txt": 1})),
+            'hold the key "notes.txt", whose output notes.txt is no .json file',
+        ),
+    ],
+    ids=[
+        "not-json",
+        "no-object",
+        "no-output",
+        "no-pointer",
+        "no-number",
+        "tolerance-elsewhere",
+        "no-inputs",
+        "inputs-a-file",
+        "literals-no-list",
+        "literal-no-object",
+        "negative-tolerance",
+        "nan",
+        "more-than-value-and-tolerance",
+        "no-keys",
+        "too-many-keys",
+        "too-large",
+        "too-many-literals",
+        "an-output-no-json",
+    ],
+)
+def test_check_data_the_launcher_cannot_use_is_the_protocol_fault_of_the_graders_owner(
+    verifier, owner, prefix, setup, problem
+):
+    """The data of the replay checks lie in tests/gen, where the grader's owner put them: data the launcher cannot use
+    make no measurement, and are found before anything replays."""
+
+    _checked(verifier)
+    verifier.config["grader_owner"] = owner
+    setup(verifier)
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": f"{prefix}_protocol"}
+    assert problem in report["detail"], report["detail"]
+    assert "replay" not in report and "grader" not in report
+
+
+def _workdir_has(*artifacts: str, directories: tuple[str, ...] = ()) -> Any:
+    """A setup that gives the working directory ``directories`` and the files ``artifacts``, declared as artifacts."""
+
+    def setup(verifier: Verifier) -> None:
+        for directory in directories:
+            (verifier.workdir / directory).mkdir(parents=True)
+        for artifact in artifacts:
+            if artifact not in directories:
+                (verifier.workdir / artifact).write_text("x = 1\n")
+            verifier.config["artifacts"].append(artifact)
+
+    return setup
+
+
+@pytest.mark.parametrize(
+    ("inputs", "setup", "problem"),
+    [
+        (
+            {"solve.py": "print(1)"},
+            None,
+            "solve.py would change solve.py, which the submission holds or the replay writes",
+        ),
+        (
+            {"answer.json": "{}"},
+            None,
+            "answer.json would change answer.json, which the submission holds or the replay writes",
+        ),
+        (
+            {"data.txt/inner": "x"},
+            None,
+            "data.txt is a directory of the variant's and a file of the working directory's",
+        ),
+        (
+            {"tools": "a file"},
+            _workdir_has(directories=("tools",)),
+            "tools is a file of the variant's and a directory of the working directory's",
+        ),
+        (
+            {"src/extra.py": "x = 1\n"},
+            _workdir_has("src", directories=("src",)),
+            "src would change src, which the submission holds or the replay writes",
+        ),
+        (
+            {"pkg": "a file"},
+            _workdir_has("pkg/mod.py", directories=("pkg",)),
+            "pkg would change pkg/mod.py, which the submission holds or the replay writes",
+        ),
+    ],
+    ids=[
+        "an-artifact",
+        "an-output",
+        "a-directory-for-a-file",
+        "a-file-for-a-directory",
+        "a-directory-artifact",
+        "a-file-above-an-artifact",
+    ],
+)
+def test_variant_inputs_that_cannot_be_laid_over_the_working_inputs_are_the_owners_protocol_fault(
+    verifier, inputs, setup, problem
+):
+    _checked(verifier)
+    if setup is not None:
+        setup(verifier)
+    verifier.variant(inputs=inputs)
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_generated_protocol"}
+    assert report["detail"] == f"variant fifty's inputs cannot be laid over the working inputs: {problem}"
+    assert report["replay"]["exit_code"] == 0 and "grader" not in report
+
+
+@pytest.mark.parametrize(
+    ("special", "kind"),
+    [(lambda path: path.symlink_to("/etc/passwd"), "a symbolic link"), (os.mkfifo, "not a regular file")],
+    ids=["a-link", "a-fifo"],
+)
+def test_variant_inputs_that_hold_a_link_or_a_special_file_are_the_owners_protocol_fault(verifier, special, kind):
+    _checked(verifier)
+    root = verifier.variant()
+    special(root / "inputs" / "passwd")
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_generated_protocol"}
+    assert report["detail"].endswith(f": passwd is {kind}")
+
+
+HARDCODED_SOLVE = """
+import json
+with open("answer.json", "w") as stream:
+    json.dump({"answer": 42.2}, stream)
+"""
+
+
+def test_a_source_that_states_a_forbidden_literal_is_hardcoded_before_anything_replays(verifier):
+    """The report says where the source states it and which literal it matches, never what is forbidden."""
+
+    _checked(verifier, HARDCODED_SOLVE)
+    verifier.forbid([(41.0, 0.1), (42.0, 0.25)])
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 0}
+    assert (report["reason"], report["detail"]) == (
+        "solver_hardcoded",
+        "solve.py states 42.2 on line 4, within the tolerance of forbidden literal 1",
+    )
+    record = report["replay_checks"]["forbidden_literals"]
+    assert re.fullmatch(r"3\.[0-9]+\.[0-9]+", record.pop("python"))  # the verifier's python3, which parsed the sources
+    assert record == {
+        "scan": launcher.LITERAL_SCAN,
+        "sources": ["solve.py"],
+        "literals": 1,
+        "hits": [{"source": "solve.py", "line": 4, "literal": "42.2", "forbidden": 1}],
+    }
+    assert not {"41.0", "42.0"} & set(re.findall(r"[0-9.]+", json.dumps(report)))
+    assert "replay" not in report and "grader" not in report
+
+
+def test_a_source_that_states_no_forbidden_literal_replays_and_is_graded(verifier):
+    """A comment, a string that is no number and a number outside every window state nothing forbidden."""
+
+    _checked(verifier, SOLVE + '# the paper reports 42\nnote = "about 42"\nnear = 41.4\n')
+    verifier.forbid([(42, 0.5)])
+    verifier.variant()
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert report["replay_checks"]["forbidden_literals"]["hits"] == []
+
+
+def test_every_hit_counts_and_the_report_keeps_the_first(verifier):
+    solve = "".join(f"x{n} = 42\n" for n in range(launcher.REPORTED_HITS + 5)) + SOLVE
+    _checked(verifier, solve)
+    verifier.forbid([(42, 0.0)])
+
+    report = verifier.run()[2]
+
+    assert report["detail"].endswith(f"forbidden literal 0, and {launcher.REPORTED_HITS + 4} more")
+    hits = report["replay_checks"]["forbidden_literals"]["hits"]
+    assert [hit["line"] for hit in hits] == list(range(1, launcher.REPORTED_HITS + 1))
+
+
+@pytest.mark.parametrize(
+    ("source", "detail"),
+    [
+        ("def broken(:\n", "is no Python the scan reads: SyntaxError"),
+        ("x = 1\0\n", "is no Python the scan reads"),
+        (
+            "x = 1\n" + "#" * launcher.MAX_SOURCE_BYTES,
+            f"cannot be read: solve.py holds more than {launcher.MAX_SOURCE_BYTES}",
+        ),
+        (
+            "# coding: punycode\nx = 1\n",
+            "is no Python the scan reads: ValueError: its coding line names punycode, and the scan reads UTF-8 alone",
+        ),
+    ],
+    ids=["syntax", "nul", "too-large", "another-encoding"],
+)
+def test_a_source_the_scan_cannot_read_breaks_the_output_contract(verifier, source, detail):
+    _checked(verifier)
+    (verifier.workdir / "solve.py").write_text(source)
+    verifier.forbid([(42, 0.5)])
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 0}
+    assert report["reason"] == "solver_output_contract", report
+    assert (
+        report["detail"].startswith("solve.py, a source the task scans for forbidden literals,")
+        and detail in report["detail"]
+    )
+
+
+def test_a_source_the_submission_lacks_breaks_the_output_contract(verifier):
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py", "src"]
+    (verifier.workdir / "src").mkdir()
+    verifier.submit(42, **{"solve.py": SOLVE, "data.txt": "21"})
+    verifier.forbid([(42, 0.5)], sources=("solve.py", "src/main.py"))
+
+    _, reward, report = verifier.run()
+
+    assert (reward, report["reason"]) == ({"reward": 0}, "solver_output_contract")
+    assert report["detail"] == "src/main.py, a source the task scans for forbidden literals, is missing"
+
+
+@pytest.mark.parametrize(
+    ("source", "numbers"),
+    [
+        ("x = 4.5\n", [4.5]),
+        ("x = -4.5\n", [-4.5]),
+        ("x = +4.5\n", [4.5]),
+        ("x = --4.5\n", [4.5]),  # a chain of signs is one value: an even number of minus signs is positive
+        ("x = -(-4.5)\n", [4.5]),
+        ("x = +-4.5\n", [-4.5]),
+        ("x = -+-+-4.5\n", [-4.5]),
+        ("x = 1 - -4.5\n", [1, -4.5]),  # a binary minus is no sign
+        ("x = 2 - 4.5\n", [2, 4.5]),
+        ("x = -~4\n", [4]),  # nothing is evaluated: ~ ends the chain, and the constant stands alone
+        ("x = -'4.5'\n", [4.5]),  # a string takes no sign
+        ("x = ' 4.5 '\n", [4.5]),  # a string that float() reads, once stripped
+        ("x = '4.5 apples'\n", []),
+        ("x = '" + " " * 100 + "4.5'\n", [4.5]),  # whatever its length
+        ("x = '" + "0" * 100 + "4.5'\n", [4.5]),
+        ("x = '4.2E+1', 4.2e1, '4_2'\n", [42.0, 42.0, 42.0]),
+        ("x = 'nan', 'inf', 1e400, -1e400\n", []),  # no finite number
+        ("x = True, None, ...\n", []),
+        ("x = b' 4.5', b'\\xff4'\n", [4.5]),  # bytes that are ASCII read as a string does
+        ("x = 3j, -2.5j\n", [3.0, -2.5]),  # a complex constant's imaginary part
+        ("# 4.5\nx = 1\n", [1]),
+        ('"""4.5"""\n', [4.5]),
+        ("x = 10**400\n", [10, 400]),
+        ("x = 10**400 * -10**400\n", [10, 400, 10, 400]),  # the sign applies to a power, not to its base
+        ("x = f'{y}4.5'\n", [4.5]),
+        ("x = 1_000 + 0x10\n", [1000, 16]),
+    ],
+)
+def test_source_literals_reads_the_numbers_a_source_states_by_its_rule(source, numbers):
+    assert sorted(value for _, value in launcher.source_literals(source)) == sorted(numbers)
+
+
+def test_constant_numbers_reads_a_complex_numbers_real_part_where_it_is_not_0():
+    assert launcher.constant_numbers(complex(2, 3)) == [2.0, 3.0] and launcher.constant_numbers(-0j) == [-0.0]
+    assert launcher.constant_numbers(complex("inf+2j")) == [2.0] and launcher.constant_numbers(bytearray(b"1")) == []
+
+
+def test_source_literals_says_on_which_line_each_number_is():
+    assert sorted(launcher.source_literals(b"a = 1\n\nb = (\n    -2.5)\nc = -(\n-3)\n")) == [(1, 1), (4, -2.5), (5, 3)]
+
+
+@pytest.mark.parametrize(
+    ("data", "problem"),
+    [
+        (b"# coding: punycode\nx = 1\n", "its coding line names punycode, and the scan reads UTF-8 alone"),
+        (b"#!/bin/python3\n# -*- coding: latin-1 -*-\nx = '\\xe9'\n", "its coding line names latin-1"),
+        (b"\xef\xbb\xbf# coding: latin-1\nx = 1\n", "its coding line names latin-1"),
+        (b"# coding: no-such-codec\nx = 1\n", "its coding line names no-such-codec, a codec Python lacks"),
+        (b"x = '\xff'\n", "can't decode byte 0xff"),
+        (b"x = 1\ny = 2\nz = '\xff'\n", "can't decode byte 0xff"),
+    ],
+    ids=["a-codec-in-python", "latin-1", "a-mark-and-latin-1", "an-unknown-codec", "no-utf-8", "no-utf-8-later"],
+)
+def test_the_scan_reads_utf_8_alone_whatever_a_coding_line_names(data, problem):
+    with pytest.raises(ValueError, match=re.escape(problem)):
+        launcher.source_text(data)
+
+
+def test_the_scan_finds_a_coding_line_without_running_its_codec():
+    """A coding line that names a codec, here one that fails whenever it runs, as one written in Python could take
+    seconds to decode a line of 256 KiB, is refused without running it; and neither a third line nor one after code is
+    a coding line."""
+
+    def ran(*args: Any) -> Any:
+        raise AssertionError("the codec ran")
+
+    def search(name: str) -> Any:
+        return codecs.CodecInfo(ran, ran, name="platoon-test-codec") if name == "platoon_test_codec" else None
+
+    codecs.register(search)
+    try:
+        data = b"# coding: platoon-test-codec " + b"a" * launcher.MAX_SOURCE_BYTES + b"\nx = 1\n"
+        with pytest.raises(ValueError, match="its coding line names platoon-test-codec, and the scan reads UTF-8"):
+            launcher.source_text(data)
+    finally:
+        codecs.unregister(search)
+    for later in (b"x = 1\n# coding: latin-1\n", b"\n\n# coding: latin-1\nx = 4.5\n"):
+        assert launcher.source_text(later) == later.decode()
+
+
+def test_the_scan_reads_utf_8_with_or_without_a_byte_order_mark():
+    sources = (
+        b"x = 4.5\n",
+        b"\xef\xbb\xbfx = 4.5\n",
+        b"# coding: utf8\nx = 4.5\n",
+        b"\n# -*- coding: UTF-8 -*-\nx = 4.5\n",
+        b"# coding: utf-8-sig\nx = 4.5\n",
+        "x = '\u00e9', 4.5\n".encode(),
+    )
+    for data in sources:
+        assert [value for _, value in launcher.source_literals(launcher.source_text(data))] == [4.5]
+
+
+def test_the_windows_find_the_first_forbidden_literal_a_number_lies_within():
+    windows = launcher.Windows([(42, 0.5), (0.1, 0.2), (41.8, 0.5), (1e300, 1e299)])
+
+    assert windows.first(42.5) == 0  # a window's ends are in it
+    assert windows.first(42.0) == 0  # in two windows: the first listed
+    assert windows.first(41.4) == 2
+    assert windows.first(-0.1) == 1
+    assert windows.first(10**300) == 3
+    for outside in (42.6, 0.30000000000000004, 10**30, -1e308):  # by the exact test: |x - value| <= tolerance
+        assert windows.first(outside) is None
+    assert launcher.Windows([]).first(1.0) is None
+
+
+def test_an_output_key_names_one_output_and_a_json_pointer_into_it():
+    outputs = ["answer.json", "out/table.json", "a#b"]
+
+    assert launcher.output_key("answer.json", outputs) == ("answer.json", [])
+    assert launcher.output_key("out/table.json#/rows/0", outputs) == ("out/table.json", ["rows", "0"])
+    assert launcher.output_key("out/table.json#", outputs) == ("out/table.json", [])
+    assert launcher.output_key("a#b", outputs) == ("a#b", [])  # an output whose name holds a #
+    assert launcher.output_key("a#b#/x~1y~0z", outputs) == ("a#b", ["x/y~z"])
+    for key in ("other.json", "answer.json#rows", "answer.json#/a~2", "", 7, "x" * (launcher.MAX_KEY_CHARS + 1)):
+        assert launcher.output_key(key, outputs) is None
+
+
+@pytest.mark.parametrize(
+    ("document", "key", "expected", "tolerance", "held"),
+    [
+        ({"a": 1.05}, "answer.json#/a", 1, 0.1, True),
+        ({"a": 1.2}, "answer.json#/a", 1, 0.1, False),
+        ({"a": [1, 2.04]}, "answer.json#/a", [1, 2], 0.05, True),
+        ({"a": [1, 2]}, "answer.json#/a", [1, 2, 3], 0.05, False),  # not as many
+        ({"a": [1, "2"]}, "answer.json#/a", [1, 2], 0.05, False),
+        ({"a": True}, "answer.json#/a", 1, 0.5, False),  # a boolean is no number
+        ([[0, 1], [2, 3.5]], "answer.json#/1/1", 3.5, 0, True),
+        ([[0, 1]], "answer.json#/00/0", 0, 0, False),  # an index has no leading zero
+        ({"a/b": {"~c": 7}}, "answer.json#/a~1b/~0c", 7, 0, True),
+        (5, "answer.json", 5, 0, True),  # the whole of the output
+        ({"a": 1}, "answer.json#/b", 1, 0, False),
+        ({"a": 1e308}, "answer.json#/a", -1e308, 1, False),  # too far for a float to tell how far
+    ],
+)
+def test_a_variant_matches_what_it_expects_at_each_key(tmp_path, document, key, expected, tolerance, held):
+    (tmp_path / "answer.json").write_text(json.dumps(document))
+    keys = launcher.expected_keys({key: expected}, ["answer.json"], {"default": tolerance, "keys": {}})
+
+    assert (launcher.missed_keys(str(tmp_path), keys, 1 << 20) == []) is held
+
+
+def test_a_variants_tolerance_gives_the_keys_it_names_their_own(tmp_path):
+    (tmp_path / "answer.json").write_text(json.dumps({"a": 1.5, "b": 1.5}))
+    tolerance = {"default": 0.1, "keys": {"answer.json#/b": 0.5}}
+    keys = launcher.expected_keys({"answer.json#/a": 1, "answer.json#/b": 1}, ["answer.json"], tolerance)
+
+    assert launcher.missed_keys(str(tmp_path), keys, 1 << 20) == ["answer.json#/a"]
+
+
+def test_what_a_variants_replay_wrote_is_read_as_the_launcher_reads_every_file(tmp_path):
+    """Never through a link, never waiting on a FIFO: either is no output, and its keys are missed."""
+
+    os.mkfifo(tmp_path / "answer.json")
+    (tmp_path / "real.json").write_text('{"a": 1}')
+    (tmp_path / "link.json").symlink_to(tmp_path / "real.json")
+    tolerance = {"default": 0, "keys": {}}
+
+    for output in ("answer.json", "link.json"):
+        keys = launcher.expected_keys({f"{output}#/a": 1}, [output], tolerance)
+        assert launcher.missed_keys(str(tmp_path), keys, 1 << 20) == [f"{output}#/a"]
+
+
+def _deep(depth: int) -> Any:
+    """A list ``depth`` levels deep."""
+
+    value: Any = 0
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+_VARIANT = {
+    "name": "fifty",
+    "inputs": "tests/gen/i",
+    "expected": "tests/gen/e.json",
+    "tolerance": {"default": 0, "keys": {}},
+    "meta": None,
+}
+_FORBIDDEN = {"path": "tests/gen/f.json", "sources": ["solve.py"], "scan": launcher.LITERAL_SCAN}
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [
+        {"variants": []},
+        {"variants": [{"name": "fifty"}], "forbidden_literals": None},
+        {"variants": [{**_VARIANT, "name": "fifty two"}], "forbidden_literals": None},
+        {"variants": [{**_VARIANT, "inputs": "tests/platoon"}], "forbidden_literals": None},
+        {"variants": [{**_VARIANT, "expected": "tests/gen"}], "forbidden_literals": None},
+        {"variants": [_VARIANT, _VARIANT], "forbidden_literals": None},
+        {"variants": [{**_VARIANT, "tolerance": {"default": -1, "keys": {}}}], "forbidden_literals": None},
+        {"variants": [{**_VARIANT, "tolerance": {"default": 0, "keys": {"k": True}}}], "forbidden_literals": None},
+        {"variants": [], "forbidden_literals": {**_FORBIDDEN, "scan": "regex/v1"}},
+        {"variants": [], "forbidden_literals": {**_FORBIDDEN, "path": "/tests/gen/f.json"}},
+        {"variants": [], "forbidden_literals": {**_FORBIDDEN, "sources": ["../solve.py"]}},
+        {"variants": [], "forbidden_literals": {**_FORBIDDEN, "sources": []}},
+        {"variants": [], "forbidden_literals": {**_FORBIDDEN, "sources": ["solve.R"]}},
+        {"variants": [{**_VARIANT, "meta": _deep(launcher.MAX_META_DEPTH + 1)}], "forbidden_literals": None},
+    ],
+    ids=[
+        "no-forbidden-literals",
+        "a-variant-without-its-fields",
+        "a-name-with-a-space",
+        "inputs-outside-gen",
+        "expected-gen-itself",
+        "two-variants-one-name",
+        "negative-tolerance",
+        "boolean-tolerance",
+        "another-scan",
+        "absolute-path",
+        "source-outside",
+        "no-sources",
+        "no-python-source",
+        "meta-too-deep",
+    ],
+)
+def test_replay_checks_the_launcher_cannot_run_are_settings_it_cannot_use(verifier, checks):
+    _checked(verifier)
+    verifier.config["replay_checks"] = checks
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}
+    assert "hold no usable replay_checks" in report["detail"]
+
+
+def test_replay_checks_without_a_replay_are_settings_the_launcher_cannot_use(verifier):
+    verifier.submit(42)
+    verifier.forbid([(42, 0.5)])
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}
+    assert "hold no usable replay_checks" in report["detail"]
+
+
+def test_a_report_too_large_for_its_bound_leaves_out_the_replay_checks_records_before_the_outcome():
+    record = {"scan": launcher.LITERAL_SCAN, "hits": [{"source": "s" * 300}] * 10}
+    report = {
+        "schema": launcher.SCHEMA,
+        "replay_checks": {
+            "variants": [{"name": f"v{n}", "passed": True} for n in range(200)],
+            "forbidden_literals": record,
+        },
+        "reward": 0,
+        "failure_kind": None,
+        "reason": "solver_variant_failed",
+        "detail": "d",
+        "seconds": 1.0,
+    }
+    cut = {**report, "replay_checks": {"forbidden_literals": record}, "truncated": ["replay_checks.variants"]}
+    limit = len(json.dumps(cut, sort_keys=True))
+
+    assert json.loads(launcher.bounded_report(report, limit=limit)) == cut
+    least = json.loads(launcher.bounded_report(report, limit=limit - 1))
+    assert least["replay_checks"] == {} and least["truncated"] == [
+        "replay_checks.variants",
+        "replay_checks.forbidden_literals",
+    ]
+
+
+# ------------------------------------------------------------------ the variants' replays keep the invariants (I1-I4)
+
+# A variant's replay is the replay's own code path (launcher._run_replay): the same sweep, demotion, environment and
+# clearing, so each invariant above holds for every replay of a grade, the replay's and each variant's.
+
+
+def test_a_process_of_the_replays_user_that_a_variants_sweep_cannot_signal_is_a_survivor(verifier):
+    """I1 for a variant's replay: a process of the replay's user that its sweep may not signal is a survivor, the
+    solver's 0, never excluded as foreign.  The Ops seam names one such process once the variant's replay ran, and
+    signalling it is refused; the replay's own sweep, before it, found none."""
+
+    marker = verifier.root / "variant-ran"
+    _checked(verifier, SOLVE + _in_variants(f"open({str(marker)!r}, 'w').close()"))
+    verifier.variant()
+    extra = f"""
+        impossible = 2**31 - 1
+        signal_one, kill = launcher._signal, launcher.kill_left
+
+        def refused(pid):
+            if pid == impossible:
+                raise PermissionError(pid)
+            return signal_one(pid)
+
+        class Unreachable(WithoutRoot):
+            def processes_of(self, uid):
+                return [impossible] if os.path.exists({str(marker)!r}) else []
+
+        launcher._signal = refused
+        launcher.kill_left = lambda also=None, window_s=None: kill(also, 0.2)
+    """
+
+    _, reward, report = verifier.run(extra=extra, ops="Unreachable()")
+
+    assert (reward, report["reason"], report["detail"]) == (
+        {"reward": 0},
+        "solver_variant_failed",
+        "processes the replay of variant fifty left could not be killed (1)",
+    )
+    (entry,) = report["replay_checks"]["variants"]
+    assert (entry["passed"], entry["survivors"]) == (False, 1) and "survivors" not in report["replay"]
+    assert "grader" not in report
+
+
+# The launcher's own demotion (Ops.demote: the OOM killer's disfavor, the replay's limits and address space, no new
+# privileges), but for the switch to the replay's user, which needs root: each call is noted in ``record``.
+_OWN_DEMOTION = """
+import json
+REPLAY = (launcher.REPLAY_UID,) * 3
+os.setgroups = lambda groups: None
+os.setgid = os.setuid = lambda number: None
+os.getresuid = os.getresgid = lambda: REPLAY
+os.getgroups = lambda: []
+
+class OwnDemotion(WithoutRoot):
+    def demote(self, max_file_bytes, max_address_space_bytes=None):
+        with open({record!r}, "a") as stream:
+            stream.write(json.dumps([max_file_bytes, max_address_space_bytes]) + "\\n")
+        return launcher.Ops.demote(self, max_file_bytes, max_address_space_bytes)
+"""
+
+
+@pytest.mark.skipif(not _oom_adj_writable(), reason="/proc/self/oom_score_adj is not writable here")
+def test_every_replay_of_a_grade_is_demoted_as_the_replay_is(verifier):
+    """I2 for every variant's replay: each replay of the grade, the replay's and both variants', is demoted by the
+    launcher's own ``Ops.demote`` with the settings' limits and address space, so each runs as the most killable to the
+    OOM killer, within that address space and without new privileges, as the variant's replay finds."""
+
+    record = verifier.root / "demoted.jsonl"
+    space = 1 << 36
+    hard = resource.getrlimit(resource.RLIMIT_AS)[1]
+    want = space if hard == resource.RLIM_INFINITY else min(space, hard)
+    code = (
+        "status = open('/proc/self/status').read()\n    "
+        "json.dump({'answer': 100, 'oom': int(open('/proc/self/oom_score_adj').read()), "
+        "'space': __import__('resource').getrlimit(__import__('resource').RLIMIT_AS)[1], "
+        "'unprivileged': int('NoNewPrivs:\\t1' in status)}, open('answer.json', 'w'))"
+    )
+    _checked(verifier, SOLVE + _in_variants(code))
+    expected = {"answer": 100, "oom": launcher.OOM_SCORE_ADJ, "space": want, "unprivileged": 1}
+    verifier.variant(expected={f"answer.json#/{key}": value for key, value in expected.items()})
+    verifier.variant("seven", inputs={"data.txt": "7"}, expected={"answer.json#/answer": 14})
+    verifier.config["max_address_space_bytes"] = space
+
+    _, reward, report = verifier.run(extra=_OWN_DEMOTION.format(record=str(record)), ops="OwnDemotion()")
+
+    assert reward == {"reward": 1}, report
+    assert [json.loads(line) for line in record.read_text().splitlines()] == [[1 << 20, space]] * 3
+    assert [entry["passed"] for entry in report["replay_checks"]["variants"]] == [True, True]
+
+
+def test_every_variants_replay_finds_the_working_directory_hardened_and_an_absolute_path(verifier):
+    """I3 and I4 for every variant's replay: the working directory, hardened before the replay, stays so while each
+    variant replays (no file or directory there that its group or other users may write, a submitted file any user
+    could write among them), and a variant's replay gets the replay's PATH, its absolute entries alone."""
+
+    workdir = str(verifier.workdir)
+    code = (
+        f"exposed = [n for d, ds, fs in os.walk({workdir!r}) for n in ds + fs "
+        "if not os.path.islink(os.path.join(d, n)) and os.lstat(os.path.join(d, n)).st_mode & 0o022]\n    "
+        "json.dump({'answer': 100, 'exposed': len(exposed), "
+        "'path': int(os.environ['PATH'] == '/usr/bin:/bin')}, open('answer.json', 'w'))"
+    )
+    _checked(verifier, SOLVE + _in_variants(code))
+    loose = verifier.workdir / "sub" / "loose.txt"
+    loose.parent.mkdir()
+    loose.write_text("x")
+    loose.chmod(0o666)
+    verifier.variant(expected={"answer.json#/answer": 100, "answer.json#/exposed": 0, "answer.json#/path": 1})
+
+    _, reward, report = verifier.run(env={"PATH": "/usr/bin:.:rel::/bin"})
+
+    assert reward == {"reward": 1}, report
+    assert report["replay_checks"]["variants"][0]["passed"]
+    assert not stat.S_IMODE(loose.stat().st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
