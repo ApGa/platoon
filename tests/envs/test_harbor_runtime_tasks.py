@@ -165,6 +165,7 @@ def test_a_config_reads_its_template_from_a_toml_file(tmp_path: Path):
 
     assert config.template == TEMPLATE
     assert (config.verifier_user, config.verifier_provider_options, config.max_bytes) == ("honor", {}, 256 * 2**20)
+    assert config.regrade == 1
 
 
 def _without(table: str, key: str) -> dict[str, Any]:
@@ -198,7 +199,10 @@ def _with(table: str, key: str, value: Any) -> dict[str, Any]:
         ({"verifier_user": "obey"}, "runtime_tasks.verifier_user must be one of"),
         ({"max_bytes": 0}, "runtime_tasks.max_bytes must be a positive"),
         ({"verifier_provider_options": ["fakeroot"]}, "verifier_provider_options must be a mapping"),
-        ({"regrade": 2}, "runtime_tasks takes images, template, .* not regrade"),
+        ({"regrade": -1}, "runtime_tasks.regrade must be how many times a generated grader's score is graded again"),
+        ({"regrade": True}, "runtime_tasks.regrade must be how many times"),
+        ({"regrade": 1.5}, "runtime_tasks.regrade must be how many times"),
+        ({"regrades": 2}, "runtime_tasks takes images, template, .*, regrade, .* not regrades"),
     ],
 )
 def test_a_config_refuses_what_runtime_tasks_cannot_run_as(options: dict[str, Any], message: str):
@@ -847,3 +851,392 @@ async def test_check_tasks_refuses_an_environment_whose_sandboxes_cannot_run_its
 
     assert refused.value.failure_kind == "env_config"
     await make_service(tmp_path, rootful, store).check_tasks("train", [])
+
+
+# -------------------------------------------------------------------------------------------------------- regrades
+
+_PASSED = {"schema": "platoon.launcher/v1", "reward": 1, "failure_kind": None, "reason": None, "detail": "passed"}
+_FAILED = {**_PASSED, "reward": 0, "detail": "failed"}
+
+
+def _in_turn(tmp_path: Path, *grades: str) -> str:
+    """A test.sh that runs the n-th of ``grades`` (bodies as :func:`_launched` writes them) on its n-th run, and the
+    last from then on.  Each run notes the root of its sandbox in ``tmp_path/verifiers``, and in
+    ``tmp_path/overlapped`` the root of an earlier run's sandbox that is still there (not stopped)."""
+
+    count, ran, overlapped = tmp_path / "grades", tmp_path / "verifiers", tmp_path / "overlapped"
+    arms = "".join(f"{number})\n{body};;\n" for number, body in enumerate(grades[:-1], start=1))
+    return (
+        f'n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo "$n" > "{count}"\n'
+        f'if [ -f "{ran}" ]; then\n'
+        f'  while read -r earlier; do [ -e "$earlier" ] && echo "$earlier" >> "{overlapped}"; done < "{ran}"\n'
+        "fi\n"
+        f'echo "{ROOT}" >> "{ran}"\n'
+        f"case $n in\n{arms}*)\n{grades[-1]};;\nesac\n"
+    )
+
+
+def _verifiers(tmp_path: Path) -> list[str]:
+    """The roots of the sandboxes a task's tests ran in, in order: each a sandbox of its own, which stopped before the
+    next one's tests ran."""
+
+    ran = (tmp_path / "verifiers").read_text().split() if (tmp_path / "verifiers").exists() else []
+    assert len(set(ran)) == len(ran), ran
+    assert not (tmp_path / "overlapped").exists(), "a regrade ran while an earlier verifier was still there"
+    return ran
+
+
+def _verifier_starts(service: HarborEnvironmentService) -> int:
+    return sum(spec.labels.get("platoon.role") == "verifier" for spec in service.provider.started)
+
+
+def test_a_config_takes_any_number_of_regrades_from_0():
+    for regrade in (0, 1, 3):
+        config = RuntimeTasksConfig.coerce({"images": IMAGES, "template": TEMPLATE, "regrade": regrade})
+        assert config.regrade == regrade
+
+
+@pytest.mark.asyncio
+async def test_a_configs_fingerprint_leaves_out_how_often_it_regrades(tmp_path, rootful, store):
+    """How often a generated grader's score is graded again is no part of what a task was checked against: an entry
+    that regrades more, or not at all, runs the tasks another materialized into a shared store, as a resumed run that
+    changed it does."""
+
+    made = await make_service(tmp_path, rootful, store).materialize(write_task(tmp_path / "sources"))
+
+    for regrade in (0, 3):
+        other = make_service(tmp_path, rootful, store, runtime_tasks={"regrade": regrade})
+        assert other.harbor_task(made.task).name == "generated"
+        assert other.runtime_regrades(other.harbor_task(made.task)) == regrade
+    fingerprints = {
+        runtime.config_fingerprint(
+            RuntimeTasksConfig.coerce({"images": IMAGES, "template": TEMPLATE, "regrade": regrade}),
+            reward_key="reward",
+            timeout_multiplier=1.0,
+        )
+        for regrade in (0, 1, 3)
+    }
+    assert len(fingerprints) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_generated_graders_score_is_graded_again_in_a_fresh_verifier_and_stands_when_it_repeats(
+    tmp_path, rootful, store, monkeypatch
+):
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, _launched(_PASSED)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.failure_kind, outcome.reason) == ("scored", 1.0, None, None)
+    assert len(_verifiers(tmp_path)) == _verifier_starts(service) == 2
+    assert outcome.metadata["launcher"] == _PASSED and outcome.metadata["artifacts"] == ["/app/a.json", "/app/solve.py"]
+    (regrade,) = outcome.metadata["regrades"]
+    assert {key: regrade[key] for key in ("status", "reward", "failure_kind", "reason")} == {
+        "status": "scored",
+        "reward": 1.0,
+        "failure_kind": None,
+        "reason": None,
+    }
+    assert regrade["metadata"]["launcher"] == _PASSED and regrade["metadata"]["verifier_exit_code"] == 0
+    assert "artifacts" not in regrade["metadata"]  # the first grade's: every grade gets the same ones
+    json.dumps(outcome.metadata)  # recorded as it is
+
+
+@pytest.mark.asyncio
+async def test_a_regrade_gets_the_artifacts_as_they_were_collected(tmp_path, rootful, store, monkeypatch):
+    """Nothing a grader does in its verifier, root there, reaches the next: the regrade's verifier gets the artifacts
+    as they were collected from the agents' sandbox, though the first grade's grader rewrote them."""
+
+    seen = tmp_path / "seen"
+    tamper = f'cat {ROOT}/app/a.json >> "{seen}"; echo tampered > {ROOT}/app/a.json\n'
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, tamper + _launched(_PASSED)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, len(outcome.metadata["regrades"])) == ("scored", 1.0, 1)
+    assert seen.read_text().split() == ["{}", "{}"]  # what the agents left, both times
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first", "then"), [(_PASSED, _FAILED), (_FAILED, _PASSED)], ids=["1-then-0", "0-then-1"])
+async def test_a_regrade_that_scores_otherwise_makes_the_grade_flaky(
+    tmp_path, rootful, store, monkeypatch, first, then
+):
+    """A grader that gives the same artifacts another score in another fresh verifier measures nothing: neither score
+    stands, and the grade is the generated grader's non-score (``verifier_flaky``)."""
+
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, _launched(first), _launched(then)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.failure_kind) == ("invalid", None, "verifier_flaky")
+    assert outcome.rewards == {}
+    assert f"scored the same artifacts {first['reward']}, then {then['reward']} in a fresh verifier" in outcome.reason
+    assert len(_verifiers(tmp_path)) == 2
+    assert outcome.metadata["launcher"] == first  # the first grade's report; the regrade's is its own
+    (regrade,) = outcome.metadata["regrades"]
+    assert (regrade["status"], regrade["reward"], regrade["metadata"]["launcher"]) == ("scored", then["reward"], then)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("first", "then"), [(_PASSED, _FAILED), (_FAILED, _PASSED)], ids=["1-then-0", "0-then-1"])
+@pytest.mark.parametrize(
+    ("replayed", "expected"),
+    [
+        (("a" * 64, "a" * 64), ("invalid", None, "verifier_flaky")),
+        (("a" * 64, "b" * 64), ("scored", 0.0, None)),
+    ],
+    ids=["the-same-outputs", "other-outputs"],
+)
+async def test_a_disagreement_over_outputs_the_replays_wrote_otherwise_is_the_solvers_0(
+    tmp_path, rootful, store, monkeypatch, first, then, replayed, expected
+):
+    """Each grade replays the submission, and its launcher's report holds the SHA-256 of the outputs the replay wrote.
+    A grader that scores the same outputs otherwise is flaky.  Scores of outputs the replays wrote otherwise judged a
+    submission that computes something else each time it runs, which does not reproduce: the solver's 0, whichever
+    score came first, and never the grader's fault."""
+
+    reports = [{**report, "replayed_sha256": digest} for report, digest in zip((first, then), replayed, strict=True)]
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, *map(_launched, reports)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.failure_kind) == expected
+    if outcome.trainable:
+        assert outcome.rewards == {"reward": 0.0} and outcome.reason == "solver_nonreproducible"
+    else:
+        assert outcome.reason.startswith(
+            f"the task's generated grader scored the same artifacts and replayed outputs {first['reward']}, then "
+            f"{then['reward']} in a fresh verifier (regrade 1)"
+        )
+    assert outcome.metadata["launcher"] == reports[0] and "first_grade" not in outcome.metadata
+    (regrade,) = outcome.metadata["regrades"]
+    assert (regrade["reward"], regrade["metadata"]["launcher"]) == (then["reward"], reports[1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("grades", "expected", "runs"),
+    [
+        ((_PASSED,), ("scored", 1.0, None), 4),
+        ((_PASSED, _PASSED, _FAILED, _PASSED), ("invalid", None, "verifier_flaky"), 3),
+    ],
+    ids=["all-agree", "the-second-regrade-disagrees"],
+)
+async def test_regrades_run_one_after_the_other_until_one_does_not_agree(
+    tmp_path, rootful, store, monkeypatch, grades, expected, runs
+):
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, *map(_launched, grades)))
+    service = make_service(tmp_path, rootful, store, runtime_tasks={"regrade": 3})
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.failure_kind) == expected
+    assert len(_verifiers(tmp_path)) == _verifier_starts(service) == runs
+    assert len(outcome.metadata["regrades"]) == runs - 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("regrade", "expected"),
+    [
+        (_launched(_SCORED_ZERO, '{"reward": 0}'), ("scored", 0.0, None, "solver_nonreproducible")),
+        (
+            _launched({**_SCORED_ZERO, "reward": None, "failure_kind": "verifier_generated_timeout", "detail": "slow"}),
+            ("invalid", None, "verifier_generated_timeout", "slow"),
+        ),
+        (
+            _launched({}, tail="exit 3\n"),
+            ("invalid", None, "verifier_generated_unfinished", "the runtime task's launcher"),
+        ),
+        (
+            _launched(
+                {**_SCORED_ZERO, "reward": None, "failure_kind": "verifier_trusted_launcher", "detail": "no root"}
+            ),
+            ("invalid", None, "verifier_trusted_launcher", "no root"),
+        ),
+    ],
+    ids=["solvers-zero", "graders-timeout", "unfinished", "trusted-fault"],
+)
+async def test_a_regrade_that_gives_no_score_of_the_graders_makes_the_grade_its_own(
+    tmp_path, rootful, store, monkeypatch, regrade, expected
+):
+    """A score stands only once every regrade gave it again.  A regrade that gives none is attributed as any grade:
+    a replay that does not reproduce this time is the solver's 0, a grader's non-score its own kind (which a program
+    tells from the sandbox's faults as it does a first grade's), and a fault on the trusted side the trusted side's."""
+
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, _launched(_PASSED), regrade))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    outcome = await _graded(service, made.task)
+
+    status, reward, failure_kind, reason = expected
+    assert (outcome.status, outcome.reward, outcome.failure_kind) == (status, reward, failure_kind), outcome.reason
+    assert outcome.reason.startswith(reason), outcome.reason
+    (entry,) = outcome.metadata["regrades"]
+    assert (entry["status"], entry["failure_kind"], entry["reason"]) == (status, failure_kind, outcome.reason)
+    # The outcome is the regrade's, and so is its metadata (its launcher report, its verifier's exit status, the tail of
+    # its output); the first grade's is beside it, and the artifacts, which every grade gets alike, are listed once.
+    assert {key: outcome.metadata[key] for key in entry["metadata"]} == entry["metadata"]
+    assert outcome.metadata["launcher"] != _PASSED and "verifier_exit_code" in entry["metadata"]
+    first = outcome.metadata["first_grade"]
+    assert (first["status"], first["reward"], first["metadata"]["launcher"]) == ("scored", 1.0, _PASSED)
+    assert outcome.metadata["artifacts"] == ["/app/a.json", "/app/solve.py"] and "artifacts" not in first["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_a_regrade_whose_verifier_cannot_start_makes_the_grade_an_infrastructure_fault(
+    tmp_path, rootful, store, monkeypatch
+):
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, _launched(_PASSED)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+    opened = service.open_verifier
+    calls = []
+
+    async def second_fails(harbor_task: HarborTask, *, rollout_id: str) -> Any:
+        calls.append(rollout_id)
+        if len(calls) == 2:
+            raise EnvSetupError("env_setup", "the node ran out of sandboxes")
+        return await opened(harbor_task, rollout_id=rollout_id)
+
+    monkeypatch.setattr(service, "open_verifier", second_fails)
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.failure_kind) == ("error", "verifier_start")
+    assert "ran out of sandboxes" in outcome.reason and len(calls) == 2 and len(_verifiers(tmp_path)) == 1
+    assert outcome.metadata["regrades"][0]["metadata"] == {"setup_failure_kind": "env_setup"}
+    assert outcome.metadata["setup_failure_kind"] == "env_setup" and "launcher" not in outcome.metadata
+    assert outcome.metadata["first_grade"]["metadata"]["launcher"] == _PASSED
+
+
+@pytest.mark.asyncio
+async def test_a_regrade_that_outlives_the_verifiers_time_gives_the_grade_its_time_limit(
+    tmp_path, rootful, store, monkeypatch
+):
+    """The regrade's grader stopped the launcher until the verifier's time ran out: the grade is that regrade's, with
+    the time limit it outlived."""
+
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, _launched(_PASSED), "sleep 30"))
+    template = json.loads(json.dumps(TEMPLATE))
+    template["verifier"]["timeout_sec"] = 2
+    service = make_service(tmp_path, rootful, store, runtime_tasks={"template": template})
+    made = await service.materialize(write_task(tmp_path / "sources", edit=edit("verifier", "timeout_sec", 2)))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.failure_kind) == ("invalid", "verifier_generated_unfinished")
+    assert "the verifier outlived its 2 s" in outcome.reason and outcome.metadata["timeout_s"] == 2
+    assert "timeout_s" not in outcome.metadata["first_grade"]["metadata"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("owner", "options", "first", "expected"),
+    [
+        ("trusted", {}, _launched(_PASSED), ("scored", 1.0, None)),
+        ("generated", {"regrade": 0}, _launched(_PASSED), ("scored", 1.0, None)),
+        ("generated", {}, _launched(_SCORED_ZERO, '{"reward": 0}'), ("scored", 0.0, None)),
+        (
+            "generated",
+            {},
+            _launched({**_SCORED_ZERO, "reward": None, "failure_kind": "verifier_generated_exit"}),
+            ("invalid", None, "verifier_generated_exit"),
+        ),
+        (
+            "generated",
+            {},
+            _launched({**_SCORED_ZERO, "reward": None, "failure_kind": "verifier_trusted_launcher"}),
+            ("invalid", None, "verifier_trusted_launcher"),
+        ),
+    ],
+    ids=["trusted-grader", "regrade-0", "solvers-zero", "graders-non-score", "trusted-fault"],
+)
+async def test_only_a_generated_graders_scores_are_regraded(
+    tmp_path, rootful, store, monkeypatch, owner, options, first, expected
+):
+    """A trusted grader answers for its own grades, and there is nothing to regrade in a grade that is no score of the
+    grader's: the solver's 0, which the launcher gives before the grader runs, a non-score, a fault on the trusted
+    side."""
+
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, first, _launched(_FAILED)))
+    service = make_service(tmp_path, rootful, store, runtime_tasks=options)
+    made = await service.materialize(write_task(tmp_path / "sources"), grader_owner=owner)
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.failure_kind) == expected
+    assert len(_verifiers(tmp_path)) == _verifier_starts(service) == 1 and "regrades" not in outcome.metadata
+
+
+@pytest.mark.asyncio
+async def test_curated_tasks_are_never_regraded(tmp_path, rootful, store):
+    """Regrading a curated task would change its grading: a dataset's own tests, of the same outcome as before."""
+
+    curated = tmp_path / "curated" / "plain"
+    (curated / "tests").mkdir(parents=True)
+    (curated / "task.toml").write_text('artifacts = ["/app/a.txt"]\n[verifier]\nenvironment_mode = "separate"\n')
+    (curated / "instruction.md").write_text("Do it.\n")
+    (curated / "tests" / "test.sh").write_text(f"echo 1 > {ROOT}/logs/verifier/reward.txt\n")
+    service = make_service(tmp_path, rootful, store, default_image="local", runtime_tasks={"regrade": 3})
+    task = await service.get_task("plain")
+
+    session = await service.open(task, rollout_id="r")
+    try:
+        await session.call_tool("bash", {"command": "echo made > a.txt"})
+        outcome = await session.grade()
+    finally:
+        await session.close()
+
+    assert outcome.rewards == {"reward": 1.0} and "regrades" not in outcome.metadata
+    assert _verifier_starts(service) == 1 and service.runtime_regrades(service.harbor_task(task)) == 0
+
+
+@pytest.mark.asyncio
+async def test_grading_a_session_again_regrades_the_artifacts_it_kept(tmp_path, rootful, store, monkeypatch):
+    """Once the separate verifier released ``main``, a grade again grades the kept artifacts, regrades included."""
+
+    grades = (_PASSED, _PASSED, _PASSED, _FAILED)
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, *map(_launched, grades)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources"))
+
+    session = await service.open(made.task, rollout_id="r")
+    try:
+        await session.call_tool("bash", {"command": "echo 'x' > solve.py; echo '{}' > a.json"})
+        first, second = await session.grade(), await session.grade()
+    finally:
+        await session.close()
+
+    assert (first.status, first.reward) == ("scored", 1.0)
+    assert (second.status, second.failure_kind) == ("invalid", "verifier_flaky")
+    assert len(_verifiers(tmp_path)) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_rollouts_deadline_counts_each_regrade_of_a_generated_grader(tmp_path, rootful, store):
+    """Each regrade starts another verifier and runs its tests for up to their time limit (120 s here), with the
+    grading commands around them: a deadline on the whole rollout leaves room for them, and only for them."""
+
+    source = write_task(tmp_path / "sources")
+    once = make_service(tmp_path, rootful, store, runtime_tasks={"regrade": 0})
+    trusted = (await once.materialize(source, grader_owner="trusted")).digest
+    generated = (await once.materialize(source)).digest
+    regrade = 120 + once.sandbox_start_budget_s + 120  # the tests' time limit, a start budget, the grading commands
+
+    assert once.rollout_overhead_s(generated) == once.rollout_overhead_s(trusted)
+    for count in (1, 3):
+        service = make_service(tmp_path, rootful, store, runtime_tasks={"regrade": count})
+        assert service.rollout_overhead_s(trusted) == once.rollout_overhead_s(trusted)
+        assert service.rollout_overhead_s(generated) == once.rollout_overhead_s(generated) + count * regrade

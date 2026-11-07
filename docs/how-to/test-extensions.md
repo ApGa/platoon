@@ -421,13 +421,16 @@ published, and cannot write a reward, and a module of the submission's never sha
 that declares its measurement invalid, crashes after a verdict of 0, or kills the launcher is a non-score of the
 generated grader's; and one that writes a reward file of its own, leaves a process that keeps writing one, or writes
 what a verifier classifier would match into the verifier's log gets the launcher's score, as a trusted grader that
-crashes gets its own kind. Run it there before a run that generates tasks, and on CPU with `grade=False` in your
-package's tests. It is the generic half of a red-team suite: a task producer's own toolkit holds the domain's half, in
-the checks it runs on a task before the task is taken in (leaks, planted secrets, a module the task's own grader
-directory shadows), and a program that runs runtime tasks catches graders that score by anything but the answer with
-its controls. The tasks it takes in stay in the environment's store (outside a run, the Harbor cache's unless
-`runtime_tasks` names a `store`). Call it outside a running event loop. `check_runtime_tasks` checks the experimental
-runtime-task API (`platoon.experimental`), and changes with it.
+crashes gets its own kind. A grader that flips a coin must come out `verifier_flaky`, as the environment's regrades
+find it (`runtime_tasks.regrade`, which must not be 0 for this case): its submission is graded again, up to 20 times,
+while each grade is the grader's score that every regrade gave again, as a coin flip's is half the time with one
+regrade. Run it there before a run that generates tasks, and on CPU with `grade=False` in your package's tests. It is
+the generic half of a red-team suite: a task producer's own toolkit holds the domain's half, in the checks it runs on a
+task before the task is taken in (leaks, planted secrets, a module the task's own grader directory shadows), and a
+program that runs runtime tasks catches graders that score by anything but the answer with its controls. The tasks it
+takes in stay in the environment's store (outside a run, the Harbor cache's unless `runtime_tasks` names a `store`).
+Call it outside a running event loop. `check_runtime_tasks` checks the experimental runtime-task API
+(`platoon.experimental`), and changes with it.
 
 ## Reference
 

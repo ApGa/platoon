@@ -11,7 +11,9 @@ their sandbox (``main``), collects the task's artifacts from it as directories a
 there, and stops it on every path.  The agents never touch the grader's files, and no symlink of theirs reaches
 it.  When nothing else holds ``main`` (no shared fork, no call in flight), grading releases it as soon as the
 artifacts are collected, as Harbor stops it before verifying: the session then takes no more tool calls or forks,
-and grading it again reuses the collected artifacts.
+and grading it again reuses the collected artifacts.  A runtime task whose grader is generated has its grader's score
+graded again, ``runtime_tasks.regrade`` times, each time in a fresh verifier's sandbox given the same artifacts after
+the one before stopped (:func:`platoon.envs.harbor.runtime.regraded`).
 
 **Users.**  In a sandbox that honors the users a task names (``agent_user: honor``, ``verifier_user: honor``), checked
 when it starts to give root and other users (:mod:`platoon.envs.harbor.users`), the session's ``sandbox`` is the
@@ -93,7 +95,7 @@ from platoon.envs.harbor.artifacts import ArtifactError, CollectedArtifact, coll
 from platoon.envs.harbor.launcher import REPORT as LAUNCHER_REPORT
 from platoon.envs.harbor.mcp_client import McpClient, McpError
 from platoon.envs.harbor.node_services import NodeScope
-from platoon.envs.harbor.runtime import launcher_outcome, unfinished
+from platoon.envs.harbor.runtime import agrees, grader_scored, launcher_outcome, regraded, unfinished
 from platoon.envs.harbor.sidecars import SidecarLogs
 from platoon.envs.harbor.task import CollectHook, HarborTask, McpServer, resolve_env
 from platoon.envs.harbor.tools import DEFAULT_MAX_OUTPUT_CHARS, TOOL_SPECS, SandboxTools, truncate_output
@@ -538,7 +540,11 @@ class HarborSession:
         agents' workdir unusable scores 0 (``workdir_missing``) and the tests do
         not run. A grade that cannot start within ``queue_timeout_s`` is an
         infra ``error`` (``env_busy``); a cancelled grade stops the tests and
-        removes them before the next call.
+        removes them before the next call. A runtime task whose grader is
+        generated grades the artifacts again in fresh verifiers
+        (``runtime_tasks.regrade``): a regrade that scores otherwise makes the
+        grade ``invalid`` (``verifier_flaky``), or the solver's 0 where the
+        submission's replay wrote other outputs this time.
         """
 
         separate = self.harbor_task.verifier_mode == "separate"
@@ -728,7 +734,7 @@ class HarborSession:
         verifier sandbox."""
 
         if (kept := self._kept_artifacts) is not None:
-            return await self._verify_separately(kept.collected, kept.skipped, kept.logs)
+            return await self._verify_graded(kept.collected, kept.skipped, kept.logs)
         self._open_sandbox()
         sandbox = self._lease.sandbox
         into = Path(scratch.mkdtemp("platoon-harbor-artifacts-"))
@@ -769,11 +775,40 @@ class HarborSession:
             self._kept_artifacts = _KeptArtifacts(into, collected, skipped, logs)
             self.sandbox = None
             self._main_release = _in_background(self._lease.release())
-            return await self._verify_separately(collected, skipped, logs)
+            return await self._verify_graded(collected, skipped, logs)
         try:
-            return await self._verify_separately(collected, skipped, logs)
+            return await self._verify_graded(collected, skipped, logs)
         finally:
             shutil.rmtree(into, ignore_errors=True)
+
+    async def _verify_graded(
+        self, collected: list[CollectedArtifact], skipped: dict[str, str], logs: dict[str, Path] | None = None
+    ) -> Outcome:
+        """Grade the artifacts in a verifier sandbox and, where the task is a runtime task whose grader is generated
+        and the grade is its grader's score, grade them again ``runtime_tasks.regrade`` times, each time in a fresh
+        verifier after the one before, until a regrade does not agree; the grade is what all of them make
+        (:func:`~platoon.envs.harbor.runtime.regraded`)."""
+
+        outcome = await self._verify_separately(collected, skipped, logs)
+        count = self._service.runtime_regrades(self.harbor_task)
+        if count == 0 or not grader_scored(outcome):
+            return outcome
+        regrades: list[Outcome] = []
+        for _ in range(count):
+            regrades.append(await self._verify_separately(collected, skipped, logs))
+            if not agrees(regrades[-1], outcome):
+                break
+        graded = regraded(outcome, regrades)
+        if grader_scored(last := regrades[-1]) and not agrees(last, outcome):  # flaky, or a replay that computed others
+            logger.info(
+                "Harbor task %s: its generated grader scored the artifacts %g, then %g in regrade %d (%s)",
+                self.harbor_task.name,
+                outcome.reward,
+                last.reward,
+                len(regrades),
+                graded.failure_kind or graded.reason,
+            )
+        return graded
 
     async def _collect(
         self, sandbox: Sandbox, into: Path, skipped: dict[str, str]

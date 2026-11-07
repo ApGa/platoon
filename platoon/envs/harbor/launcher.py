@@ -28,8 +28,10 @@ verifier's sandbox, with a umask that keeps what it writes root's alone.  In ord
    cannot signal is a survivor, not foreign), removes what that user left where every user may write
    (:data:`TEMPORARY`) and, in the replay's own copy, all but its outputs, which wait there as root's (:func:`_hold`,
    :func:`remove_tree`, within :data:`CLEAR_WINDOW_S` past its time), and puts each output the replay wrote in its
-   place.  A violation, a submission too large to copy or too slow to check or copy, a replay that fails, outlives its
-   time, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a
+   place, with their SHA-256 in its report (:data:`REPLAYED_SHA256`), by which a regrade, which replays the submission
+   again, tells a submission that computes other outputs each time it runs from a grader that judges the same outputs
+   otherwise.  A violation, a submission too large to copy or too slow to check or copy, a replay that fails, outlives
+   its time, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a
    filesystem, lacks its own program, and an output it does not write again score 0, the solver's fault (reason
    ``solver_output_contract`` or ``solver_nonreproducible``);
 3. runs the grader's command as root in ``/tests/gen``, with the verifier's own umask, for the rest of the verifier's
@@ -61,6 +63,7 @@ which it may anyway and which controls check, and anything else is a non-score t
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import math
 import os
@@ -167,6 +170,10 @@ UNFINISHED = "unfinished"
 LAUNCHER_FAULT = "verifier_trusted_launcher"
 OUTPUT_CONTRACT = "solver_output_contract"
 NONREPRODUCIBLE = "solver_nonreproducible"
+#: The key of the report that holds the SHA-256 of the outputs the replay wrote, which the grader judged
+#: (:func:`outputs_sha256`); a task without a replay leaves it out.
+REPLAYED_SHA256 = "replayed_sha256"
+OUTPUTS_RULE = "platoon-replayed-outputs-v1"
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_SET_NO_NEW_PRIVS = 38
 _VERDICT_KEYS = ("passed", "checks")
@@ -698,11 +705,23 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
             f"write: {exc}",
         )
     ran["outputs"] = list(outputs)
+    report[REPLAYED_SHA256] = outputs_sha256(paths.workdir, outputs)  # before the grader, root, could change them
     try:
         remove_tree(held)
     except Leftover:
         pass  # root's copies of the outputs, which the grader finds in the working directory anyway
     return None
+
+
+def outputs_sha256(directory, outputs):
+    """The SHA-256 of the files ``outputs`` (paths relative to ``directory``): of each one's path and the SHA-256 of its
+    bytes, sorted, with :data:`OUTPUTS_RULE` first.  Replays that wrote the same bytes give the same one."""
+
+    digest = hashlib.sha256(OUTPUTS_RULE.encode("ascii"))
+    for output in sorted(outputs):  # no path holds a NUL (relative_path)
+        content = _file_sha256(os.path.join(directory, output))
+        digest.update(b"\0" + os.fsencode(output) + b"\0" + content.encode("ascii"))
+    return digest.hexdigest()
 
 
 def _submitted_program(argv):
@@ -1029,7 +1048,8 @@ def _say(text):
 def bounded_report(report, limit=MAX_REPORT_BYTES):
     """``report`` as JSON (ASCII) of at most ``limit`` bytes, so that grading always reads it whole: as it is where it
     fits, else without the verdict's checks, then without the artifacts' names and the replay's outputs, then with only
-    what the outcome needs; ``truncated`` names what was left out."""
+    what the outcome needs (the SHA-256 of the replayed outputs among it, which a regrade compares); ``truncated`` names
+    what was left out."""
 
     text = _dumps(report)
     if len(text) <= limit:
@@ -1046,6 +1066,8 @@ def bounded_report(report, limit=MAX_REPORT_BYTES):
             if len(text) <= limit:
                 return text
     kept = {key: report.get(key) for key in ("schema", "grader_owner", "reward", "failure_kind", "reason", "seconds")}
+    if REPLAYED_SHA256 in report:
+        kept[REPLAYED_SHA256] = report[REPLAYED_SHA256]
     detail = report.get("detail")
     kept.update(detail=detail[:TAIL_CHARS] if isinstance(detail, str) else None, truncated="all but the outcome")
     return _dumps(kept)
@@ -1117,6 +1139,19 @@ def _read_regular(path, limit):
     if len(data) > info.st_size:
         raise ValueError(f"{os.path.basename(path)} grew while it was read")
     return data
+
+
+def _file_sha256(path):
+    """The SHA-256 of the regular file ``path``'s bytes, opened as :func:`_read_regular` opens one: never through a
+    link, never waiting on a FIFO, and checked on the open descriptor."""
+
+    digest = hashlib.sha256()
+    with os.fdopen(os.open(path, _READ_FLAGS), "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError(f"{os.path.basename(path)} is not a regular file")
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _tail(path):

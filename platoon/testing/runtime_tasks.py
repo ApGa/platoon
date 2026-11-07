@@ -31,9 +31,12 @@ is ``verifier_generated_protocol`` (``invalid_grader``), one that crashes after 
 ``verifier_generated_exit`` (``crash_after_zero``), and one that kills the launcher and writes a reward of its own is
 ``verifier_generated_unfinished`` (``kills_launcher``); one that writes a reward file of its own (``own_reward_file``),
 leaves a process that keeps writing one (``lingering_writer``) or writes what a verifier classifier would match into
-the verifier's log (``log_censor``) gets the launcher's reward; and a trusted grader that crashes is
-``verifier_trusted_exit`` (``trusted_grader_crash``).  The solution reads ``data.txt``, which only the task's uploaded
-``environment/`` holds.
+the verifier's log (``log_censor``) gets the launcher's reward; a trusted grader that crashes is
+``verifier_trusted_exit`` (``trusted_grader_crash``); and a grader that flips a coin is ``verifier_flaky``
+(``flaky_grader``), as its regrades in fresh verifiers find (``runtime_tasks.regrade``): the case grades the same
+submission again, up to :data:`FLAKY_GRADES` times, while each grade is the grader's score that every regrade gave
+again, which a coin flip's is half the time with one regrade.  The solution reads ``data.txt``, which only the task's
+uploaded ``environment/`` holds, and its replay writes the same bytes each time.
 
 The tasks it takes in stay in the environment's store.  The experimental runtime-task API (``platoon.experimental``)
 can change in a minor release, and this check changes with it.
@@ -85,7 +88,12 @@ GRADES = (
     "lingering_writer",
     "log_censor",
     "trusted_grader_crash",
+    "flaky_grader",
 )
+#: How many times the ``flaky_grader`` case grades its submission at most.  With one regrade, each grade of a coin-flip
+#: grader is ``verifier_flaky`` with probability 1/2, so all of them agree with probability 2**-20.
+FLAKY_GRADES = 20
+_FLAKY = "verifier_flaky"
 _ARTIFACTS = ["solve.py", "answer.json"]
 _SOLVE = """import json
 
@@ -182,6 +190,11 @@ with open(os.environ["PLATOON_VERDICT"], "w") as stream:
     json.dump({"passed": False}, stream)
 """,
     "crash": "import sys\nsys.exit(1)\n",
+    # A coin flip, whatever the answer: only a grade of the same submission again in another verifier shows it.
+    "coin_flip": """import json, os
+with open(os.environ["PLATOON_VERDICT"], "w") as stream:
+    json.dump({"passed": os.urandom(1)[0] % 2 == 0}, stream)
+""",
 }
 _FAILING_SOLVE = "import sys\nsys.exit(1)\n"
 # The solution's lines that publish a copy of its answer where every agent may publish files, which the verifier then
@@ -484,6 +497,7 @@ _GRADE_CASES: dict[str, tuple[dict[str, Any], str, tuple[str, float | None, str 
         "trusted",
         ("invalid", None, "verifier_trusted_exit", None),
     ),
+    "flaky_grader": ({"grader": _GRADERS["coin_flip"]}, "generated", ("invalid", None, _FLAKY, None)),
 }
 
 
@@ -498,13 +512,33 @@ async def _graded(service: Any, case: str, sources: _Sources) -> None:
         if solved.exit_code != 0:
             raise _Failed(f"its solution exited {solved.exit_code}: {(solved.stderr or solved.stdout)[-500:]}")
         outcome = await session.grade()
+        grades = 1
+        # A coin flip repeats as often as not: the same submission is graded again while its regrades agreed.
+        while expected[2] == _FLAKY and _agreed(outcome) and grades < FLAKY_GRADES:
+            outcome = await session.grade()
+            grades += 1
     finally:
         await session.close()
     got = (outcome.status, outcome.reward, outcome.failure_kind, outcome.reason if outcome.trainable else None)
+    if got != expected and expected[2] == _FLAKY and outcome.trainable:
+        if service.runtime_tasks.regrade == 0:
+            raise _Failed(f"graded {got}: runtime_tasks.regrade is 0, so no generated grader's score is graded again")
+        if _agreed(outcome):
+            raise _Failed(
+                f"never {expected} in {grades} grades of one submission, each a score that every regrade gave again "
+                f"(the last {got})"
+            )
     if got != expected:
         launcher = outcome.metadata.get("launcher") or {}
         detail = launcher.get("detail") or outcome.metadata.get("test_output") or ""
         raise _Failed(f"graded {got}, not {expected}: {str(detail)[-500:]}")
+
+
+def _agreed(outcome: Any) -> bool:
+    """Whether a grade is the grader's score that every regrade gave again: a score with no reason (the solver's 0s name
+    theirs, a regrade's among them), and regrades."""
+
+    return outcome.trainable and outcome.reason is None and "regrades" in outcome.metadata
 
 
 def to_toml(table: Mapping[str, Any]) -> str:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import errno
+import hashlib
 import json
 import os
 import resource
@@ -86,6 +87,12 @@ with open("data.txt") as stream:
     value = 2 * int(stream.read())
 with open("answer.json", "w") as stream:
     json.dump({"answer": value}, stream)
+"""
+# A submission whose code computes something else each time it runs: it draws from an unseeded generator.
+UNSEEDED_SOLVE = """
+import json, random
+with open("answer.json", "w") as stream:
+    json.dump({"answer": random.choice([41, 42]), "draw": random.random()}, stream)
 """
 
 
@@ -198,6 +205,7 @@ def test_an_honest_grader_scores_the_answer_and_its_report_says_how(verifier):
     assert (code, reward) == (0, {"reward": 1})
     assert report["schema"] == launcher.SCHEMA and report["grader_owner"] == "generated"
     assert (report["failure_kind"], report["reason"]) == (None, None)
+    assert launcher.REPLAYED_SHA256 not in report  # no replay: the grader judged the artifacts as they were collected
     assert report["verdict"] == {"passed": True, "checks": [{"id": "answer", "passed": True, "margin": 0.5}]}
     assert report["grader"]["exit_code"] == 0 and report["contract"]["violation"] is None
     assert "platoon launcher" in (verifier.logs / launcher.STDOUT).read_text()
@@ -575,6 +583,57 @@ def test_the_grader_grades_the_replayed_output_not_the_submitted_one(verifier):
 
     assert reward == {"reward": 0} and report["reason"] is None
     assert json.loads((verifier.workdir / "answer.json").read_text()) == {"answer": 40}
+
+
+def test_the_report_holds_the_sha256_of_the_outputs_the_replay_wrote_before_the_grader_ran(verifier):
+    """What the grader judged of a replay, its outputs' names and bytes, is in the report: the grader, root, may change
+    them once it runs (here it empties the answer it judged), so they are taken before."""
+
+    verifier.replay(outputs=("answer.json", "out/log.txt"))
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    solve = SOLVE + "import os\nos.mkdir('out')\nopen('out/log.txt', 'w').write('replayed')\n"
+    verifier.submit(42, **{"solve.py": solve, "data.txt": "21"})
+    verifier.grader(HONEST_GRADER + 'open(os.path.join(os.environ["PLATOON_WORKDIR"], "answer.json"), "w").close()\n')
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert (verifier.workdir / "answer.json").read_text() == ""
+    rule = launcher.OUTPUTS_RULE.encode()
+    files = {"answer.json": b'{"answer": 42}', "out/log.txt": b"replayed"}
+    named = b"".join(
+        b"\0" + name.encode() + b"\0" + hashlib.sha256(data).hexdigest().encode() for name, data in files.items()
+    )
+    assert report[launcher.REPLAYED_SHA256] == hashlib.sha256(rule + named).hexdigest()
+
+
+@pytest.mark.parametrize(("solve", "same"), [(SOLVE, True), (UNSEEDED_SOLVE, False)], ids=["deterministic", "unseeded"])
+def test_replays_record_the_same_sha256_only_where_they_write_the_same_bytes(tmp_path, solve, same):
+    """Two grades of one submission, each in a verifier of its own, as a regrade grades it."""
+
+    digests = []
+    for grade in ("first", "regrade"):
+        verifier = Verifier(tmp_path / grade)
+        verifier.replay()
+        verifier.config["artifacts"] = ["answer.json", "solve.py"]
+        verifier.submit(42, **{"solve.py": solve, "data.txt": "21"})
+        digests.append(verifier.run()[2][launcher.REPLAYED_SHA256])
+
+    assert (digests[0] == digests[1]) is same
+
+
+def test_the_sha256_of_the_replayed_outputs_reads_each_as_the_launcher_reads_every_file(tmp_path):
+    """Never through a link, and never waiting on a FIFO: the file is checked on the open descriptor."""
+
+    os.mkfifo(tmp_path / "fifo.json")
+    (tmp_path / "answer.json").write_text("{}")
+    (tmp_path / "link.json").symlink_to(tmp_path / "answer.json")
+
+    with pytest.raises(ValueError, match="fifo.json is not a regular file"):
+        launcher.outputs_sha256(str(tmp_path), ["fifo.json"])
+    with pytest.raises(OSError):
+        launcher.outputs_sha256(str(tmp_path), ["link.json"])
+    assert launcher.outputs_sha256(str(tmp_path), ["answer.json"]) != launcher.outputs_sha256(str(tmp_path), [])
 
 
 @pytest.mark.parametrize(
@@ -1071,6 +1130,17 @@ def test_a_report_too_large_for_its_bound_keeps_what_the_outcome_needs():
         "detail": "d" * launcher.TAIL_CHARS,
         "truncated": "all but the outcome",
     }
+
+
+def test_a_report_cut_to_the_outcome_keeps_the_sha256_of_the_replayed_outputs():
+    """A regrade compares it to tell a submission that computes other outputs each time from a flaky grader."""
+
+    digest = "ab" * 32
+    report = {"schema": launcher.SCHEMA, "reward": 1, "detail": "d" * 5000, launcher.REPLAYED_SHA256: digest}
+
+    least = json.loads(launcher.bounded_report(report, limit=100))
+
+    assert least["truncated"] == "all but the outcome" and least[launcher.REPLAYED_SHA256] == digest
 
 
 def test_the_launcher_parses_as_python_3_8_and_imports_only_the_standard_library():

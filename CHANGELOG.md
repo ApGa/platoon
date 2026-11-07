@@ -44,6 +44,19 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   tasks: what `materialize` must refuse, on CPU, and, on the environment's sandboxes, the grade each sabotaged grader,
   replay or submission must get ([Check an environment's runtime
   tasks](docs/how-to/test-extensions.md#check-an-environments-runtime-tasks)).
+- **Regrades of generated graders** (experimental, RFC 0022). Once a runtime task's generated grader
+  (`materialize(source, grader_owner="generated")`) scores a submission, its artifacts are graded again
+  `runtime_tasks.regrade` times (default 1; 0 grades once), each time in a fresh verifier after the one before, and the
+  score stands only while every regrade gives it again. A regrade that gives the same artifacts and replayed outputs
+  another score makes the grade `invalid`, `verifier_flaky`. Each regrade runs the submission's replay again, and the
+  launcher's report holds the SHA-256 of what the replay wrote (`replayed_sha256`): a regrade whose replay wrote other
+  outputs and got another score makes the grade the solver's 0 (`solver_nonreproducible`), never the grader's fault.
+  A regrade that gives no score of the grader's makes the grade its own outcome, with its own metadata (the solver's 0
+  for a replay that does not reproduce the submission this time, the grader's non-score, an infrastructure fault). The
+  outcome's metadata lists each regrade in `regrades`, and deadlines on whole rollouts count each regrade's verifier. A
+  trusted grader and the environment's curated tasks are never regraded, and `regrade` is no part of the
+  `runtime_tasks` fingerprint a stored task carries. `check_runtime_tasks` gains a coin-flip grader, which must come
+  out `verifier_flaky` ([Runtime tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
 
 ## 0.5.0 (2026-10-29)
 

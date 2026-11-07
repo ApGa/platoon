@@ -2380,7 +2380,8 @@ verifier (`[verifier] environment_mode = "separate"`) that runs the task's own i
 `[verifier.environment] docker_image`, whose image would bring its own `/tests`), and name one of `images` as
 its `[environment] docker_image`; and it gives neither `[task] name` nor `artifacts`, which are each task's
 own.  The launcher runs as root, so the template's `[verifier] user` is root, with `verifier_user: honor`, on
-verifiers' sandboxes that give root.
+verifiers' sandboxes that give root.  `regrade` grades a generated grader's score again, each time in a fresh
+verifier, and the grade stands only while every regrade gives the same score.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -2388,6 +2389,7 @@ verifiers' sandboxes that give root.
 | `template` | `Mapping[str, Any]` | required | The task.toml every runtime task has, but for its [task] name and its artifacts: a mapping, or a TOML file. |
 | `verifier_user` | `Literal['refuse', 'ignore', 'honor']` | `"honor"` | What a runtime task's [verifier].user gets (refuse, ignore or honor), in place of service_kwargs.verifier_user. |
 | `verifier_provider_options` | `Mapping[str, Any]` | `{}` | The provider options of runtime tasks' verifiers' sandboxes, laid over the entry's verifier_provider_options (or provider_options), such as {rootfs_layout: copy, fakeroot: true} for verifiers that run as root on Singularity; the entry's other tasks keep theirs. |
+| `regrade` | `int` | `1` | How many times a score of a runtime task's generated grader is graded again, each time in a fresh verifier after the one before: the score stands only while every regrade gives it again, and a regrade that scores otherwise makes the grade invalid (verifier_flaky), or the solver's 0 where the submission's replay wrote other outputs. 0 grades once. A trusted grader is never regraded. |
 | `max_bytes` | `int` | `268435456` | The most a runtime task's files may hold, in bytes. |
 | `store` | `str \| None` | `None` | The directory that keeps the runtime tasks, each in <store>/<digest>. None: runtime-tasks in the run's directory (platoon train's, platoon eval's), or outside a run, in the Harbor cache. |
 

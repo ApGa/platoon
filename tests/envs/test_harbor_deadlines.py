@@ -157,6 +157,18 @@ def test_a_harbor_rollout_counts_its_sandbox_starts_and_verifier(make_task):
     assert tuned.rollout_overhead_s("separate") == 2 * 60 + 2 * 900 + 120 + 30
 
 
+def test_a_harbor_rollouts_overhead_adds_its_terms_in_the_order_it_always_has(make_task):
+    """Floats round as they are added: limits with fractions give the same deadline, to its last bit, as long as the sum
+    keeps its order (a runtime task's regrades come after it, tests/envs/test_harbor_runtime_tasks.py)."""
+
+    healthcheck = '[environment.healthcheck]\ncommand = "true"\nretries = 0\ninterval_sec = 0.1\ntimeout_sec = 1.1\n'
+    task = make_task("fractional", task_toml=SEPARATE + healthcheck)
+    service = HarborEnvironmentService(task_dirs=[task], provider="process", verifier_timeout_multiplier=1.1)
+
+    start = 600 + (0.0 + (0 + 1) * (1.1 + 0.1)) + 600  # its sandbox's start and healthcheck, the verifier's start
+    assert service.rollout_overhead_s("fractional") == start + 0 + 900 * 1.1 + 120 + 30
+
+
 @pytest.mark.parametrize("budget", [-1, True, float("nan"), "600"])
 def test_the_start_budget_is_checked(make_task, budget):
     with pytest.raises(ValueError, match="sandbox_start_budget_s"):
