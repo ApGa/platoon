@@ -2569,6 +2569,14 @@ def _inputs_a_file(verifier: Verifier) -> None:
             lambda v: (v.replay(("answer.json", "notes.txt")), v.variant(expected={"notes.txt": 1})),
             'hold the key "notes.txt", whose output notes.txt is no .json file',
         ),
+        (
+            lambda v: v.variant(expected=DEEP_JSON["parsable"]),
+            "expected.json, are nested too deeply to read as JSON",
+        ),
+        (
+            lambda v: v.forbid(DEEP_JSON["beyond-some-parsers"]),
+            "the forbidden literals, tests/gen/forbidden.json, are nested too deeply to read as JSON",
+        ),
     ],
     ids=[
         "not-json",
@@ -2589,6 +2597,8 @@ def _inputs_a_file(verifier: Verifier) -> None:
         "too-large",
         "too-many-literals",
         "an-output-no-json",
+        "expected-nested-too-deeply",
+        "literals-nested-too-deeply",
     ],
 )
 def test_check_data_the_launcher_cannot_use_is_the_protocol_fault_of_the_graders_owner(
@@ -2961,6 +2971,17 @@ def test_what_a_variants_replay_wrote_is_read_as_the_launcher_reads_every_file(t
     for output in ("answer.json", "link.json"):
         keys = launcher.expected_keys({f"{output}#/a": 1}, [output], tolerance)
         assert launcher.missed_keys(str(tmp_path), keys, 1 << 20) == [f"{output}#/a"]
+
+
+def test_a_variants_output_nested_deeper_than_the_launcher_reads_holds_no_key(tmp_path):
+    """The output contract refuses such an output once the variant's replay wrote it; read anyway, it holds nothing,
+    on every Python."""
+
+    depth = launcher.MAX_JSON_DEPTH
+    (tmp_path / "answer.json").write_text("[1, " + "[" * depth + "]" * depth + "]")
+    keys = launcher.expected_keys({"answer.json#/0": 1}, ["answer.json"], {"default": 0, "keys": {}})
+
+    assert launcher.missed_keys(str(tmp_path), keys, 1 << 20) == ["answer.json#/0"]
 
 
 def _deep(depth: int) -> Any:

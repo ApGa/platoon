@@ -517,8 +517,11 @@ def _tolerance(value: Any, where: str) -> dict[str, Any]:
 
 def _recorded(meta: Any, where: str) -> Any:
     """``meta`` as the JSON the task's launcher settings record, of at most 8 KiB and nested at most 16 levels deep;
-    a ``ValueError`` for any other."""
+    a ``ValueError`` for any other.  Its nesting is counted first, without recursion, so that meta nested deeper than
+    a Python's encoder goes is refused for its depth on every Python."""
 
+    if launcher.json_depth(meta) > launcher.MAX_META_DEPTH:
+        raise ValueError(f"{where}: meta nests more than {launcher.MAX_META_DEPTH} levels deep")
     try:
         text = json.dumps(meta, allow_nan=False)
     except (TypeError, ValueError, RecursionError) as exc:
@@ -527,10 +530,7 @@ def _recorded(meta: Any, where: str) -> Any:
         raise ValueError(
             f"{where}: meta holds {len(text)} bytes of JSON, more than a variant records ({launcher.MAX_META_BYTES})"
         )
-    recorded = json.loads(text)
-    if launcher.json_depth(recorded) > launcher.MAX_META_DEPTH:
-        raise ValueError(f"{where}: meta nests more than {launcher.MAX_META_DEPTH} levels deep")
-    return recorded
+    return json.loads(text)
 
 
 def _refused(problems: list[str]) -> MaterializedTask:

@@ -1386,7 +1386,8 @@ def test_replay_checks_are_built_from_mappings_and_record_what_the_launcher_runs
         ({"variants": [_variant(meta="x" * 9000)]}, "more than a variant records (8192)"),
         ({"variants": [_variant(meta=_nested(17))]}, "meta nests more than 16 levels deep"),
         ({"variants": [_variant(meta=_nested(1200))]}, "meta nests more than 16 levels deep"),  # within 8 KiB
-        ({"variants": [_variant(meta=_nested(100_000))]}, "meta must be JSON: maximum recursion depth exceeded"),
+        # Deeper than some Pythons encode, and some do: counted before it is encoded, it is refused alike on each.
+        ({"variants": [_variant(meta=_nested(100_000))]}, "meta nests more than 16 levels deep"),
         (  # 8 KiB of meta each, which launch.json holds one number a line: less than its cap compact, more indented
             {"variants": [_variant(name=f"v{n}", inputs=f"tests/gen/{n}", meta=[0] * 2700) for n in range(16)]},
             "bytes of settings, more than a task's launcher settings take (262144)",

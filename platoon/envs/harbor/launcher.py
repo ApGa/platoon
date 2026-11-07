@@ -156,10 +156,11 @@ DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 TAIL_CHARS = 2000
 #: The largest settings file read.
 MAX_CONFIG_BYTES = 1 << 20
-#: How deeply the JSON the launcher reads (its settings, a ``.json`` artifact or output, the verdict) may nest arrays
-#: and objects: deeper JSON is refused before it is parsed (:func:`load_json`).  Pythons give up parsing at depths of
-#: their own, all deeper than this (about 500 levels without the C parser, 1,000 with it before 3.12, 10,000 on 3.12
-#: and 3.13, and on 3.14 as many as the stack holds), so what is refused is the same on every Python.
+#: How deeply the JSON the launcher reads (its settings, a ``.json`` artifact or output, the replay checks' data, the
+#: verdict) may nest arrays and objects: deeper JSON is refused before it is parsed (:func:`load_json`).  Pythons give
+#: up parsing at depths of their own, all deeper than this (about 500 levels without the C parser, 1,000 with it before
+#: 3.12, 10,000 on 3.12 and 3.13, and on 3.14 as many as the stack holds), so what is refused is the same on every
+#: Python.
 MAX_JSON_DEPTH = 256
 #: The largest verdict read, the most checks one holds and the longest id of one; the report keeps the first
 #: ``REPORTED_CHECKS``.
@@ -1225,15 +1226,15 @@ def expected_keys(expected, outputs, tolerance):
 
 def missed_keys(directory, expected, cap):
     """The keys of ``expected`` (:func:`expected_keys`) whose values the outputs in ``directory`` do not hold within
-    their tolerances: an output that is no JSON of at most ``cap`` bytes, nothing at the key, no number there (no
-    list of as many numbers, for a list), or one too far from what is expected."""
+    their tolerances: an output that is no JSON of at most ``cap`` bytes (:func:`load_json`), nothing at the key, no
+    number there (no list of as many numbers, for a list), or one too far from what is expected."""
 
     documents, missed = {}, []
     for key, output, tokens, value, tolerance in expected:
         if output not in documents:
             try:
-                documents[output] = (True, json.loads(_read_regular(os.path.join(directory, output), cap).decode()))
-            except (OSError, ValueError, RecursionError):
+                documents[output] = (True, load_json(_read_regular(os.path.join(directory, output), cap).decode()))
+            except (OSError, ValueError):
                 documents[output] = (False, None)
         readable, document = documents[output]
         found, actual = resolve(document, tokens) if readable else (False, None)
@@ -1274,8 +1275,8 @@ def _check_json(tests, path):
     or None and why it cannot be read."""
 
     try:
-        return json.loads(_read_regular(_check_file(tests, path), MAX_CHECK_BYTES).decode("utf-8")), None
-    except RecursionError:
+        return load_json(_read_regular(_check_file(tests, path), MAX_CHECK_BYTES).decode("utf-8")), None
+    except NestedTooDeeply:
         return None, "are nested too deeply to read as JSON"
     except (OSError, ValueError) as exc:
         return None, f"cannot be read as JSON: {exc}"
