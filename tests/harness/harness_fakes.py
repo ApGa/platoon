@@ -273,6 +273,7 @@ class FakeAgent:
     api_key: str
     rollout_id: str
     trajectory_id: str
+    role: str = "policy"
 
 
 @dataclass
@@ -289,12 +290,15 @@ class FakeGateway:
         self.started = True
         return await self.server.start()
 
-    def open_agent(self, *, rollout_id: str, trajectory_id: str, sampling: Any = None) -> FakeAgent:
+    def open_agent(
+        self, *, rollout_id: str, trajectory_id: str, sampling: Any = None, role: str = "policy"
+    ) -> FakeAgent:
         agent = FakeAgent(
             agent_id=f"agent-{uuid.uuid4().hex[:8]}",
             api_key=self.server.api_key,
             rollout_id=rollout_id,
             trajectory_id=trajectory_id,
+            role=role,
         )
         self.agents.append(agent)
         return agent

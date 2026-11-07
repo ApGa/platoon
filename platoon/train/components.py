@@ -24,6 +24,7 @@ from typing import Any, ClassVar, Generic, Literal, TypeVar, cast, get_args
 from platoon.config_defs import InferenceParams, RolloutConfig
 from platoon.deprecations import removed_hint
 from platoon.task import Task
+from platoon.utils.judges import JUDGING_ROLES
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +137,14 @@ class HarnessExitPolicy:
 
 @dataclass
 class AgentTreeConfig:
-    """How function harnesses' subagents (``ctx.agents.spawn``) run in one environment."""
+    """How one environment's agents run: the role of its root agent, and how function harnesses' subagents
+    (``ctx.agents.spawn``) run."""
 
+    # The role of the entry's root agent (experimental; None: the one its program declares, else ``policy``), which
+    # chooses the policy it samples, its role's in the run's ``agents.roles`` (else ``agents.policy``), and the tools
+    # it may call. A root of the role ``policy`` samples ``agents.policy`` whatever ``agents.roles`` says. No root takes
+    # ``verifier`` or ``judge``, the roles of the agents platoon opens to judge others.
+    root_role: str | None = None
     # Deepest level of the policy tree, the root being 0 (None: unlimited). Verifiers do not count against it: the
     # verifier of a child at ``max_depth`` runs one level below it and may delegate once more, so with
     # ``child_grading: verifier`` the tree reaches ``max_depth + 2`` (``platoon.harness.budget``).
@@ -160,6 +167,16 @@ class AgentTreeConfig:
     child_timeout_s: float | None = None
 
     def __post_init__(self) -> None:
+        if self.root_role is not None and (not isinstance(self.root_role, str) or not self.root_role):
+            raise ValueError(
+                f"agents.root_role must be a role name, a non-empty string, or null; got {self.root_role!r}"
+            )
+        if self.root_role in JUDGING_ROLES:
+            raise ValueError(
+                f"agents.root_role: {self.root_role!r} is the role of agents platoon opens to judge others, which "
+                "never train, so no root takes it: give the root a role of its own, and bind that role to the judge's "
+                "policy (agents.roles.<role>.policy)"
+            )
         if isinstance(self.verifier, Mapping):
             self.verifier = VerifierConfig(**self.verifier)
         elif not isinstance(self.verifier, VerifierConfig):
@@ -1034,10 +1051,16 @@ class EnvironmentRoute:
         object.__setattr__(self, "harness_options", dict(self.harness_options or {}))
 
     def attach(self, task: Task) -> Task:
-        """A shallow copy of ``task`` whose misc carries this route (the original is left untouched)."""
+        """A shallow copy of ``task`` whose misc carries this route (the original is left untouched).
 
+        The route travels as the plain values of its fields (``asdict``), without an ``agents.root_role`` its entry
+        leaves unset: a config that sets none keeps every rollout request's bytes."""
+
+        payload = asdict(self)
+        if self.agents.root_role is None:
+            del payload["agents"]["root_role"]
         routed = copy.copy(task)
-        routed.misc = {**task.misc, ROUTE_MISC_KEY: asdict(self)}
+        routed.misc = {**task.misc, ROUTE_MISC_KEY: payload}
         return routed
 
     @classmethod
@@ -1053,6 +1076,20 @@ class EnvironmentRoute:
         misc = task.get("misc") if isinstance(task, Mapping) else None
         payload = misc.get(ROUTE_MISC_KEY) if isinstance(misc, Mapping) else None
         return None if payload is None else cls(**payload)
+
+
+def entry_root_role(entry: EnvironmentConfig | EnvironmentRoute, *, programs: bool = True) -> str | None:
+    """The role the root agent of an environment entry's rollouts opens with, when the entry or its program names one:
+    its ``agents.root_role``, else, with ``programs``, the one its episode program declares
+    (``@pt.program(root_role=...)``), which resolving the program may import.  None when neither does: its root takes
+    the role ``policy`` (``platoon.harness.agent.ROOT_ROLE``).  A program that does not resolve raises what
+    :func:`platoon.programs.resolve_program` raises."""
+
+    if entry.agents.root_role is not None or not programs:
+        return entry.agents.root_role
+    from platoon.programs import resolve_program
+
+    return resolve_program(entry.program).root_role
 
 
 # The rollouts of a mixture of environments (platoon.train.auto), which run each task with a rollout its route names:

@@ -171,7 +171,13 @@ def test_a_frozen_policy_nothing_uses_is_warned_of():
 def test_a_policy_bound_to_the_root_agent_s_role_is_warned_of():
     loaded = config(policies={"teacher": TEACHER}, agents={"roles": {"policy": {"policy": "teacher"}}})
     [line] = policy_warnings(loaded)
-    assert line.startswith("agents.roles.policy.policy: the root agent's role is policy, and the root samples")
+    assert line.startswith(
+        "agents.roles.policy.policy: policy is the root agent's role unless its entry names another "
+        "(environments[].agents.root_role), and a root of the role policy samples agents.policy (main) whatever"
+    )
+    assert line.endswith(
+        "to have a root sample it, name another role as its entry's root_role and bind that role to it"
+    )
     assert policy_warnings(config(agents={"roles": {"policy": {"policy": MAIN}}})) == []
 
 
@@ -448,12 +454,13 @@ def test_the_identity_records_the_policy_table_and_a_resume_may_not_change_it(tm
                 "load_checkpoint_path": None,  # the sampler a frozen policy serves: its base model's
             },
         },
-        "agents": {"policy": MAIN, "roles": {}},
+        "agents": {"policy": MAIN, "roles": {}, "root_roles": {"default": "policy"}},
     }
     monkeypatch.setattr(identity, "resumes", lambda run_dir: False)
     identity.check_run_identity(tmp_path, identity.run_identity(loaded, []), {})
     written = json.loads((tmp_path / identity.IDENTITY_NAME).read_text())
     assert written["policies"] == table["policies"]  # no service URL: a resume may reach its services elsewhere
+    assert written["agents"] == {"policy": MAIN, "roles": {}}  # every root takes the role policy: none recorded
 
     monkeypatch.setattr(identity, "resumes", lambda run_dir: True)
     identity.check_run_identity(tmp_path, identity.run_identity(loaded, []), {})  # the same table resumes

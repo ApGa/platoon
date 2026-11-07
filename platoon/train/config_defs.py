@@ -750,12 +750,15 @@ class AgentRoleConfig:
 @dataclass
 class AgentsConfig:
     """``agents:``: which policy each agent samples, for its whole life, and which tools it may call (experimental).
-    The root agent samples ``policy``; an agent its harness or program opens with a role samples that role's policy,
-    and ``policy`` when ``roles`` names none for it.  An agent of a role that lists ``tools`` (the root agent's role is
-    ``policy``) sees and calls only those, and so does every agent under it but a verifier, which runs under the child
-    it judges and is limited by the lists of that child's spawner and its own role's (``verifier``) instead."""
+    A root agent of the role ``policy``, whose entry and program name no other (``environments[].agents.root_role``),
+    samples ``policy``; every other agent, a root of another role included, samples its role's policy, and ``policy``
+    when ``roles`` names none for it.  An agent of a role that lists ``tools`` (a root agent's role is its entry's root
+    role, ``policy`` without one) sees and calls only those, and so does every agent under it but a verifier, which runs
+    under the child it judges and is limited by the lists of that child's spawner and its own role's (``verifier``)
+    instead."""
 
-    # The root agent's policy, and that of every role roles leaves out (None: main).
+    # The agents' default policy: every root agent of the role policy samples it (one whose entry and program name no
+    # other role), whatever roles says, and so does every other agent whose role roles does not bind (None: main).
     policy: str | None = None
     # The policy and the tools of the agents of each role, by role (the role a harness mints a subagent with, such as
     # ``judge``).

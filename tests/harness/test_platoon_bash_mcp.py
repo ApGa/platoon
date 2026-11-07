@@ -192,9 +192,11 @@ class ToolPlaneGateway:
         await self.server.start(host="127.0.0.1")
         return await self.model.start()
 
-    def open_agent(self, *, rollout_id: str, trajectory_id: str, sampling: Any = None) -> AgentSession:
+    def open_agent(
+        self, *, rollout_id: str, trajectory_id: str, sampling: Any = None, role: str = "policy"
+    ) -> AgentSession:
         self.root = self.gateway.open_agent(
-            rollout_id=rollout_id, trajectory_id=trajectory_id, interactions={}, sampling_defaults=sampling
+            rollout_id=rollout_id, trajectory_id=trajectory_id, role=role, interactions={}, sampling_defaults=sampling
         )
         self.model.api_key = self.root.api_key
         return self.root

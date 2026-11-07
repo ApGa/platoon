@@ -50,7 +50,7 @@ from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.renderers import Message, Renderer, ToolCall
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-from platoon.harness.agent import CALL_KINDS, ToolAccess
+from platoon.harness.agent import CALL_KINDS, ROOT_ROLE, ToolAccess
 from platoon.utils.judges import JUDGE_ROLE, JUDGES_REFUSED_MISC_KEY
 from platoon.utils.role_tools import Allowlist, allowlists_of
 
@@ -905,9 +905,10 @@ class AgentSession:
     secret: str = field(repr=False)
     interactions: dict[str, TinkerLLMInteraction] = field(repr=False)
     parent_agent_id: str | None = None
-    role: str = "policy"
+    # A root's: its environment entry's root role, ROOT_ROLE without one; a child's: the role it was opened with.
+    role: str = ROOT_ROLE
     # The policy the agent samples for its whole life, in a gateway that serves several (ModelGateway.serve_policies):
-    # its role's; None in a gateway that serves one.
+    # its role's (the default for a root of ROOT_ROLE); None in a gateway that serves one.
     policy: str | None = None
     goal: str | None = None
     fork_step: int = 0
@@ -1153,10 +1154,12 @@ class ModelGateway:
     # ------------------------------------------------------------------ policies
 
     def serve_policies(self, policy: str, *, runtimes: Mapping[str, ModelGateway], roles: Mapping[str, str]) -> None:
-        """Serve several policies: this gateway samples ``policy``, the agents' default, which every root agent and
-        every agent of a role ``roles`` leaves out samples; each other policy is sampled by its own gateway
-        (``runtimes``, by policy id), which renders, samples and parses the calls of the agents whose role ``roles``
-        binds to it.  The agents stay this gateway's: it opens, authenticates and records them all."""
+        """Serve several policies: this gateway samples ``policy``, the agents' default, which every agent of a role
+        ``roles`` leaves out samples, and every root agent of the role ``policy`` (:data:`ROOT_ROLE`, the role of a
+        root whose environment entry names none) whatever ``roles`` binds that role to; each other policy is sampled by
+        its own gateway (``runtimes``, by policy id), which renders, samples and parses the calls of the agents whose
+        role ``roles`` binds to it, a root opened with that role included.  The agents stay this gateway's: it opens,
+        authenticates and records them all."""
 
         self.policy = policy
         self.runtimes = dict(runtimes)
@@ -1171,10 +1174,11 @@ class ModelGateway:
         return self if policy is None or policy == self.policy else self.runtimes[policy]
 
     def _policy_of(self, role: str, *, root: bool) -> str | None:
-        """The policy an agent of ``role`` samples (None in a gateway that serves one): the default for a root
-        agent, else its role's."""
+        """The policy an agent of ``role`` samples (None in a gateway that serves one): its role's, else the default.
+        A root agent of :data:`ROOT_ROLE` samples the default whatever that role is bound to: such a binding reaches
+        only the subagents opened with the role."""
 
-        if self.policy is None or root:
+        if self.policy is None or (root and role == ROOT_ROLE):
             return self.policy
         return self.role_policies.get(role, self.policy)
 
@@ -1489,7 +1493,7 @@ class ModelGateway:
         rollout_id: str,
         trajectory_id: str,
         parent_agent_id: str | None = None,
-        role: str = "policy",
+        role: str = ROOT_ROLE,
         interactions: dict[str, TinkerLLMInteraction],
         goal: str | None = None,
         timeline: CallTimeline | None = None,
@@ -1505,9 +1509,10 @@ class ModelGateway:
         unset.  A child is one level deeper than its parent and inherits its tool access and sampling defaults
         unless they are given, and its parent's ``judges``: a ``judge``-role child of a parent whose judges are off
         is refused (:class:`JudgesOffError`).  A gateway that is shut down refuses (:class:`GatewayShutDownError`).
-        In a gateway that serves several policies the agent samples, for its whole life, the default policy if it is
-        a root agent, else its role's (:meth:`serve_policies`).  Its tools are those its parent's allowlists and its
-        own role's allow (:meth:`limit_tools`).
+        In a gateway that serves several policies the agent samples, for its whole life, its role's policy, else the
+        default: a root agent of its environment entry's root role samples that role's, and one of :data:`ROOT_ROLE`
+        the default (:meth:`serve_policies`).  Its tools are those its parent's allowlists and its own role's allow
+        (:meth:`limit_tools`).
         """
         self._ensure_running()
         fork_step, depth, inherited_access, inherited_sampling = 0, 0, "full", None

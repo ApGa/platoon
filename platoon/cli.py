@@ -1057,7 +1057,7 @@ def config_validate(
             if exc.source is not None and Path(exc.source).resolve() != path.resolve():  # the site profile, a base
                 problems = [f"{exc.source}: {problem}" for problem in problems]
         deprecations = [deprecation.message for deprecation in resolved.deprecations] if resolved is not None else []
-        entry_lines = _entry_settings_lines(resolved) if resolved is not None and not problems else []
+        entry_lines = _entry_settings_lines(resolved, resolve=resolve) if resolved is not None and not problems else []
         if problems or (strict and deprecations):
             failed += 1
             print(f"FAIL {path}")
@@ -1069,11 +1069,11 @@ def config_validate(
     return EXIT_CONFIG if failed else 0
 
 
-def _entry_settings_lines(resolved: ResolvedConfig) -> list[str]:
+def _entry_settings_lines(resolved: ResolvedConfig, *, resolve: bool = True) -> list[str]:
     """``config validate``'s lines about the entries' own settings: one per entry of a training config with settings
     that differ from the run's, saying what differs, then each warning (``warning: ...``), those about the run's
-    policies among them (a frozen policy nothing uses); for an evaluation config, the entry keys ``platoon eval`` does
-    not apply, as warnings."""
+    policies among them (a frozen policy nothing uses; without ``resolve``, they read no program's root role, which
+    would import it); for an evaluation config, the entry keys ``platoon eval`` does not apply, as warnings."""
 
     from platoon.train import entry_settings
 
@@ -1085,7 +1085,7 @@ def _entry_settings_lines(resolved: ResolvedConfig) -> list[str]:
 
         settings = entry_settings.run_settings(config)
         lines = entry_settings.summary(config, settings)
-        warned = [*entry_settings.warnings(config, settings), *policy_warnings(config)]
+        warned = [*entry_settings.warnings(config, settings), *policy_warnings(config, resolve=resolve)]
         return [*lines, *(f"warning: {line}" for line in warned)]
     if getattr(config, "inference", None) is not None:
         return [f"warning: {line}" for line in entry_settings.evaluation_unapplied(config)]
@@ -1421,7 +1421,7 @@ def program_list() -> None:
 
 @program_app.command(name="show")
 def program_show(name: str, /) -> None:
-    """Show one episode program: its reference, source, distribution and docstring.
+    """Show one episode program: its reference, source, distribution, root role (when it declares one) and docstring.
 
     Parameters
     ----------
@@ -1441,6 +1441,8 @@ def program_show(name: str, /) -> None:
         f"source: {record.source}",
         f"distribution: {origin_of('program', record.ref, record.fn).label()}",
     ]
+    if record.root_role is not None:  # the role of an entry's root that names none (agents.root_role)
+        lines.append(f"root role: {record.root_role}")
     doc = inspect.getdoc(record.fn)
     if doc:
         lines += ["", doc]

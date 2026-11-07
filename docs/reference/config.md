@@ -293,14 +293,16 @@ pruned.
 In a training config: `agents`.
 
 `agents:`: which policy each agent samples, for its whole life, and which tools it may call (experimental).
-The root agent samples `policy`; an agent its harness or program opens with a role samples that role's policy,
-and `policy` when `roles` names none for it.  An agent of a role that lists `tools` (the root agent's role is
-`policy`) sees and calls only those, and so does every agent under it but a verifier, which runs under the child
-it judges and is limited by the lists of that child's spawner and its own role's (`verifier`) instead.
+A root agent of the role `policy`, whose entry and program name no other (`environments[].agents.root_role`),
+samples `policy`; every other agent, a root of another role included, samples its role's policy, and `policy`
+when `roles` names none for it.  An agent of a role that lists `tools` (a root agent's role is its entry's root
+role, `policy` without one) sees and calls only those, and so does every agent under it but a verifier, which runs
+under the child it judges and is limited by the lists of that child's spawner and its own role's (`verifier`)
+instead.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `policy` | str \| None | `null` | The root agent's policy, and that of every role roles leaves out (None: main). |
+| `policy` | str \| None | `null` | The agents' default policy: every root agent of the role policy samples it (one whose entry and program name no other role), whatever roles says, and so does every other agent whose role roles does not bind (None: main). |
 | `roles` | dict[str, [AgentRoleConfig](#agentroleconfig)] | `{}` | The policy and the tools of the agents of each role, by role (the role a harness mints a subagent with, such as `judge`). |
 
 <a id="adamparams"></a>
@@ -458,10 +460,12 @@ key merges over the entry's own key of the same name, key by key, and is checked
 
 In a training config: `environments.<i>.agents`. In an evaluation config: `environments.<i>.agents`.
 
-How function harnesses' subagents (`ctx.agents.spawn`) run in one environment.
+How one environment's agents run: the role of its root agent, and how function harnesses' subagents
+(`ctx.agents.spawn`) run.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
+| `root_role` | str \| None | `null` | The role of the entry's root agent (experimental; None: the one its program declares, else `policy`), which chooses the policy it samples, its role's in the run's `agents.roles` (else `agents.policy`), and the tools it may call. A root of the role `policy` samples `agents.policy` whatever `agents.roles` says. No root takes `verifier` or `judge`, the roles of the agents platoon opens to judge others. |
 | `max_depth` | int \| None | `null` | Deepest level of the policy tree, the root being 0 (None: unlimited). Verifiers do not count against it: the verifier of a child at `max_depth` runs one level below it and may delegate once more, so with `child_grading: verifier` the tree reaches `max_depth + 2` (`platoon.harness.budget`). |
 | `budget` | "linear" \| "depth_aware" | `"linear"` | `linear`: children draw on their parent's step budget, which reserves `max_steps + 1` per spawn; `depth_aware`: each agent has its own budget. |
 | `child_max_steps` | int | `15` | Step budget of a child whose spawn names none. |

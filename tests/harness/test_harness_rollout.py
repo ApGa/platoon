@@ -16,7 +16,7 @@ from platoon.config_defs import RolloutConfig
 from platoon.harness.rollout import HARNESS_MISC_KEY, run_harness_rollout
 from platoon.harness.runner import HarnessRunner
 from platoon.task import Task
-from platoon.train.components import EnvironmentRoute
+from platoon.train.components import AgentTreeConfig, EnvironmentRoute
 
 SERVICE = "harness_fakes:FakeService"
 
@@ -30,7 +30,12 @@ def service_root(tmp_path):
 
 
 def routed_task(
-    harness: str = "platoon-bash", task_id: str = "train-0", *, on_context_overflow: str = "grade", **service_kwargs
+    harness: str = "platoon-bash",
+    task_id: str = "train-0",
+    *,
+    on_context_overflow: str = "grade",
+    agents: dict[str, Any] | None = None,
+    **service_kwargs,
 ) -> Task:
     route = EnvironmentRoute(
         name="fake",
@@ -39,6 +44,7 @@ def routed_task(
         harness=harness,
         on_context_overflow=on_context_overflow,
         resolve_task=True,
+        agents=AgentTreeConfig.coerce(agents),
     )
     return route.attach(Task(id=task_id, max_steps=7))
 
@@ -91,6 +97,19 @@ async def test_scored_rollout_resolves_the_task_runs_the_harness_and_grades(tmp_
     assert root["misc"][HARNESS_MISC_KEY]["placement"] == "task_sandbox"
     assert root["misc"][HARNESS_MISC_KEY]["exit_code"] == 0
     assert gateway.started and gateway.stopped and session.closed and session.sandbox.stopped
+
+
+@pytest.mark.asyncio
+async def test_a_spec_s_root_agent_opens_with_its_entry_s_root_role(tmp_path):
+    named = FakeGateway(FakeChatServer([bash_call("echo 42 > answer.txt"), answer("done")]))
+    unnamed = FakeGateway(FakeChatServer([bash_call("echo 42 > answer.txt"), answer("done")]))
+
+    await run(tmp_path / "named", routed_task(agents={"root_role": "solver"}), named)
+    await run(tmp_path / "unnamed", routed_task(), unnamed)
+
+    assert [agent.role for agent in named.agents] == ["solver"]
+    assert [agent.role for agent in unnamed.agents] == ["policy"]
+    assert [outcome.reward for _, outcome in (*named.collected, *unnamed.collected)] == [1.0, 1.0]
 
 
 @pytest.mark.asyncio

@@ -1,9 +1,10 @@
 """``harness_rollout``: the ``RolloutFn`` that runs a harness against an environment session.
 
 One rollout opens the env session for the task, serves this process's policy
-gateway over HTTP, opens the root agent, runs the harness, grades, and builds the
-trajectory collection from the agent records. All of it is closed again on every
-path, including cancellation. A rollout whose outcome is not scored (an invalid
+gateway over HTTP, opens the root agent (of its entry's root role, which chooses
+the policy it samples: :func:`root_role_of`), runs the harness, grades, and builds
+the trajectory collection from the agent records. All of it is closed again on
+every path, including cancellation. A rollout whose outcome is not scored (an invalid
 or failed measurement, a harness crash or timeout) yields trajectories marked
 untrainable, which the workflow keeps out of training and out of the group
 baseline instead of training them as reward 0.
@@ -42,6 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from platoon.envs.service import Outcome, SessionNeeds, get_service, open_session, takes_needs
+from platoon.harness.agent import ROOT_ROLE
 from platoon.harness.function import FunctionHarness
 from platoon.harness.registry import get_harness
 from platoon.harness.runner import (
@@ -57,7 +59,7 @@ from platoon.harness.toolchains import PreparedToolchain, ToolchainError, is_nam
 from platoon.harness.toolchains import prepare as prepare_toolchain
 from platoon.sandbox.routes import GATEWAY
 from platoon.task import Task
-from platoon.train.components import EnvironmentRoute
+from platoon.train.components import EnvironmentRoute, entry_root_role
 
 if TYPE_CHECKING:
     from platoon.config_defs import RolloutConfig
@@ -88,8 +90,16 @@ class RolloutGateway(Protocol[AgentT]):
         """Start serving and return the base URL (``http://host:port``) harnesses use."""
         ...
 
-    def open_agent(self, *, rollout_id: str, trajectory_id: str, sampling: SamplingOverrides | None = None) -> AgentT:
-        """Open the root agent; ``sampling`` is the rollout's default sampling for the calls of its whole tree."""
+    def open_agent(
+        self,
+        *,
+        rollout_id: str,
+        trajectory_id: str,
+        sampling: SamplingOverrides | None = None,
+        role: str = ROOT_ROLE,
+    ) -> AgentT:
+        """Open the root agent, of ``role`` (its environment entry's root role, :func:`root_role_of`); ``sampling``
+        is the rollout's default sampling for the calls of its whole tree."""
         ...
 
     def serve_tools(self, agent: AgentT, session: EnvSession) -> str | None:
@@ -153,7 +163,12 @@ class EmbeddedGateway:
         await self._server.start_unix(path, rollout_id=rollout_id)
 
     def open_agent(
-        self, *, rollout_id: str, trajectory_id: str, sampling: SamplingOverrides | None = None
+        self,
+        *,
+        rollout_id: str,
+        trajectory_id: str,
+        sampling: SamplingOverrides | None = None,
+        role: str = ROOT_ROLE,
     ) -> AgentSession:
         # Record into the rollout's interaction map and timeline, which the rollout worker converts and reports.
         from platoon.train.tinker.proxy import proxy_interactions
@@ -164,6 +179,7 @@ class EmbeddedGateway:
         return self._gateway.open_agent(
             rollout_id=rollout_id,
             trajectory_id=trajectory_id,
+            role=role,
             interactions=proxy_interactions.get({}),
             timeline=current_timeline(),
             sampling_defaults=sampling,
@@ -189,6 +205,19 @@ class EmbeddedGateway:
         await self._server.stop()
         for rollout_id in self._rollout_ids:
             self._gateway.close_rollout(rollout_id)
+
+
+def root_role_of(route: EnvironmentRoute) -> str:
+    """The role a rollout of ``route`` opens its root agent with: its entry's ``agents.root_role``, else the one its
+    episode program declares (``@pt.program(root_role=...)``), else ``policy``
+    (:func:`~platoon.train.components.entry_root_role`).  The role chooses the policy the root samples, for its whole
+    life, and the tools it may call, as the run's ``agents.roles`` binds them.  A program that does not resolve
+    declares none here: the rollout fails where it runs the program, saying why, as it did before root roles."""
+
+    try:
+        return entry_root_role(route) or ROOT_ROLE
+    except Exception:  # noqa: BLE001 - the rollout reports it where it runs the program
+        return ROOT_ROLE
 
 
 def rollout_sampling(config: RolloutConfig) -> SamplingOverrides:
@@ -253,7 +282,10 @@ async def run_harness_rollout(
             serve_unix = getattr(gateway, "serve_unix")
             await serve_unix(setup.socket_path, rollout_id=rollout_id)
         root = gateway.open_agent(
-            rollout_id=rollout_id, trajectory_id=str(uuid.uuid4()), sampling=rollout_sampling(config)
+            rollout_id=rollout_id,
+            trajectory_id=str(uuid.uuid4()),
+            sampling=rollout_sampling(config),
+            role=root_role_of(route),
         )
         set_judges(root, config)
         # MCP tool plane: a spec with [mcp] enabled gets the env session's tools at the root's MCP endpoint.
@@ -306,7 +338,10 @@ async def _run_function_rollout(
         task = recorded_task(task, session)
         base_url = await gateway.start()
         root = gateway.open_agent(
-            rollout_id=rollout_id, trajectory_id=str(uuid.uuid4()), sampling=rollout_sampling(config)
+            rollout_id=rollout_id,
+            trajectory_id=str(uuid.uuid4()),
+            sampling=rollout_sampling(config),
+            role=root_role_of(route),
         )
         root.max_steps = task.max_steps if task.max_steps is not None else config.max_steps
         set_judges(root, config)

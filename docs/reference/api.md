@@ -132,7 +132,7 @@ What a function harness gets for one agent.
 | `trajectory_id` | `str` | The id of the trajectory this agent's calls are recorded on. |
 | `parent_agent_id` | `str \| None` | The parent agent's id (None for the root). |
 | `depth` | `int` | Depth in the agent tree; the root is 0. |
-| `role` | `str` | The agent's role: `policy` for the root, the `role` its spawn named for a child (default `subagent`). |
+| `role` | `str` | The agent's role: for the root, its environment entry's root role (`agents.root_role`, else its program's), `policy` without one; for a child, the `role` its spawn named (default `subagent`). |
 | `task` | `Task` | The task the agent works on. |
 | `session` | `EnvSession` | The environment session the agent acts on. A call made on it directly bypasses the agent's tool access and its role's tool allowlist; `call_tool` applies both. |
 | `instruction` | `str` | The goal the agent works on. |
@@ -423,7 +423,12 @@ An episode program decides how one task's rollout runs its agents and grades the
 ### `pt.program`
 
 ```python
-def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], EpisodeProgram]
+def program(
+    name: str,
+    *,
+    version: str = "1",
+    root_role: str | None = None,
+) -> Callable[[EpisodeProgram], EpisodeProgram]
 ```
 
 Register the decorated `async def fn(ep: EpisodeContext) -> Outcome` as episode program `name@version`.
@@ -433,6 +438,12 @@ registered): through an installed `platoon.programs` entry point named `name`, o
 `package` imports its module.  The name follows platoon's naming rule (`<owner>-<name>`, lower case;
 `platoon-*`, `single` and `gym` are core's).  Registering the same function again (a re-imported module)
 is allowed; another function under a registered `name@version` is an error.
+
+`root_role` (experimental) is the role the root agent of the program's episodes takes when its environment
+entry names none (`agents.root_role`): the role, and so the policy (`agents.roles.<role>.policy`) and the
+tools, of the agent `ep.run()` runs.  Without one the root's role is `policy`.  The config still binds each
+role to its policy: a program names a role, never a policy.  No root takes `verifier` or `judge`, the roles of
+the agents platoon opens to judge others.
 
 <a id="pt-episodecontext"></a>
 

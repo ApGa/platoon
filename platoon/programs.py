@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
 from platoon import extensions
+from platoon.utils.judges import JUDGING_ROLES
 
 if TYPE_CHECKING:
     from importlib.metadata import EntryPoint
@@ -154,15 +155,17 @@ PROGRAM_ATTRIBUTE = "__platoon_program__"
 
 @dataclass(frozen=True)
 class RegisteredProgram:
-    """An episode program as configs name it: ``name@version``, and its function.
+    """An episode program as configs name it: ``name@version``, its function, and the role of the root agent of an
+    environment entry that runs it and names no root role of its own (``root_role``; None: ``policy``).
 
     A ``module:attr`` reference to a function that ``@pt.program`` did not register resolves to a record named
-    by that reference, with no version.
+    by that reference, with no version and no root role.
     """
 
     name: str
     version: str
     fn: EpisodeProgram = field(repr=False, compare=False)
+    root_role: str | None = None
 
     @property
     def ref(self) -> str:
@@ -179,7 +182,9 @@ _lock = threading.Lock()
 _programs: dict[str, RegisteredProgram] = {}
 
 
-def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], EpisodeProgram]:
+def program(
+    name: str, *, version: str = "1", root_role: str | None = None
+) -> Callable[[EpisodeProgram], EpisodeProgram]:
     """Register the decorated ``async def fn(ep: EpisodeContext) -> Outcome`` as episode program ``name@version``.
 
     An environment config runs it with ``program: name`` (or ``name@version`` when several versions are
@@ -187,16 +192,29 @@ def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], Epis
     ``package`` imports its module.  The name follows platoon's naming rule (``<owner>-<name>``, lower case;
     ``platoon-*``, ``single`` and ``gym`` are core's).  Registering the same function again (a re-imported module)
     is allowed; another function under a registered ``name@version`` is an error.
+
+    ``root_role`` (experimental) is the role the root agent of the program's episodes takes when its environment
+    entry names none (``agents.root_role``): the role, and so the policy (``agents.roles.<role>.policy``) and the
+    tools, of the agent ``ep.run()`` runs.  Without one the root's role is ``policy``.  The config still binds each
+    role to its policy: a program names a role, never a policy.  No root takes ``verifier`` or ``judge``, the roles of
+    the agents platoon opens to judge others.
     """
 
     extensions.check_name(name, what="program")
     version = extensions.check_version(version, what=f"program {name!r}")
+    if root_role is not None and (not isinstance(root_role, str) or not root_role):
+        raise ValueError(f"@program({name!r}): root_role must be a role name, a non-empty string, got {root_role!r}")
+    if root_role in JUDGING_ROLES:
+        raise ValueError(
+            f"@program({name!r}): root_role {root_role!r} is the role of agents platoon opens to judge others, which "
+            "never train, so no root takes it: give the program's roots a role of their own"
+        )
 
     def decorate(fn: EpisodeProgram) -> EpisodeProgram:
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"@program({name!r}) needs an async function, got {fn!r}")
         extensions.check_registration("program", name, module=getattr(fn, "__module__", None))
-        record = RegisteredProgram(name=name, version=version, fn=fn)
+        record = RegisteredProgram(name=name, version=version, fn=fn, root_role=root_role)
         register_program(record)
         setattr(fn, PROGRAM_ATTRIBUTE, record)
         return fn
