@@ -90,6 +90,8 @@ class AgentGraph:
 
 `to_trajectory_collection` replaces `gateway.trace.build_trajectory_collection`: one trajectory per agent, one step per call, parent links from `spawn` edges, and the new fields in each trajectory's `misc`. Prefix merging and the workflows therefore keep working while credit learns to read roles. Env tools may report edges in result metadata (`_meta.platoon.edges`), so a GitSwarm-style env declares `informed_by` without platoon knowing git.
 
+[RFC 0023](0023-sessions-that-platoon-did-not-start.md) builds `RewardEvent` first, for sessions that platoon did not start, with an `event_id` by which an event applies once, and with `source` named `reporter`, since a source there is a kind of session.
+
 ### 2. Attribution levels
 
 | Level | Established by | Trains by default |

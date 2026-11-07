@@ -1046,7 +1046,7 @@ start experimental.
 | lending a parent's permit to its children while the parent's session is open | rolling child permits need no lending when the root's session has closed | a program with children beside an open session (RFC 0020's lending rule) |
 | children of children (depth 2) | depth 1 is what the no-deadlock argument of section 4.2 needs | a user and a new argument |
 | resumable productions | a reissued draw re-runs its production | crash losses above the triggers of the fallback (Alternatives) |
-| rollouts that platoon did not start (sessions of a product's users) | they need a journal and a resolver, not episode trees | a design of their own |
+| rollouts that platoon did not start (sessions of a product's users) | they need a journal and a resolver, not episode trees | a design of their own: [RFC 0023](0023-sessions-that-platoon-did-not-start.md) |
 
 ### 13. Relation to other RFCs
 

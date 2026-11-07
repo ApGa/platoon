@@ -33,6 +33,7 @@ For how platoon is built today, read the [architecture overview](../architecture
 | [0020](0020-rollout-permits.md) | Rollout permits that return as each rollout ends | Draft |
 | [0021](0021-trainers-credit-and-policies.md) | Trainers, credit and policies | Draft |
 | [0022](0022-programs-that-run-rollouts.md) | Programs that run rollouts, and online environment generation | Draft |
+| [0023](0023-sessions-that-platoon-did-not-start.md) | Sessions that platoon did not start | Draft |
 
 `tests/test_rfc_index.py` checks that this table lists every RFC file with the title and status the RFC itself
 gives, so add the row in the same pull request as the RFC.
