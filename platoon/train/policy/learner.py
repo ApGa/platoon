@@ -3,9 +3,10 @@ service, with its own optimizer, under its objective (:mod:`platoon.train.object
 
 A step opens one update per minibatch (:class:`PolicyUpdate`): the forward_backward calls of its microbatches, as the
 step sends each, then one optimizer step over them all, each result awaited under its deadline, and the update's
-metrics: the objective's of each microbatch, averaged, and the optimizer's.  The rl trainer's step
-(:class:`~platoon.train.step.step.TrainStep`) builds the learner of the policy it trains and opens its updates; a step
-hook updates the same policy through a learner of its own objective (:meth:`Learner.for_objective`).
+metrics: the objective's of each microbatch, averaged, and the optimizer's; an update the step opens with an observer
+(``observe``) also hands it each microbatch's result, as a step that logs its metrics by role does.  The rl trainer's
+step (:class:`~platoon.train.step.step.TrainStep`) builds the learner of the policy it trains and opens its updates; a
+step hook updates the same policy through a learner of its own objective (:meth:`Learner.for_objective`).
 
 Two of the run's rules hold here, for every update of any trainer (RFC 0021, rule 10): a step's first submission marks
 the step open (its clock's ``step_open``), and a learner that fails closed refuses an optimizer step that the service
@@ -43,6 +44,11 @@ class UpdateTimeouts(Protocol):
 
     forward_backward_timeout_seconds: float
     optim_step_timeout_seconds: float
+
+
+# What reads each result of an update's microbatches (PolicyUpdate's observe): the datums the microbatch trained, as
+# the step keeps them (its originals), and the result of their forward_backward.
+Observer = Callable[[list[tinker.Datum], tinker.ForwardBackwardOutput], None]
 
 
 class UpdateTally(Protocol):
@@ -116,10 +122,11 @@ class Learner:
         self.guard = guard
         self.named = named
 
-    def update(self) -> "PolicyUpdate":
-        """A minibatch's update of the policy, which the step sends each microbatch to and then applies."""
+    def update(self, observe: "Observer | None" = None) -> "PolicyUpdate":
+        """A minibatch's update of the policy, which the step sends each microbatch to and then applies; ``observe``,
+        when given, reads each microbatch's result with the datums it sent (:class:`PolicyUpdate`)."""
 
-        return PolicyUpdate(self)
+        return PolicyUpdate(self, observe)
 
     def for_objective(
         self, objective: Objective, *, metric_prefix: str = "", guard: Callable[[], None] | None = None
@@ -146,13 +153,16 @@ class Learner:
 
 class PolicyUpdate:
     """One minibatch's update of a learner's policy: the forward_backward calls of its microbatches, as the step sends
-    each (:meth:`submit`), then the optimizer step and every result (:meth:`apply`)."""
+    each (:meth:`submit`), then the optimizer step and every result (:meth:`apply`).  ``observe``, when given, is
+    called with each microbatch's ``originals`` and its result, after the objective's metrics; one that raises is
+    warned of, and the update goes on."""
 
     # The optimizer step's result, once it is submitted (submit_optim_step).
     optim_future: tinker.APIFuture[tinker.OptimStepResponse]
 
-    def __init__(self, learner: Learner) -> None:
+    def __init__(self, learner: Learner, observe: "Observer | None" = None) -> None:
         self.learner = learner
+        self.observe = observe
         self.futures: list[tinker.APIFuture[tinker.ForwardBackwardOutput]] = []
         # Keep original datums (with mask and logprobs) for metrics computation
         self.originals: list[list[tinker.Datum]] = []
@@ -324,6 +334,11 @@ class PolicyUpdate:
                 all_training_metrics.append(microbatch_metrics)
             except Exception as e:
                 logger.warning(f"Failed to compute training metrics for microbatch {microbatch_num}: {e}")
+            if self.observe is not None:
+                try:
+                    self.observe(original_datums, forward_backward_result)
+                except Exception as e:
+                    logger.warning(f"Failed to observe the result of microbatch {microbatch_num}: {e}")
         return all_training_metrics
 
     def _record_training_metrics(self, all_training_metrics: list[dict[str, float]]) -> None:

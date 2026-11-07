@@ -6,12 +6,12 @@ a cycle is an error.  Mappings deep-merge; anything else, lists included, replac
 
 The input paths a file names are relative to that file too (:func:`resolve_input_paths`): an environment's
 harness ``.toml`` spec, the options its service declares as naming files (``dataset_dir``, ``overlays``, a
-table's ``path``, ...) and the ``credit_options`` its core credit estimator declares so (``running``'s ``priors``),
-and the ``trainer_options`` its trainer declares so (sft's ``dataset_dir``), made absolute per file before the files
-merge.  One that names nothing there is a configuration error, which names the path relative to
-the working directory when that one exists.  Such a trainer option that no file or override sets takes its default
-relative to the config file (:func:`resolve_trainer_path_defaults`).  An override's paths are relative to the working
-directory, and so are the outputs, ``log_path`` and ``inference.output_dir``.
+table's ``path``, ...) and the ``credit_options`` its core credit estimator declares so (``running``'s ``priors``, also
+as a role's estimator under ``roles``), and the ``trainer_options`` its trainer declares so (sft's ``dataset_dir``),
+made absolute per file before the files merge.  One that names nothing there is a configuration error, which names
+the path relative to the working directory when that one exists.  Such a trainer option that no file or override sets
+takes its default relative to the config file (:func:`resolve_trainer_path_defaults`).  An override's paths are
+relative to the working directory, and so are the outputs, ``log_path`` and ``inference.output_dir``.
 The loaded config holds the input paths absolute, and a run's record (:func:`write_run_record`) the outputs too, so
 the record loads from any directory.
 
@@ -185,8 +185,8 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
     """Make the relative input paths of ``data``'s ``environments`` entries absolute against the directory ``base``,
     in place, and return the problems: a harness ``.toml`` spec path, the options each entry's service declares
     as naming files (``path_options``, :class:`platoon.envs.service.PathOption`), and those of its ``credit_options``
-    that core's estimator it names declares so
-    (:func:`~platoon.train.credit.registry.credit_path_options`); and the ``trainer_options`` that the trainer the
+    that core's estimator it names declares so, a role's under ``roles`` too
+    (:func:`~platoon.train.credit.registry.credit_path_items`); and the ``trainer_options`` that the trainer the
     file names declares as naming files (every core trainer's, in a file that names none:
     :func:`~platoon.train.trainer.registry.trainer_path_options`).
 
@@ -226,12 +226,10 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
             }
         credit_options = entry.get("credit_options")
         if isinstance(credit_options, dict):
-            from platoon.train.credit.registry import credit_path_options
+            from platoon.train.credit.registry import credit_path_items
 
-            for option in credit_path_options(entry.get("credit")):
-                if credit_options.get(option) is not None:
-                    at = f"{where}.credit_options.{option}"
-                    credit_options[option] = resolver.path(credit_options[option], at, PathOption())
+            for holder, option, at in credit_path_items(entry.get("credit"), credit_options, f"{where}.credit_options"):
+                holder[option] = resolver.path(holder[option], at, PathOption())
         options = entry.get("service_kwargs")
         service = _entry_service(entry)
         if not isinstance(options, dict) or service is None:

@@ -19,7 +19,9 @@ call that fails or runs out of time, or scores that are not one per target token
 The teacher reads the student's token ids, so it must share the student's tokenizer (cross-tokenizer distillation is
 not built): loading refuses one that does not, comparing the two models' tokenizers by model name, and the estimator,
 as the run builds it, compares the tokenizers the run loaded for the two policies, so that a teacher whose tokenizer
-could not be loaded when the config loaded is still refused.
+could not be loaded when the config loaded is still refused.  The scoring (:func:`reverse_kl_terms`) and the checks of
+the frozen policy (:func:`frozen_scorer_problem`, :func:`loaded_tokenizer_differs`) serve ``credit: roles`` too, whose
+per-role ``kl`` adds the same term to one role's rows.
 """
 
 import logging
@@ -32,7 +34,9 @@ from platoon.train.credit.api import (
     CreditEstimatorBase,
     CreditGroup,
     CreditSetup,
+    PolicyView,
     ScoringFailed,
+    TrainingSample,
 )
 from platoon.train.credit.group import group_baselines
 from platoon.train.policy.spec import MAIN, trained_policies
@@ -78,9 +82,7 @@ class ReverseKL(CreditEstimatorBase):
 
         super().__init__(setup, options)
         teacher = self.options.teacher
-        student_view, teacher_view = setup.policy_views.get(MAIN), setup.policy_views.get(teacher)
-        student, scorer = (getattr(view, "tokenizer", None) for view in (student_view, teacher_view))
-        if student is not None and scorer is not None and not same_tokenizer(student, scorer):
+        if loaded_tokenizer_differs(setup, teacher):
             raise ConfigError(
                 f"{setup.entry}: credit_options.teacher: policies.{teacher}'s tokenizer, as the run loaded it, differs "
                 "from the student's, so it cannot score the student's token ids (cross-tokenizer distillation is not "
@@ -91,35 +93,20 @@ class ReverseKL(CreditEstimatorBase):
     def check(options: ReverseKLOptions, ctx: CreditCheckContext) -> None:
         """The teacher is a frozen policy the config declares, not the student (``main``, the policy the run
         trains), and has the student's tokenizer (:func:`tokenizer_problem`), and each other trained policy's, whose
-        rows it scores too."""
+        rows it scores too (:func:`frozen_scorer_problem`)."""
 
-        if options.teacher == MAIN:
-            raise ValueError("teacher: main is the student, the policy the run trains; name a frozen policy")
-        declared = getattr(ctx.config, "policies", None) or {}
-        if options.teacher not in declared:
-            known = ", ".join(sorted(declared)) or "none"
-            raise ValueError(f"teacher: {options.teacher!r} is not a policy of policies: (declared: {known})")
-        teacher = declared[options.teacher]
-        if getattr(teacher, "trainable", True):
-            raise ValueError(f"teacher: policies.{options.teacher} trains; a teacher is frozen (trainable: false)")
-        if problem := tokenizer_problem(ctx.config.train.model_name, teacher.model_name):
-            raise ValueError(f"teacher: policies.{options.teacher}'s {problem}")
-        for student in trained_policies(ctx.config)[1:]:  # the run's other students: it scores their rows too
-            if problem := tokenizer_problem(declared[student].model_name, teacher.model_name):
-                raise ValueError(f"teacher: policies.{options.teacher}'s {problem} (policies.{student}, trained too)")
+        if (problem := frozen_scorer_problem(options.teacher, ctx.config)) is not None:
+            raise ValueError(f"teacher: {problem}")
 
     async def assign(self, group: CreditGroup) -> None:
         samples = group.samples()
         if not samples:
             return
         teacher = self.setup.policy_views[self.options.teacher]
-        scores = await teacher.score([sample.datum for sample in samples])  # ScoringFailed fails the group
-        sampled = [sample.datum.loss_fn_inputs["logprobs"].to_torch() for sample in samples]
-        _check_aligned(teacher.id, scores, sampled)
+        terms = await reverse_kl_terms(teacher, samples)  # ScoringFailed fails the group
         baselines = self._baselines(group)
         kl_sum, kl_tokens = 0.0, 0
-        for sample, teacher_logprobs, student_logprobs in zip(samples, scores, sampled, strict=True):
-            reverse_kl = student_logprobs - teacher_logprobs
+        for sample, reverse_kl in zip(samples, terms, strict=True):
             advantages = -self.options.kl_coef * reverse_kl
             if self.options.reward_coef:
                 advantages = advantages + self.options.reward_coef * (sample.advantages - baselines[sample.member])
@@ -141,6 +128,51 @@ class ReverseKL(CreditEstimatorBase):
             leave_one_out=group.settings.leave_one_out_baseline,
         )
         return {member.index: baseline for member, baseline in zip(members, baselines, strict=True)}
+
+
+async def reverse_kl_terms(view: PolicyView, samples: Sequence[TrainingSample]) -> list[Any]:
+    """The reverse KL between the policy that sampled each of ``samples`` and the frozen policy ``view``, at each of the
+    row's target tokens: its sampled logprob less ``view``'s score of the token (:meth:`PolicyView.score`), one per
+    target token, as a tensor.  :class:`~platoon.train.credit.api.ScoringFailed` when the scoring fails or gives scores
+    that are not one per target token of each row, which fails the group, before anything is returned.  ``reverse_kl``
+    credits with it, and ``roles`` adds it to a role's rows (its ``kl``)."""
+
+    scores = await view.score([sample.datum for sample in samples])
+    sampled = [sample.datum.loss_fn_inputs["logprobs"].to_torch() for sample in samples]
+    _check_aligned(view.id, scores, sampled)
+    return [student - scored for scored, student in zip(scores, sampled, strict=True)]
+
+
+def frozen_scorer_problem(policy: str, config: Any, *, what: str = "a teacher") -> str | None:
+    """Why ``policy`` cannot score the rows of a run of ``config`` as a frozen policy (``what`` it is, for the message),
+    or None when it can: it is a policy the config declares under ``policies:``, not the student (``main``, the policy
+    the run trains), frozen (``trainable: false``), and of the student's tokenizer (:func:`tokenizer_problem`) and each
+    other trained policy's, whose rows it scores too."""
+
+    if policy == MAIN:
+        return "main is the student, the policy the run trains; name a frozen policy"
+    declared = getattr(config, "policies", None) or {}
+    if policy not in declared:
+        known = ", ".join(sorted(declared)) or "none"
+        return f"{policy!r} is not a policy of policies: (declared: {known})"
+    scorer = declared[policy]
+    if getattr(scorer, "trainable", True):
+        return f"policies.{policy} trains; {what} is frozen (trainable: false)"
+    if problem := tokenizer_problem(config.train.model_name, scorer.model_name):
+        return f"policies.{policy}'s {problem}"
+    for student in trained_policies(config)[1:]:  # the run's other students: it scores their rows too
+        if problem := tokenizer_problem(declared[student].model_name, scorer.model_name):
+            return f"policies.{policy}'s {problem} (policies.{student}, trained too)"
+    return None
+
+
+def loaded_tokenizer_differs(setup: CreditSetup, policy: str) -> bool:
+    """Whether the tokenizer the run loaded for the frozen policy ``policy`` differs from the student's, as the setup's
+    views hold them (:func:`same_tokenizer`); False when it holds either none (a test's setup)."""
+
+    student_view, scorer_view = setup.policy_views.get(MAIN), setup.policy_views.get(policy)
+    student, scorer = (getattr(view, "tokenizer", None) for view in (student_view, scorer_view))
+    return student is not None and scorer is not None and not same_tokenizer(student, scorer)
 
 
 def _check_aligned(teacher: str, scores: Sequence[Any], sampled: Sequence[Any]) -> None:

@@ -273,6 +273,36 @@ def test_training_metrics_that_fail_are_logged_and_the_update_goes_on(monkeypatc
     assert tally.optimizer_steps == 1 and recorded == {"optim/grad_norm": 2.0}
 
 
+def test_an_update_s_observer_reads_each_microbatch_s_result_after_its_metrics_and_one_that_fails_is_warned_of(
+    monkeypatch, caplog
+):
+    events: list[Any] = []
+    learner = _learner(monkeypatch, events, {})
+    observed: list[Any] = []
+
+    def observe(originals: Any, result: Any) -> None:
+        events.append(("observe",))
+        observed.append((originals, result.loss_fn_outputs))
+        if originals == ["original 1"]:
+            raise ValueError("a bug in the observer")
+
+    async def run() -> None:
+        update = learner.update(observe)
+        for microbatch in (0, 1):
+            await update.submit([f"sent {microbatch}"], [f"original {microbatch}"], minibatch=0, microbatch=microbatch)
+        await update.apply(SimpleNamespace(optimizer_steps=0))
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(run())
+
+    assert observed == [(["original 0"], "result of sent 0"), (["original 1"], "result of sent 1")]
+    after = [event[0] for event in events if event[0] in ("metrics", "observe")]
+    assert after == ["metrics", "observe", "metrics", "observe"]  # each result's metrics first
+    assert "Failed to observe the result of microbatch 1: a bug in the observer" in caplog.text
+    assert learner.policy.optimizer_steps == 4  # the update went on
+    assert learner.update().observe is None
+
+
 def test_the_policy_gradient_objective_leaves_out_the_trainer_s_loss_inputs_and_computes_its_metrics(monkeypatch):
     computed: list[dict[str, Any]] = []
     monkeypatch.setattr(policy_gradient, "compute_training_metrics", lambda **inputs: computed.append(inputs) or {})

@@ -546,6 +546,32 @@ def test_options_schemas_parse_as_dataclasses_pydantic_models_and_parsers():
     ]
 
 
+@dataclass(frozen=True)
+class _Nested:
+    """Options whose check names a path below one of its fields, as a composite's options do (``credit: roles``)."""
+
+    limits: dict[str, int]
+
+    def __post_init__(self) -> None:
+        problems = [f"limits.{name}: must be at least 1, got {most}" for name, most in self.limits.items() if most < 1]
+        if problems:
+            raise ConfigError(problems)
+        if "all" in self.limits:
+            raise ValueError("limits of all tasks: name each task")
+
+
+def test_a_dataclass_s_problem_that_begins_with_a_path_below_one_of_its_fields_goes_under_that_path():
+    from platoon.options import schema_options
+
+    options = schema_options(_Nested, name="acme")
+    assert options.option_problems({"limits": {"a": 0, "b": 2, "c": -1}}, "opts") == [
+        "opts.limits.a: must be at least 1, got 0",
+        "opts.limits.c: must be at least 1, got -1",
+    ]
+    # A message that begins with words, not a path, stays under the options.
+    assert options.option_problems({"limits": {"all": 2}}, "opts") == ["opts: limits of all tasks: name each task"]
+
+
 # --- the plan's lines, the repeated-ids warning, the fingerprint ---------------------------------------------
 
 

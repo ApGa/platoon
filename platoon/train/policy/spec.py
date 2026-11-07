@@ -449,17 +449,17 @@ def workflow_problems(config: Any, workflow_cls: Any, reference: str) -> list[st
 
 def policy_warnings(config: Any) -> list[str]:
     """What loading warns of the config's ``policies:`` and ``agents:``, one line each: a frozen policy that no agent
-    samples and no entry's ``credit_options`` names (a teacher's), which the run opens and never uses; a policy
-    bound to the role ``policy``, the root agent's, which the root never samples (it samples ``agents.policy``); a
-    role that looks like a misspelling of one of :data:`PLATOON_ROLES` (:func:`_role_typos`); a role's tool pattern
-    that matches no tool of the run's environments, when each declares its tools up front (:func:`_tool_warnings`);
-    and, stepping independently, a trained policy that saves no full checkpoint before the run's end
-    (:func:`_unsaved_policies`)."""
+    samples and no entry's ``credit_options`` names at any depth (a teacher's, or the policy of a role's KL term under
+    ``credit: roles``), which the run opens and never uses; a policy bound to the role ``policy``, the root agent's,
+    which the root never samples (it samples ``agents.policy``); a role that looks like a misspelling of one of
+    :data:`PLATOON_ROLES` (:func:`_role_typos`); a role's tool pattern that matches no tool of the run's environments,
+    when each declares its tools up front (:func:`_tool_warnings`); and, stepping independently, a trained policy that
+    saves no full checkpoint before the run's end (:func:`_unsaved_policies`)."""
 
     agents = agent_bindings(config)
     used = set(agents.sampled())
     for environment in getattr(config, "environments", None) or ():
-        used |= {value for value in (environment.credit_options or {}).values() if isinstance(value, str)}
+        used |= set(_named_texts(environment.credit_options or {}))
     lines = [
         f"policies.{policy}: no agent samples it (agents.roles) and no entry's credit_options names it, so the run "
         "opens it and never uses it"
@@ -473,6 +473,19 @@ def policy_warnings(config: Any) -> list[str]:
             "samples this policy"
         )
     return [*lines, *_role_typos(config), *_tool_warnings(config), *_unsaved_policies(config)]
+
+
+def _named_texts(value: Any) -> list[str]:
+    """Every string ``value`` holds, in its mappings and lists at any depth: the names an entry's ``credit_options``
+    may give a policy by (``teacher``, ``by_role.<role>.kl.to``)."""
+
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [text for item in value.values() for text in _named_texts(item)]
+    if isinstance(value, list | tuple):
+        return [text for item in value for text in _named_texts(item)]
+    return []
 
 
 def _role_typos(config: Any) -> list[str]:

@@ -160,6 +160,15 @@ class PolicyGroupOutput:
             rows.setdefault(sample.policy, []).append(sample.datum)
         return rows
 
+    def row_roles(self) -> Mapping[str, Sequence[str | None]]:
+        """The role of the agent of each of its rows, by the policy each trains, in the order of :meth:`rows`: what a
+        step reads to log its metrics by role (:mod:`platoon.train.step.roles`)."""
+
+        roles: dict[str, list[str | None]] = {}
+        for sample in self.samples:
+            roles.setdefault(sample.policy, []).append(sample.role)
+        return roles
+
     def __len__(self) -> int:
         """Its rows, of every policy."""
 

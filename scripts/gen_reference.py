@@ -715,12 +715,20 @@ CREDIT_ESTIMATOR_TEXT: dict[str, str] = {
     "for groups of one rollout: `clip((reward - baseline) / scale)`, the baseline its stratum's decayed mean (the "
     "task's values of the `strata` columns) shrunk toward its parent stratum's, the scale a decayed root mean square, "
     "both read as they were at the version the agent sampled at, and a negative reward never above 0. Reads agents.",
+    "roles": "Each role of an entry's agent trees credited by an estimator of its own, `by_role.<role>.credit` with "
+    "its options, on a view of the group's agents of that role; a role it does not name trains nothing. Per role, an "
+    "optional reverse KL term to a frozen policy, scored as `reverse_kl` scores, and an optional share of the "
+    "advantage mass, held by a positive weight from decayed masses that move as groups settle. Reads agents; a run "
+    "with an entry under it logs its steps' metrics by role.",
 }
 # The sections of the option classes an estimator's options hold, below its own: what each is.
 NESTED_OPTION_TEXT: dict[str, str] = {
     "RunningPriors": "the keys of `credit_options.priors` under `credit: running`, or of the YAML or JSON file it "
     "names: where the statistics start, each prior as `weight` samples, which decay as samples do.",
     "StratumPrior": "each item of `priors.strata`: one stratum's prior mean reward.",
+    "RoleCredit": "each value of `credit_options.by_role` under `credit: roles`: how one role's agents are credited.",
+    "RoleKL": "`by_role.<role>.kl` under `credit: roles`: a reverse KL term on the role's rows, "
+    "`-coef * (logprob - to's logprob)` on each action token.",
 }
 
 
@@ -728,6 +736,7 @@ def _credit_estimators(links: Mapping[type, str]) -> list[str]:
     from platoon.train.credit.keyed import KeyedOptions
     from platoon.train.credit.registry import BUILTIN_CREDIT_ESTIMATORS
     from platoon.train.credit.reverse_kl import ReverseKLOptions
+    from platoon.train.credit.roles import RoleCredit, RoleKL, RolesOptions
     from platoon.train.credit.running import RunningOptions, RunningPriors, StratumPrior
 
     # Each estimator's options class, then the option classes they hold, each with a section of its own.
@@ -735,6 +744,7 @@ def _credit_estimators(links: Mapping[type, str]) -> list[str]:
         "keyed": (KeyedOptions,),
         "reverse_kl": (ReverseKLOptions,),
         "running": (RunningOptions, RunningPriors, StratumPrior),
+        "roles": (RolesOptions, RoleCredit, RoleKL),
     }
     lines = [
         "",

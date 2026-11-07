@@ -1,9 +1,9 @@
 """A group's datums as a step trains them, by their loss inputs.
 
 - The first stage of a step: the rows of a group's output that the step trains, by trained policy
-  (:func:`policy_rows`; the run's one policy's, :func:`trained_rows`), and the copies it collects, whose loss inputs
-  its batch transforms set in place (:func:`_step_datums`), without those the per-datum stale filter masked
-  (:func:`_kept_datums`).
+  (:func:`policy_rows`; the run's one policy's, :func:`trained_rows`) with the roles of their agents when the output
+  is tagged (:func:`policy_row_roles`), and the copies it collects, whose loss inputs its batch transforms set in place
+  (:func:`_step_datums`), without those the per-datum stale filter masked (:func:`_kept_datums`).
 - The second stage: the scale of a microbatch's advantages by the action tokens its datums represent, as the step
   prepares it to send (:func:`advantage_scale`, :func:`scale_advantages`).
 """
@@ -39,6 +39,19 @@ def policy_rows(output: Any, trained: Sequence[PolicyId]) -> dict[PolicyId, Sequ
             ", ".join(trained),
         )
     return {policy: by_policy.get(policy, ()) for policy in trained}
+
+
+def policy_row_roles(output: Any, trained: Sequence[PolicyId]) -> dict[PolicyId, list[str | None]] | None:
+    """The role of the agent of each of a group's rows that the step trains, by trained policy, in the order of
+    :func:`policy_rows`'s: a tagged output's (its ``row_roles()``, as a ``PolicyGroupOutput`` gives them, and a policy's
+    share of one when the policies step independently); None for an output whose rows carry no tags, such as a list of
+    datums."""
+
+    row_roles = getattr(output, "row_roles", None)
+    if not callable(row_roles):
+        return None
+    by_policy = row_roles()
+    return {policy: list(by_policy.get(policy, ())) for policy in trained}
 
 
 def trained_rows(output: Any) -> Sequence[tinker.Datum]:

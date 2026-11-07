@@ -127,13 +127,13 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`CreditEstimatorBase`](#platoon-experimental-creditestimatorbase) | An optional base class of credit estimators: the protocol's shape, typed options and a load-time check. |
 | [`CreditSetup`](#platoon-experimental-creditsetup) | What an estimator is built with, once per start of the process and environment entry: `Class(setup, options)`. |
 | [`CreditCheckContext`](#platoon-experimental-creditcheckcontext) | What an estimator's load-time `check` sees, beside its options. |
-| [`CreditGroup`](#platoon-experimental-creditgroup) | One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's order, the run's policies (`policies`, each as an estimator may read it), each policy's version when `assign` began (`versions`; it does not move during the call, although the policies may publish meanwhile), where the group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker; an estimator's metrics belong under `credit/`), and the task's own columns (`columns`). |
+| [`CreditGroup`](#platoon-experimental-creditgroup) | One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's order, the run's policies (`policies`, each as an estimator may read it), each policy's version when `assign` began (`versions`; it does not move during the call, although the policies may publish meanwhile), where the group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker; an estimator's metrics belong under `credit/`), and the task's own columns (`columns`). `only` views it over the agents of some roles alone, as `credit: roles` hands each role's estimator its part of the group. |
 | [`MemberRollout`](#platoon-experimental-memberrollout) | One member of the group that returned a result: its place among them (`index`), every row of its rollout (`samples`), its agents (filled when the estimator asked for them, else empty), its root's processed reward and whether that is a completed root's scored outcome (`task_reward_valid`: an interrupted root's is not, and enters no baseline), and what the converter returned (`result`), to read: its trajectories' statistics and its root's reward components. Its `datums` are the member's rows; an estimator sets their advantages through `samples`. |
 | [`AgentRun`](#platoon-experimental-agentrun) | One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role (`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it samples, its depth in the tree, its reward and its rows. `reward` is its trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never trains an unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent did not use, whose reward still counts. |
 | [`TrainingSample`](#platoon-experimental-trainingsample) | One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of the group whose rollout it is (its place among the members that returned a result), when the estimator asked for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree, and the version of its policy that sampled it (`version`). It lives in the trainer process only: what reaches the training service is the datum. |
 | [`PolicyView`](#platoon-experimental-policyview) | What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into text, its version now, and its scores of other rows (`score`), for a policy that scores: a frozen teacher. |
 | [`ScoringFailed`](#platoon-experimental-scoringfailed) | A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token. An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under `credit/failures`) and trains nothing, and the run goes on. |
-| [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, `reverse_kl`, `running`, and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
+| [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, `reverse_kl`, `running`, `roles`, and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
 | [`ShareLedger`](#platoon-experimental-shareledger) | The shares of a run's groups, as a trainer of its own whose policies step independently takes them (`run.rollouts().ledger`; `TrainerNeeds.stepping`): each step of policy `p` takes `p`'s shares (`take`), trains them (a trainer that drops stale ones judges each at `judge_version`), records them consumed under the commit lock (`async with ledger.lock:` `consumed`), then ends with `await run.end_step(policy=p)` on `p`'s own clock (`run.clocks[p]`). The run keeps the rest: which shares a checkpoint holds, which a resume puts back, and when a group retires. |
 
 ## Task samplers
@@ -2077,7 +2077,8 @@ order, the run's policies (`policies`, each as an estimator may read it), each p
 began (`versions`; it does not move during the call, although the policies may publish meanwhile), where the
 group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the
 group records, outside one the stats tracker; an estimator's metrics belong under `credit/`), and the task's own
-columns (`columns`).
+columns (`columns`).  `only` views it over the agents of some roles alone, as `credit: roles` hands each
+role's estimator its part of the group.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -2106,6 +2107,19 @@ def agents() -> list[AgentRun]
 ```
 
 Every agent of the group, member by member (none when the estimator did not ask for them).
+
+#### `CreditGroup.only`
+
+```python
+def only(*, roles: Collection[str]) -> CreditGroup
+```
+
+A view of the group over the agents of `roles` alone, and their rows: the same task, settings, policies,
+versions, statistics and columns, and every member, in its order and with its index, its root's reward and
+its result, holding only its agents of those roles and the rows tagged with them.  The view's rows are the
+group's own, not copies: an advantage set on one is set on the group's row.  Without tags (an estimator that
+does not read agents) a view holds no row.  A `TypeError` for a single string, which is no collection of
+roles.
 
 <a id="platoon-experimental-memberrollout"></a>
 
@@ -2262,8 +2276,8 @@ def credit_estimator(
 
 Register a credit estimator class under `name`, from a module that an environment entry's `package` names,
 so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its
-load-time check.  Core's names (`group`, `keyed`, `reverse_kl`, `running`, and `gae`, which platoon adds)
-are reserved, whatever their case and their `-` or `_`; a name registered twice is an error.
+load-time check.  Core's names (`group`, `keyed`, `reverse_kl`, `running`, `roles`, and `gae`, which
+platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error.
 
 ## Independent stepping
 

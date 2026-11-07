@@ -1,7 +1,8 @@
-"""The credit API (RFC 0021, section 6): a row's advantages set on its action tokens only, the ``credit`` component
-kind (core's names, reserved names, registered names, ``module:Class``, and what is no estimator), and what the run
-calls of the estimators: their settle as a group is filed, their state as a checkpoint takes it and a resume gives it
-back, and the error that stops the run when one of them raises."""
+"""The credit API (RFC 0021, section 6): a row's advantages set on its action tokens only, a group's view over some
+roles' agents, the ``credit`` component kind (core's names, reserved names, registered names, ``module:Class``, and what
+is no estimator), what a config's loading reads of core's estimators without importing them, and what the run calls of
+the estimators: their settle as a group is filed, their state as a checkpoint takes it and a resume gives it back, and
+the error that stops the run when one of them raises."""
 
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ from platoon import registry as registry_module
 from platoon.extensions import ExtensionError
 from platoon.registry import import_from_string
 from platoon.train.config_defs import WorkflowConfig
-from platoon.train.credit.api import CreditEstimatorBase, CreditGroup, TrainingSample
+from platoon.train.credit.api import AgentRun, CreditEstimatorBase, CreditGroup, MemberRollout, TrainingSample
 from platoon.train.credit.group import GroupCredit
 from platoon.train.credit.keyed import Keyed
 from platoon.train.credit.registry import (
@@ -28,6 +29,7 @@ from platoon.train.credit.registry import (
     CORE_SINGLE_MEMBER_CREDIT,
     REGISTRY_KIND,
     credit_estimator,
+    credit_path_items,
     credit_path_options,
     estimator_problem,
     resolve_credit_estimator,
@@ -92,6 +94,47 @@ def test_set_advantages_takes_one_value_per_target_token_and_sets_the_action_tok
         sample.set_advantages([1.0, 2.0, 3.0])
 
 
+def _member(index: int, *agents: AgentRun) -> MemberRollout:
+    samples = []
+    for agent in agents:
+        agent.samples = [_sample([0.0, 1.0], [0.0, agent.reward or 0.0])]
+        for sample in agent.samples:
+            sample.member, sample.role, sample.agent_id = index, agent.role, agent.agent_id
+        samples += agent.samples
+    return MemberRollout(index, samples, list(agents), 0.5, True, cast(Any, SimpleNamespace(datums=[])))
+
+
+def test_a_view_of_some_roles_holds_each_member_with_their_agents_and_the_group_s_own_rows():
+    stats = DeferredStats()
+    roles = ("generator", "solver", "solver", "judge")
+    members = [
+        _member(
+            index, *(AgentRun(f"{role}-{index}-{n}", f"t{n}", None, role, MAIN, n, 1.0) for n, role in enumerate(roles))
+        )
+        for index in range(2)
+    ]
+    group = CreditGroup("task", "label", "envgen", WorkflowConfig(), members, {}, {MAIN: 3}, stats, {"kind": "masked"})
+    view = group.only(roles=["solver", "judge"])
+
+    assert [member.index for member in view.members] == [0, 1]
+    assert [agent.role for agent in view.agents()] == ["solver", "solver", "judge"] * 2
+    assert [sample.role for sample in view.samples()] == ["solver", "solver", "judge"] * 2
+    assert (view.task_id, view.label, view.entry, view.versions, view.columns) == (
+        "task",
+        "label",
+        "envgen",
+        {MAIN: 3},
+        {"kind": "masked"},
+    )
+    assert view.stats is stats and view.members[0].task_reward == 0.5 and view.members[0].result is members[0].result
+    view.samples()[0].set_advantage(-2.0)  # the view's rows are the group's
+    assert group.members[0].samples[1].advantages.tolist() == [0.0, -2.0]
+    assert [len(member.samples) for member in group.members] == [4, 4]  # the group keeps every row
+    assert group.only(roles=["critic"]).samples() == [] and len(group.only(roles=[]).members) == 2
+    with pytest.raises(TypeError, match=r"roles: a collection of agent roles, such as \['solver'\], got 'solver'"):
+        group.only(roles="solver")
+
+
 # --- the component kind ----------------------------------------------------------------------------------------------
 
 
@@ -100,10 +143,13 @@ def test_core_names_resolve_to_core_s_estimators():
     assert resolve_credit_estimator("keyed") is Keyed
     assert resolve_credit_estimator("reverse_kl").__name__ == "ReverseKL"
     assert resolve_credit_estimator("running").__name__ == "Running"
+    assert resolve_credit_estimator("roles").__name__ == "Roles"
     assert GroupCredit.needs_agents is False and Keyed.needs_agents is True
 
 
-@pytest.mark.parametrize(("name", "single"), [("running", True), ("group", False), ("keyed", False), ("", False)])
+@pytest.mark.parametrize(
+    ("name", "single"), [("running", True), ("roles", True), ("group", False), ("keyed", False), ("", False)]
+)
 def test_whether_an_estimator_credits_groups_of_one_is_its_class_s_flag(name, single, registry):
     assert credits_single_members(name) is single
     assert CreditEstimatorBase.credits_single_members is False
@@ -129,23 +175,26 @@ def test_the_registry_s_tables_say_what_core_s_estimators_say_of_themselves():
 _LOADING_IMPORTS_NO_ESTIMATOR = """
 import sys
 
-from platoon.train.credit.registry import credit_path_options
+from platoon.train.credit.registry import credit_path_items, credit_path_options
 from platoon.train.credit.runtime import credits_single_members
 
 answers = [credit_path_options(name) for name in ("running", "keyed")]
-answers += [credits_single_members(name) for name in ("running", "keyed", "group", "reverse_kl")]
+answers += [credits_single_members(name) for name in ("running", "keyed", "group", "reverse_kl", "roles")]
+by_role = {"by_role": {"generator": {"credit": "running", "options": {"priors": "p.yaml"}}}}
+answers += [[at for _, _, at in credit_path_items("roles", by_role, "x")]]
 loaded = sorted(name for name in sys.modules if name.split(".")[0] in {"tinker", "torch"} or name.startswith(
     ("platoon.train.credit.group", "platoon.train.credit.keyed", "platoon.train.credit.running",
-     "platoon.train.credit.reverse_kl")
+     "platoon.train.credit.reverse_kl", "platoon.train.credit.roles")
 ))
 print(answers, loaded)
-sys.exit(0 if answers == [("priors",), (), True, False, False, False] and not loaded else 1)
+expected = [("priors",), (), True, False, False, False, True, ["x.by_role.generator.options.priors"]]
+sys.exit(0 if answers == expected and not loaded else 1)
 """
 
 
 def test_reading_core_s_answers_imports_no_estimator():
-    """What a config's loading asks of core's estimators (their path options, their flag) imports none of them, nor
-    Tinker or torch, which they import."""
+    """What a config's loading asks of core's estimators (their path options, a role's under ``roles`` too, and their
+    flag) imports none of them, nor Tinker or torch, which they import."""
 
     completed = subprocess.run(
         [sys.executable, "-c", _LOADING_IMPORTS_NO_ESTIMATOR], capture_output=True, text=True, timeout=600
@@ -153,8 +202,26 @@ def test_reading_core_s_answers_imports_no_estimator():
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
-@pytest.mark.parametrize("name", ["running", "Running"])
-def test_running_is_core_s_name(name, registry):
+def test_the_files_options_name_are_found_in_each_role_s_options_under_roles_and_nowhere_else():
+    options = {
+        "priors": "top.yaml",  # roles takes no priors of its own: not a path of its
+        "by_role": {
+            "generator": {"credit": "running", "options": {"priors": "generator.yaml"}},
+            "unset": {"credit": "running", "options": {"priors": None}},
+            "solver": {"credit": "keyed", "options": {"priors": "not-a-path.yaml"}},
+            "acme": {"credit": "acme.credit:Mine", "options": {"priors": "theirs.yaml"}},
+            "broken": "running",
+        },
+    }
+    [(holder, key, at)] = credit_path_items("roles", options, "environments.0.credit_options")
+    assert holder is options["by_role"]["generator"]["options"] and key == "priors"
+    assert at == "environments.0.credit_options.by_role.generator.options.priors"
+    assert [at for _, _, at in credit_path_items("running", {"priors": "p.yaml"}, "c")] == ["c.priors"]
+    assert credit_path_items("keyed", options, "c") == [] == credit_path_items("roles", None, "c")
+
+
+@pytest.mark.parametrize("name", ["running", "Running", "roles", "ROLES"])
+def test_running_and_roles_are_core_s_names(name, registry):
     with pytest.raises(ValueError, match="is core's"):
         credit_estimator(name)
 

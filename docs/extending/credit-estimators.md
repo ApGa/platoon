@@ -3,8 +3,9 @@
 A credit estimator decides how a training group's rewards become the advantages its rows train with. Platoon's own are
 `group` (the workflow's own credit: each rollout centered on the group's completed-root baseline), `keyed` (each
 agent centered on the group's agents of its key: task, policy, role, depth), `reverse_kl` (on-policy distillation:
-each token's negative reverse KL against a frozen teacher's score of it) and `running` (each agent centered on running
-statistics of the groups that settled before it sampled, for groups of one rollout); this page shows how to write your
+each token's negative reverse KL against a frozen teacher's score of it), `running` (each agent centered on running
+statistics of the groups that settled before it sampled, for groups of one rollout) and `roles` (each agent role
+credited by an estimator of its own, with a share of the advantage mass per role); this page shows how to write your
 own, register it and test it. What choosing one does to a run is in
 [Credit each environment's groups](../how-to/train-and-eval.md#credit-each-environments-groups-experimental).
 
@@ -40,7 +41,11 @@ trainer process, after every member has settled. `group` is a `CreditGroup`:
 - `columns`: the task's own columns, by name, each as text as a label reads it: the columns of its dataset row (a
   Harbor task's index fields, a dataset loader's columns) but platoon's own (`task_id`, `_platoon*`), and none whose
   value is empty or not a scalar. An estimator that keeps statistics by kind of task, as `running` does by its
-  `strata`, reads them here.
+  `strata`, reads them here;
+- `only(roles=[...])`: a view of the group over the agents of those roles alone and their rows (the very rows, so
+  that an advantage set on the view is set on the group's), every member kept in its order with its index and its
+  root's reward. `roles` hands each role's estimator its view; an estimator of your own that credits some roles one
+  way and the others another may do the same.
 
 A row is a `TrainingSample`: its `datum`, the `policy` that sampled it, its `member`, the `version` of its policy it
 was sampled at (the oldest its own model calls sampled, whatever `train.stale_filter` is, or its rollout's when one of
@@ -128,9 +133,11 @@ a package registers, or that names one as `module:Class`.
 
 Register an estimator under a short name with `@credit_estimator(name, options=..., check=...)` in a module an entry's
 `package` names, so that it is imported before the estimators resolve; or name it in the config as `module:Class`,
-with no registration at all. Core's names (`group`, `keyed`, `reverse_kl`, `running`, and `gae`, which platoon adds
-later) are reserved, whatever their case: registering one is an error, whatever was imported first, and so is
-registering a name twice. An unknown name is refused before the run starts, with the nearest name.
+with no registration at all. Core's names (`group`, `keyed`, `reverse_kl`, `running`, `roles`, and `gae`, which
+platoon adds later) are reserved, whatever their case: registering one is an error, whatever was imported first, and
+so is registering a name twice. An unknown name is refused before the run starts, with the nearest name. An estimator
+of yours may also credit a role of an entry's trees under `credit: roles` (`by_role.<role>.credit`), where it sees
+the group's agents of that role alone, and its metrics go under `credit/roles/<role>/`.
 
 ## Test it
 
