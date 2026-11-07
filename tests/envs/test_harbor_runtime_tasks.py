@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 import platoon.sandbox
-from platoon.envs.harbor import HarborEnvironmentService, runtime
+from platoon.envs.harbor import HarborEnvironmentService, launcher, runtime
 from platoon.envs.harbor.runtime import (
     ForbiddenLiterals,
     MaterializedTask,
@@ -32,6 +32,7 @@ from platoon.envs.harbor.runtime import (
     task_digest,
 )
 from platoon.envs.harbor.task import HarborTask
+from platoon.envs.harbor.verifier import VerifierFile
 from platoon.envs.service import EnvSetupError
 from platoon.sandbox import ExecResult, SandboxSpec
 from platoon.sandbox.process import ProcessProvider, ProcessSandbox
@@ -475,6 +476,36 @@ async def test_a_source_that_is_not_a_directory_is_refused(tmp_path, rootful, st
 
     assert (await service.materialize(tmp_path / "file")).problems == (f"{tmp_path / 'file'} is not a directory",)
     assert "cannot be read" in (await service.materialize(tmp_path / "nothing")).problems[0]
+
+
+@pytest.mark.parametrize(
+    "deep",
+    ["[" * (launcher.MAX_JSON_DEPTH + 1) + "]" * (launcher.MAX_JSON_DEPTH + 1), "[" * 60_000],
+    ids=["parsable", "beyond-some-parsers"],
+)
+def test_platoon_reads_a_runtime_tasks_json_no_deeper_than_its_launcher_does(tmp_path, deep):
+    """The grader manifest, the launcher's settings and its report nested deeper than the launcher reads
+    (``launcher.MAX_JSON_DEPTH``) are refused before they are parsed, the same way on every Python, whether its parser
+    would take them or give up (a ``RecursionError``)."""
+
+    manifest = tmp_path / "grader.json"
+    manifest.write_text(deep)
+    refused = "tests/gen/grader.json is nested too deeply to read as JSON"
+    assert runtime.read_grader_manifest(manifest) == (None, [refused])
+    settings = tmp_path / "tests" / "platoon" / launcher.CONFIG
+    settings.parent.mkdir(parents=True)
+    settings.write_text(f'{{"schema": "{launcher.SCHEMA}", "deep": {deep}}}')
+    assert runtime.launch_settings(tmp_path) == {}
+    report = VerifierFile("file", f'{{"schema": "{launcher.SCHEMA}", "reward": 1, "deep": {deep}}}')
+    outcome = runtime.launcher_outcome(
+        {launcher.REPORT: report},
+        settings={"grader_owner": "generated", "reward_key": "reward"},
+        exit_code=0,
+        timed_out=False,
+        timeout_s=60.0,
+    )
+    assert (outcome.status, outcome.failure_kind) == ("invalid", "verifier_generated_unfinished")
+    assert outcome.reason is not None and "it left no report" in outcome.reason
 
 
 # ----------------------------------------------------------------------------------------------------------- sessions

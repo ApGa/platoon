@@ -833,9 +833,11 @@ def read_grader_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
     try:
         if path.lstat().st_size > MAX_MANIFEST_BYTES:
             return None, [f"{where} holds more than {MAX_MANIFEST_BYTES} bytes"]
-        manifest = json.loads(path.read_bytes().decode("utf-8"))
+        manifest = launcher.load_json(path.read_bytes().decode("utf-8"))
     except (FileNotFoundError, NotADirectoryError):
         return None, [f"{where} is missing: it names the grader's command, and the task's replay if it has one"]
+    except launcher.NestedTooDeeply:
+        return None, [f"{where} is nested too deeply to read as JSON"]
     except (OSError, ValueError) as exc:
         return None, [f"{where} is not JSON: {exc}"]
     if not isinstance(manifest, dict):
@@ -927,8 +929,8 @@ def launch_settings(task_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
         return {}
     try:
         with open(path, "rb") as stream:
-            settings = json.loads(stream.read(MAX_SETTINGS_BYTES + 1).decode("utf-8"))
-    except (OSError, ValueError, RecursionError):
+            settings = launcher.load_json(stream.read(MAX_SETTINGS_BYTES + 1).decode("utf-8"))
+    except (OSError, ValueError):
         return {}
     return settings if isinstance(settings, dict) and settings.get("schema") == launcher.SCHEMA else {}
 
@@ -1154,8 +1156,8 @@ def _report(file: VerifierFile | None) -> dict[str, Any] | None:
     if file is None or file.kind != "file":
         return None
     try:
-        report = json.loads(file.text)
-    except (ValueError, RecursionError):
+        report = launcher.load_json(file.text)
+    except ValueError:
         return None
     return report if isinstance(report, dict) else None
 

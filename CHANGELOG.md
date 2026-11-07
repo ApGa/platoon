@@ -40,6 +40,9 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   for a launcher that did not finish), but `verifier_trusted_launcher`, which the launcher writes only before the grader
   runs; a trusted grader (`grader_owner="trusted"`) gets `verifier_trusted_*`. The environment's curated tasks are
   fetched, listed, opened and graded as before ([Runtime tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
+  - JSON nested more than 256 levels deep is refused before it is parsed, as text that is not JSON is, the same way on
+    every Python: an artifact or replayed output that deep breaks the output contract, such a verdict is the grader's
+    `_protocol` fault, and `materialize` refuses such a `tests/gen/grader.json`.
 - **`platoon.testing.check_runtime_tasks`** takes a red-team suite of sabotaged tasks through an environment's runtime
   tasks: what `materialize` must refuse, on CPU, and, on the environment's sandboxes, the grade each sabotaged grader,
   replay or submission must get ([Check an environment's runtime

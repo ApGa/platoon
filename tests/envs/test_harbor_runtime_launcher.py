@@ -278,6 +278,12 @@ def test_the_reward_takes_the_name_the_environment_trains(verifier):
 
 
 WRITE_VERDICT = 'import json, os\nwith open(os.environ["PLATOON_VERDICT"], "w") as stream:\n    {}\n'
+# JSON a level deeper than the launcher reads, which any Python would parse, and JSON that opens more arrays than some
+# Pythons parse (a RecursionError) while others reach its end (a ValueError): each is refused the same way everywhere.
+DEEP_JSON = {
+    "parsable": "[" * (launcher.MAX_JSON_DEPTH + 1) + "]" * (launcher.MAX_JSON_DEPTH + 1),
+    "beyond-some-parsers": "[" * 100_000,
+}
 
 
 @pytest.mark.parametrize(
@@ -329,8 +335,9 @@ def test_a_verdict_beyond_the_schema_is_the_graders_protocol_fault_never_a_censo
     assert problem in report["detail"]
 
 
-def test_a_verdict_nested_too_deeply_to_read_is_the_graders_protocol_fault(verifier):
-    verifier.grader(WRITE_VERDICT.format('stream.write("[" * 100000)'))
+@pytest.mark.parametrize("verdict", DEEP_JSON.values(), ids=DEEP_JSON.keys())
+def test_a_verdict_nested_too_deeply_to_read_is_the_graders_protocol_fault(verifier, verdict):
+    verifier.grader(WRITE_VERDICT.format(f"stream.write({verdict!r})"))
     verifier.submit(42)
 
     _, reward, report = verifier.run()
@@ -576,16 +583,49 @@ def test_artifacts_that_break_the_output_contract_score_zero_as_the_solvers_faul
     assert "grader" not in report  # the grader never ran
 
 
-def test_an_artifact_nested_too_deeply_to_read_breaks_the_contract_never_the_launcher(verifier):
-    """``json.loads`` gives up on deep nesting with a ``RecursionError``, no ``ValueError``: a solver's artifact that
-    nests deeply is its own contract violation, not a failure of the launcher's, which would be the trusted side's."""
+@pytest.mark.parametrize("artifact", DEEP_JSON.values(), ids=DEEP_JSON.keys())
+def test_an_artifact_nested_too_deeply_to_read_breaks_the_contract_never_the_launcher(verifier, artifact):
+    """A solver's artifact that nests deeper than the launcher reads is its own contract violation, on every Python,
+    whether or not its parser would take it: never a failure of the launcher's, which would be the trusted side's."""
 
-    (verifier.workdir / "answer.json").write_text("[" * 100_000)
+    (verifier.workdir / "answer.json").write_text(artifact)
 
     code, reward, report = verifier.run()
 
     assert (code, reward) == (0, {"reward": 0})
     assert report["reason"] == "solver_output_contract" and "nested too deeply" in report["detail"]
+
+
+@pytest.mark.parametrize(
+    ("text", "depth"),
+    [
+        ("", 0),
+        ("1", 0),
+        ("[]", 1),
+        ('{"a": [1, {"b": []}], "c": {}}', 4),
+        ('["[[[", "{{"]', 1),  # brackets in strings are text
+        (r'["\"[[", "\\", "\u005b"]', 1),  # escapes: a quote, a backslash, a bracket
+        ("[" * 5, 5),  # what a text opens counts, closed or not
+        ('[["]]', 2),  # and so does what a string that never ends leaves open
+        ("]]][", 0),  # a parser stops at the first ]
+    ],
+)
+def test_json_text_depth_counts_the_brackets_open_outside_strings(text, depth):
+    assert launcher.json_text_depth(text) == depth
+
+
+def test_load_json_refuses_json_nested_deeper_than_the_launcher_reads_before_it_parses():
+    limit = launcher.MAX_JSON_DEPTH
+
+    value = launcher.load_json("[" * limit + "]" * limit)
+    for _ in range(limit - 1):
+        (value,) = value
+    assert value == []
+    assert launcher.load_json('["' + "[" * 100_000 + '"]') == ["[" * 100_000]
+    for text in (*DEEP_JSON.values(), '{"a": ' * (limit + 1)):
+        with pytest.raises(launcher.NestedTooDeeply, match="nested too deeply") as refused:
+            launcher.load_json(text)
+        assert isinstance(refused.value, ValueError)  # what reads JSON refuses it as it refuses text that is no JSON
 
 
 def test_a_directory_artifact_is_checked_file_by_file(verifier):
@@ -978,6 +1018,16 @@ def test_settings_the_launcher_cannot_use_are_a_trusted_fault(verifier, settings
 
     assert (code, reward) == (0, {"invalid": 1, "failure_kind": "verifier_trusted_launcher"})
     assert "its settings" in report["detail"]
+
+
+def test_settings_nested_too_deeply_are_a_trusted_fault(verifier):
+    verifier.submit(42)
+    settings = json.dumps(verifier.config)[:-1] + f', "deep": {DEEP_JSON["parsable"]}}}'
+
+    code, reward, report = verifier.run(settings=settings)
+
+    assert (code, reward) == (0, {"invalid": 1, "failure_kind": "verifier_trusted_launcher"})
+    assert "its settings" in report["detail"] and "nested too deeply" in report["detail"]
 
 
 @pytest.mark.parametrize("artifact", ["/tests/gen", "../answer.json", "./answer.json"])
