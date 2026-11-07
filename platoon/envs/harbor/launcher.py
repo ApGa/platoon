@@ -54,6 +54,8 @@ verifier's sandbox, with a umask that keeps what it writes root's alone.  In ord
 
 Every file whose contents it reads (its settings, the artifacts' JSON, the replay's outputs, the verdict, the logs
 whose tails it keeps) is opened without following a link or waiting on a FIFO and checked on the open descriptor.
+JSON there that nests more than :data:`MAX_JSON_DEPTH` levels deep is refused before it is parsed, as text that is not
+JSON is (:func:`load_json`), and so the same way on every Python.
 The launcher is no security boundary against the grader, which runs as root beside it: a grader may choose 0 or 1,
 which it may anyway and which controls check, and anything else is a non-score that attribution charges to it.
 """
@@ -61,6 +63,7 @@ which it may anyway and which controls check, and anything else is a non-score t
 from __future__ import annotations
 
 import errno
+import itertools
 import json
 import math
 import os
@@ -128,6 +131,11 @@ DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 TAIL_CHARS = 2000
 #: The largest settings file read.
 MAX_CONFIG_BYTES = 1 << 20
+#: How deeply the JSON the launcher reads (its settings, a ``.json`` artifact or output, the verdict) may nest arrays
+#: and objects: deeper JSON is refused before it is parsed (:func:`load_json`).  Pythons give up parsing at depths of
+#: their own, all deeper than this (about 500 levels without the C parser, 1,000 with it before 3.12, 10,000 on 3.12
+#: and 3.13, and on 3.14 as many as the stack holds), so what is refused is the same on every Python.
+MAX_JSON_DEPTH = 256
 #: The largest verdict read, the most checks one holds and the longest id of one; the report keeps the first
 #: ``REPORTED_CHECKS``.
 MAX_VERDICT_BYTES = 1 << 20
@@ -173,6 +181,13 @@ _VERDICT_KEYS = ("passed", "checks")
 _CHECK_KEYS = ("id", "passed", "margin")
 _VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+# What json_text_depth takes out of a JSON text before it counts brackets, in order: each escape (a backslash and the
+# character after it), each string (or what follows a quote that no other closes), and all but the brackets.  None of
+# them can backtrack, so each pass is linear in the text's length.
+_JSON_ESCAPE = re.compile(r"\\.", re.DOTALL)
+_JSON_STRING = re.compile(r'"[^"]*"?')
+_NOT_BRACKET = re.compile(r"[^\[\]{}]+")
+_BRACKET_STEP = {"[": 1, "{": 1, "]": -1, "}": -1}
 
 
 class LauncherFault(Exception):
@@ -192,6 +207,11 @@ class SolverFault(Exception):
 class Leftover(Exception):
     """What a replay left that the launcher cannot remove, or not in its time (:func:`remove_tree`,
     :func:`clear_left`): the solver's 0, as processes that outlive the sweep are."""
+
+
+class NestedTooDeeply(ValueError):
+    """JSON that nests arrays and objects more than :data:`MAX_JSON_DEPTH` levels deep, refused before it is parsed
+    (:func:`load_json`)."""
 
 
 class Result:
@@ -345,8 +365,8 @@ def read_config(path):
     """The launcher's settings, which ``materialize`` wrote; a :class:`LauncherFault` for settings it cannot use."""
 
     try:
-        config = json.loads(_read_regular(path, MAX_CONFIG_BYTES).decode("utf-8"))
-    except (OSError, ValueError, RecursionError) as exc:
+        config = load_json(_read_regular(path, MAX_CONFIG_BYTES).decode("utf-8"))
+    except (OSError, ValueError) as exc:
         raise LauncherFault(f"its settings {path} cannot be read: {exc!r}") from exc
     if not isinstance(config, dict) or config.get("schema") != SCHEMA:
         raise LauncherFault(f"its settings {path} are not {SCHEMA}")
@@ -584,8 +604,8 @@ def _file_problem(path, name, info, cap):
         return f"{name} holds {info.st_size} bytes, more than an output may ({cap})"
     if path.endswith(".json"):
         try:
-            json.loads(_read_regular(path, cap).decode("utf-8"))
-        except RecursionError:
+            load_json(_read_regular(path, cap).decode("utf-8"))
+        except NestedTooDeeply:
             return f"{name} is nested too deeply to read as JSON"
         except (OSError, ValueError) as exc:
             return f"{name} is not JSON: {exc}"
@@ -806,8 +826,8 @@ def read_verdict(path):
     if info.st_size > MAX_VERDICT_BYTES:
         return None, f"the verdict holds more than {MAX_VERDICT_BYTES} bytes"
     try:
-        verdict = json.loads(_read_regular(path, MAX_VERDICT_BYTES).decode("utf-8"))
-    except RecursionError:
+        verdict = load_json(_read_regular(path, MAX_VERDICT_BYTES).decode("utf-8"))
+    except NestedTooDeeply:
         return None, "the verdict is nested too deeply to read"
     except (OSError, ValueError) as exc:
         return None, f"the verdict is not JSON: {exc}"
@@ -1117,6 +1137,26 @@ def _read_regular(path, limit):
     if len(data) > info.st_size:
         raise ValueError(f"{os.path.basename(path)} grew while it was read")
     return data
+
+
+def load_json(text):
+    """The JSON ``text`` as Python's values: a :class:`NestedTooDeeply` for a text that nests more than
+    :data:`MAX_JSON_DEPTH` levels deep (:func:`json_text_depth`), before it is parsed, and a ``ValueError`` for one
+    that is not JSON.  Python's parser then never reaches the depth at which it gives up, which differs between
+    Pythons."""
+
+    if json_text_depth(text) > MAX_JSON_DEPTH:
+        raise NestedTooDeeply(f"nested too deeply: more than {MAX_JSON_DEPTH} levels of arrays and objects")
+    return json.loads(text)
+
+
+def json_text_depth(text):
+    """How deeply the JSON ``text`` nests arrays and objects, read from its brackets outside its strings, never by
+    parsing it: the most that any start of the text opens and leaves open, so that a text that only opens counts each
+    one, and a parser that stops at an error was never deeper.  It takes time linear in the text's length."""
+
+    brackets = _NOT_BRACKET.sub("", _JSON_STRING.sub("", _JSON_ESCAPE.sub("", text)))
+    return max(itertools.accumulate(map(_BRACKET_STEP.__getitem__, brackets), initial=0))
 
 
 def _tail(path):
