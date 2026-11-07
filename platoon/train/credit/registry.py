@@ -2,18 +2,19 @@
 discovery rule), and what a config chooses (``environments[].credit`` with its ``credit_options``, RFC 0016).
 
 An estimator is named by core's name (:data:`BUILTIN_CREDIT_ESTIMATORS`: ``group``, ``keyed``, ``reverse_kl``,
-``running``), by a name that a module an entry's ``package`` names registers (:func:`credit_estimator`), or as
-``module:Class`` (:func:`resolve_credit_estimator`).  A core estimator's options that name files are relative to the
-config file (:func:`credit_path_options`).  When the config loads, each entry's estimator resolves, its options are
-parsed against its schema and its ``check`` runs (:func:`choose_credit`, exit 78 for any problem), and ``lock.json``
-records it (:func:`credit_lock_records`); ``platoon train`` then builds each entry's estimator for the training workflow
-(:func:`build_entry_credit`), with the run's policies as estimators read them (:func:`policy_views`) and the staleness
-bound of each one's rows of the entry.  Core's answers that a config's loading reads (:data:`CORE_PATH_OPTIONS`,
-:data:`CORE_SINGLE_MEMBER_CREDIT`) are tables here, so that loading imports no estimator.  An entry without
-``credit`` keeps the workflow's own credit, today's ``group``, run as it always ran; in a run that trains several
-policies, ``keyed`` on ``[task, policy, role]`` instead (RFC 0021's D5: each agent of each policy and role on its own
-baseline), which ``lock.json`` records as it records a chosen one.  Core's built-ins are imported by name, so this
-module imports none of them.
+``running``, ``roles``), by a name that a module an entry's ``package`` names registers (:func:`credit_estimator`), or
+as ``module:Class`` (:func:`resolve_credit_estimator`).  A core estimator's options that name files are relative to the
+config file (:func:`credit_path_options`, and :func:`credit_path_items`, which finds them in each role's options under
+``roles`` too).  When the config loads, each entry's estimator resolves, its options are parsed against its schema and
+its ``check`` runs (:func:`choose_credit`, exit 78 for any problem), and ``lock.json`` records it, each role's
+estimator under ``roles`` too (:func:`credit_lock_records`); ``platoon train`` then builds each entry's estimator for
+the training workflow (:func:`build_entry_credit`), with the run's policies as estimators read them
+(:func:`policy_views`) and the staleness bound of each one's rows of the entry.  Core's answers that a config's loading
+reads (:data:`CORE_PATH_OPTIONS`, :data:`CORE_SINGLE_MEMBER_CREDIT`) are tables here, so that loading imports no
+estimator.  An entry without ``credit`` keeps the workflow's own credit, today's ``group``, run as it always ran; in a
+run that trains several policies, ``keyed`` on ``[task, policy, role]`` instead (RFC 0021's D5: each agent of each
+policy and role on its own baseline), which ``lock.json`` records as it records a chosen one.  Core's built-ins are
+imported by name, so this module imports none of them.
 """
 
 from __future__ import annotations
@@ -39,16 +40,20 @@ BUILTIN_CREDIT_ESTIMATORS: dict[str, str] = {
     "keyed": "platoon.train.credit.keyed:Keyed",
     "reverse_kl": "platoon.train.credit.reverse_kl:ReverseKL",
     "running": "platoon.train.credit.running:Running",
+    "roles": "platoon.train.credit.roles:Roles",
 }
+# Core's estimator that credits each role of an entry's trees with an estimator of its own, ``by_role.<role>.credit``,
+# with its options under ``by_role.<role>.options``, where a role's core estimator may name files too.
+ROLES = "roles"
 # What core's estimators say of themselves, so that a config loads without importing them (they import Tinker and
 # torch): the options of each that name files (its options class's ``path_options``), and those that credit a group of
 # one member (their class flag ``credits_single_members``).  A test holds each table to its classes.
 CORE_PATH_OPTIONS: dict[str, tuple[str, ...]] = {"running": ("priors",)}
-CORE_SINGLE_MEMBER_CREDIT = frozenset({"running"})
+CORE_SINGLE_MEMBER_CREDIT = frozenset({"running", "roles"})
 # Core's names, that of the estimator platoon adds included (gae): no package may register them.
 RESERVED_CREDIT_NAMES = frozenset({*BUILTIN_CREDIT_ESTIMATORS, "gae"})
 # Core's estimators, as messages name them.
-_CORE = "group, keyed, reverse_kl and running"
+_CORE = "group, keyed, reverse_kl, running and roles"
 # The estimator of an entry that names none, in a run that trains several policies (RFC 0021, D5).
 SEVERAL_POLICIES_DEFAULT = "keyed"
 # What a registered name may be: no spaces, and neither ``:`` (module:Class) nor ``@``.
@@ -60,8 +65,8 @@ def credit_estimator(
 ) -> Callable[[R], R]:
     """Register a credit estimator class under ``name``, from a module that an environment entry's ``package`` names,
     so that configs can name it (``credit: <name>``); ``options`` sets its ``options_schema`` and ``check`` its
-    load-time check.  Core's names (``group``, ``keyed``, ``reverse_kl``, ``running``, and ``gae``, which platoon adds)
-    are reserved, whatever their case and their ``-`` or ``_``; a name registered twice is an error."""
+    load-time check.  Core's names (``group``, ``keyed``, ``reverse_kl``, ``running``, ``roles``, and ``gae``, which
+    platoon adds) are reserved, whatever their case and their ``-`` or ``_``; a name registered twice is an error."""
 
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ValueError(f"a credit estimator's name is a word without spaces, ':' or '@', got {name!r}")
@@ -99,6 +104,22 @@ def credit_path_options(name: Any) -> tuple[str, ...]:
     package's, whose module a config file's loading does not import."""
 
     return CORE_PATH_OPTIONS.get(name, ()) if isinstance(name, str) else ()
+
+
+def credit_path_items(name: Any, options: Any, where: str) -> list[tuple[dict[str, Any], str, str]]:
+    """Where the ``credit_options`` of the estimator ``name`` (``options``, as a config file writes them) name files,
+    each as the mapping that holds the path, its key and its dotted path below ``where``: core's estimator's path
+    options (:func:`credit_path_options`), and under ``roles`` those of each role's core estimator, in
+    ``by_role.<role>.options``; none for any other name, importing nothing."""
+
+    if not isinstance(options, dict):
+        return []
+    found = [(options, key, f"{where}.{key}") for key in credit_path_options(name) if options.get(key) is not None]
+    by_role = options.get("by_role") if name == ROLES else None
+    for role, credit in (by_role if isinstance(by_role, dict) else {}).items():
+        if isinstance(credit, dict):
+            found += credit_path_items(credit.get("credit"), credit.get("options"), f"{where}.by_role.{role}.options")
+    return found
 
 
 def resolve_credit_estimator(ref: str) -> type:
@@ -310,26 +331,44 @@ def build_entry_credit(
 def credit_lock_records(choices: Mapping[str, CreditChoice]) -> list[dict[str, Any]]:
     """What ``lock.json`` records of the entries' estimators (``kind: credit``), one record per estimator: the
     reference as the config gives it, what it resolved to, the distribution and version that provide it, the entries
-    that use it and each one's options, defaults included.  None in a run whose entries set no ``credit``."""
+    that use it and each one's options, defaults included; then one per estimator that an entry's estimator runs for a
+    role of its trees (``roles``'s, which its class's ``role_estimators(options)`` names), with ``level: role``, the
+    entries whose roles it credits and its options by entry and role.  None in a run whose entries set no ``credit``."""
 
     records: dict[tuple[str, str], dict[str, Any]] = {}
+    by_role: dict[tuple[str, str], dict[str, Any]] = {}
     for label, choice in choices.items():
-        source = f"{choice.cls.__module__}:{choice.cls.__qualname__}"
+        source = _source(choice.cls)
         if (choice.name, source) not in records:
             records[(choice.name, source)] = _lock_record(choice.name, source, choice.cls.__module__)
         records[(choice.name, source)]["environments"].append(label)
         records[(choice.name, source)]["options"][label] = choice.options_json()
-    return list(records.values())
+        role_estimators = getattr(choice.cls, "role_estimators", None)
+        if not callable(role_estimators) or choice.options is None:
+            continue
+        for role, (ref, cls, options) in role_estimators(choice.options).items():
+            key = (ref, _source(cls))
+            if key not in by_role:
+                by_role[key] = _lock_record(ref, key[1], cls.__module__, level="role")
+            if label not in by_role[key]["environments"]:
+                by_role[key]["environments"].append(label)
+            by_role[key]["options"].setdefault(label, {})[role] = options
+    return [*records.values(), *by_role.values()]
 
 
-def _lock_record(ref: str, source: str, module: str) -> dict[str, Any]:
-    """The ``lock.json`` record of an estimator before its entries: the reference, what it resolved to, and the
-    distribution and version that provide its ``module``."""
+def _source(cls: type) -> str:
+    return f"{cls.__module__}:{cls.__qualname__}"
+
+
+def _lock_record(ref: str, source: str, module: str, *, level: str | None = None) -> dict[str, Any]:
+    """The ``lock.json`` record of an estimator before its entries: the reference, what it resolved to, the
+    distribution and version that provide its ``module``, and its ``level`` when it credits a role of an entry's trees
+    (none for an entry's own)."""
 
     from platoon.extensions import origin_of_module
 
     origin = origin_of_module(module)
-    return {
+    record: dict[str, Any] = {
         "kind": REGISTRY_KIND,
         "ref": ref,
         "resolved": source,
@@ -337,6 +376,7 @@ def _lock_record(ref: str, source: str, module: str) -> dict[str, Any]:
         "distribution": origin.distribution,
         "distribution_version": origin.version,
         "entry_point": None,
-        "environments": [],
-        "options": {},
     }
+    if level is not None:
+        record["level"] = level
+    return {**record, "environments": [], "options": {}}

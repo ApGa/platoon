@@ -31,6 +31,43 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   And `credits_single_members`, a class flag (False on `CreditEstimatorBase`): an estimator that can give a group of
   one member advantages of its own sets it, and the warning that an entry's groups of one rollout train nothing leaves
   out the entries it credits ([Write a credit estimator](docs/extending/credit-estimators.md)).
+- **Credit each role of a tree apart (experimental): `credit: roles`.** An entry whose agent trees hold several roles,
+  such as an environment generator's (a paper-to-task pipeline, say), whose root writes a task once per draw and whose
+  children solve it, credits each role with an estimator of its own in the group's one credit call:
+  `credit_options.by_role.<role>` names it (`credit`) with its `options`, as an entry names its own, and it credits the
+  group's agents of that role alone, on a view of the group over the very rows, its metrics under
+  `credit/roles/<role>/`. An agent of a role `by_role` does not name trains nothing (warned of once per role). Per role,
+  `kl: {to, coef}` adds `-coef * (logprob - to's logprob)` to every action token of its rows, the reverse KL to a
+  frozen policy, scored as `reverse_kl` scores its teacher's; and `share` holds the role's share of the advantage mass
+  its policy's rows of the entry carry, with a positive weight on its rows, `share / (1 - shares) * M_unshared /
+  M_role`, from the roles' decayed masses (`sum |A|` over their rows' action tokens, halving every 4 versions of their
+  policy), which move only as groups settle and are read as they were when the group's agents of the role began
+  sampling, so that the weight, blind to how long its group took to settle, keeps its estimator's signs and
+  expectation; a role's first mass starts its policy's masses over (as `running`'s warm-up ends, say). Loading refuses
+  what a role's estimator refuses, each problem under its path
+  (`environments.0.credit_options.by_role.solver.options.key`), shares that add up to 1 or more or that every role
+  sets, a share whose role's policy no named role without a share samples, and a `kl` whose `to` is no frozen policy
+  of the student's tokenizer; `lock.json` records each role's estimator in a record of its own (`level: role`). Each
+  group logs `credit/role_mass/<role>` (summed over the step's groups), `credit/role_weight/<role>` and
+  `credit/role_kl/<role>`; and each step of a run with an entry under `roles` logs, by the role of each row's agent,
+  its share of the advantage mass the step sends over every entry's rows (`roles/<role>/mass_share`), the mean
+  `|log r|` of its importance ratios, the share of them outside `[0.5, 2]` and the sampler's entropy, per policy in
+  lockstep and on independent clocks alike. The composite's state, which each full checkpoint saves, holds each role's
+  estimator's and the masses. An entry of groups of one under `roles` is not warned of ([Credit each role of a tree
+  apart](docs/how-to/train-and-eval.md#credit-each-role-of-a-tree-apart-experimental)). `roles` is now one of core's
+  names: a package that registered an estimator under it must rename it.
+- **A group's view over some roles (experimental): `CreditGroup.only(roles=[...])`.** The group's agents of those roles
+  and their rows, the very rows, every member kept in its order: what `roles` hands each role's estimator, and what an
+  estimator of your own may credit a part of a group with ([Write a credit
+  estimator](docs/extending/credit-estimators.md)).
+
+### Changes
+
+- A frozen policy that an entry's `credit_options` names at any depth, such as the policy of a role's KL term under
+  `credit: roles` (`by_role.<role>.kl.to`), is no longer warned of as a policy the run opens and never uses; only the
+  options' top level was read.
+- An options schema's refusal that begins with a dotted path below one of its fields is reported under that path
+  (`credit_options.by_role.solver.share: ...`), where it was reported under the options with the path in its text.
 
 ## 0.5.0 (2026-10-29)
 

@@ -16,7 +16,9 @@ step reads top to bottom (:meth:`TrainStep.run`), in seven stages, whose parts a
 
 In a run that trains several policies in lockstep, each policy's rows of each group go their own lane through those
 stages (``lanes``); when they step independently, each policy has a loop of its own, whose steps are this step with the
-policy's one lane, taking its shares of the groups (``independent``).
+policy's one lane, taking its shares of the groups (``independent``).  In a run with an entry whose estimator credits
+each role of its trees apart (``credit: roles``), the step also counts, by the role of each row's agent, the advantage
+mass it sends, its importance ratios and its sampler's entropy, and logs them with its metrics (``roles``).
 """
 
 import asyncio
@@ -30,6 +32,7 @@ import tinker
 
 from platoon.train import entry_settings
 from platoon.train.admissions import AdmissionSet
+from platoon.train.credit.runtime import steps_log_by_role
 from platoon.train.dispatch.settled import SettledGroup, _output_label, _record_group_stats, as_settled_group
 from platoon.train.evaluation.loop import _wait_for_starting_policy_evaluation
 from platoon.train.labels import metric_labels, metric_prefix
@@ -50,7 +53,14 @@ from platoon.train.step.batch_transforms import (
 )
 from platoon.train.step.collect import StepDispatch, StepTally
 from platoon.train.step.counting import GroupCounting
-from platoon.train.step.datums import _kept_datums, _step_datums, advantage_scale, policy_rows, scale_advantages
+from platoon.train.step.datums import (
+    _kept_datums,
+    _step_datums,
+    advantage_scale,
+    policy_row_roles,
+    policy_rows,
+    scale_advantages,
+)
 from platoon.train.step.lanes import LaneTally, PolicyLane, policy_lanes
 from platoon.train.step.metrics import (
     Censoring,
@@ -64,6 +74,7 @@ from platoon.train.step.metrics import (
 )
 from platoon.train.step.microbatch import MicrobatchFill, Prepared, StepGeometry, zero_advantage_filter_metrics
 from platoon.train.step.publish import _no_update_reason, publish_policies
+from platoon.train.step.roles import RoleMetrics
 from platoon.train.step.staleness import StaleFilter, StaleVerdict, StaleWatch
 from platoon.train.tinker.rollout_metrics import monitor as client_monitor
 from platoon.train.tinker.rollout_metrics import step_metrics as client_step_metrics
@@ -104,7 +115,10 @@ class StepContext:
       (:class:`~platoon.train.step.lanes.PolicyLane`): its learner, under its objective, and its stale filter, its
       entries' bounds on a group's staleness, judged per group or per datum (``train.stale_filter``);
     - ``clock``: the run's clock, which the end of each step advances;
-    - ``run``: the start the trainer runs, whose step hooks run at each step's end (``run.hooks``).
+    - ``run``: the start the trainer runs, whose step hooks run at each step's end (``run.hooks``);
+    - ``role_metrics``: whether each step counts and logs its metrics by agent role
+      (:mod:`~platoon.train.step.roles`), as a run with an entry under ``credit: roles`` does
+      (:func:`~platoon.train.credit.runtime.steps_log_by_role`).
 
     Two of them count as the steps go.  ``censoring`` counts what the straggler policy censors in a step, until the
     step's metrics are logged.  ``stale_watch`` counts the stale groups of the last steps, for the staleness warning."""
@@ -127,6 +141,7 @@ class StepContext:
     lanes: tuple[PolicyLane, ...]
     clock: StepClock
     run: TrainerRun
+    role_metrics: bool = False
 
     @classmethod
     def build(
@@ -180,6 +195,7 @@ class StepContext:
             lanes=_step_lanes(trainer, shared_state, settings, clock, start_batch),
             clock=clock,
             run=run,
+            role_metrics=steps_log_by_role(train_workflow),
         )
 
     def version(self) -> int:
@@ -205,6 +221,8 @@ class TrainStep:
         self.tallies = {lane.policy_id: self.tally if lane.leads else LaneTally() for lane in context.lanes}
         # The step hooks' updates of each policy at the step's end, as platoon counted them (none without hooks).
         self.hook_updates: dict[PolicyId, int] = {}
+        # What the step counts by agent role, in a run that logs its metrics so; None in any other.
+        self.roles = RoleMetrics() if context.role_metrics else None
 
     def tally_of(self, lane: PolicyLane) -> "StepTally | LaneTally":
         """What the step counts of ``lane``: its optimizer steps, and its microbatches that sent nothing."""
@@ -220,7 +238,7 @@ class TrainStep:
 
         # One optimizer update per minibatch.
         for minibatch_num in range(self.geometry.num_minibatches):
-            updates = {lane.policy_id: lane.learner.update() for lane in self.context.lanes}
+            updates = {lane.policy_id: lane.learner.update(self._observer(lane)) for lane in self.context.lanes}
             # Its microbatches accumulate gradients, each sent as soon as its groups are collected, so that training
             # overlaps the rollouts of the same batch (besides the overlap across batches, train.max_staleness).
             for microbatch_num in range(self.geometry.num_microbatches):
@@ -288,7 +306,10 @@ class TrainStep:
         # The group's label: its row's, else its output's.
         label = settled.label if settled.label is not None else _output_label(output)
         # Its rows that the run trains, by trained policy: a list of datums is the leader's rows.  None: it failed.
-        rows = None if output is None else policy_rows(output, [lane.policy_id for lane in self.context.lanes])
+        policies = [lane.policy_id for lane in self.context.lanes]
+        rows = None if output is None else policy_rows(output, policies)
+        # Their agents' roles, when the step counts by role and the output is tagged.
+        roles = policy_row_roles(output, policies) if self.roles is not None and rows is not None else None
         failed = rows is None
         # The group's own statistics belong to this step, which consumes it, stale or not.
         _record_group_stats(output, self.state.train_tracker)
@@ -316,16 +337,25 @@ class TrainStep:
             assert rows is not None  # not failed
             for lane in self.context.lanes:
                 if not verdicts[lane.policy_id].stale:
-                    self._keep_rows(lane, rows[lane.policy_id], verdicts[lane.policy_id], fill)
+                    lane_roles = roles[lane.policy_id] if roles is not None else None
+                    self._keep_rows(lane, rows[lane.policy_id], verdicts[lane.policy_id], fill, lane_roles)
         return taken
 
     def _keep_rows(
-        self, lane: PolicyLane, rows: Sequence[tinker.Datum], verdict: StaleVerdict, fill: MicrobatchFill
+        self,
+        lane: PolicyLane,
+        rows: Sequence[tinker.Datum],
+        verdict: StaleVerdict,
+        fill: MicrobatchFill,
+        roles: Sequence[str | None] | None = None,
     ) -> None:
         """Add a lane's rows of a group that trains to the microbatch, as the step trains them (each its own copy),
-        without the datums the per-datum stale filter masked."""
+        without the datums the per-datum stale filter masked; the step counts by role the copies of rows whose agents'
+        ``roles`` it is given."""
 
         datums = _step_datums(rows)
+        if self.roles is not None and roles is not None:
+            self.roles.keep(lane.policy_id, datums, roles)
         if verdict.masked:  # under the per-datum filter, without those beyond the bound
             datums = _kept_datums(datums, verdict.masked)
         lane.add_rows(fill, datums)
@@ -545,8 +575,17 @@ class TrainStep:
         # sum-reduced objective behaves like a mean reduction and
         # grad_norm is not sensitive to batch size.
         weight = self.counting.short_microbatch_weight(microbatch_num, fill.places, self.geometry.groups_per_microbatch)
-        scale_advantages(filtered_datums, advantage_scale(microbatch_datums, weight))
+        scale = advantage_scale(microbatch_datums, weight)
+        scale_advantages(filtered_datums, scale)
+        if self.roles is not None:  # each role's share of the mass the step sends
+            self.roles.sent(lane.policy_id, microbatch_datums, scale)
         return filtered_datums
+
+    def _observer(self, lane: PolicyLane) -> Any:
+        """What reads each result of the lane's microbatches: the ratios by role, when the step counts by role (None
+        in a run that does not)."""
+
+        return self.roles.observer(lane.policy_id) if self.roles is not None else None
 
     # --- update, commit, then the step's end: the step hooks, the publication, the advance ---------------------------
 
@@ -673,6 +712,8 @@ class TrainStep:
             if not lane.leads:  # the leader's counts are among the step's
                 hooked = self.hook_updates.get(lane.policy_id, 0) if context.run.hooks else None
                 lane.record_counts(self.tally_of(lane), hook_updates=hooked)
+            if self.roles is not None:  # its metrics by role, under the lane's prefix
+                self.roles.record(lane.policy_id, lane.tracker)
         if context.lanes[0].stale_filter.per_datum:  # the datums dropped as stale, of the groups it masked or dropped
             tracker.scalar(**{"batch/stale_datums": float(tally.stale_datums)})
         # What held the dispatcher back from starting groups, and what the straggler policy censored.

@@ -168,18 +168,19 @@ def schema_options(schema: Any, *, name: str = "it") -> SchemaOptions:
     beside harnesses).  A dataclass's options are checked as config sections are (each unknown key with a
     did-you-mean, each wrong type with its path), and a ``ValueError`` its ``__post_init__`` raises, or each problem
     of a :class:`~platoon.utils.config.ConfigError` it raises, becomes a line under the field it names (a message
-    that begins with a field's name and a colon) or under the options; a pydantic model's errors each name their
-    location."""
+    that begins with a field's name, or a dotted path below one, and a colon) or under the options; a pydantic
+    model's errors each name their location."""
 
     return SchemaOptions(schema, name=name)
 
 
 def _field_line(where: str, message: str, fields: set[str]) -> str:
     """A problem a dataclass's checks raised, under ``where``: under the field it names, when it begins with one of
-    ``fields`` and a colon (``explore: must be between 0 and 1``)."""
+    ``fields``, or a dotted path below one, and a colon (``explore: must be between 0 and 1``,
+    ``by_role.solver.options.key: ...``)."""
 
     field_name, colon, rest = message.partition(":")
-    if colon and field_name in fields:
+    if colon and field_name.split(".", 1)[0] in fields and " " not in field_name:
         return f"{where}.{field_name}:{rest}"
     return f"{where}: {message}"
 

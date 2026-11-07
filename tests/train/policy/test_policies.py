@@ -168,6 +168,20 @@ def test_a_frozen_policy_nothing_uses_is_warned_of():
     assert line.startswith("policies.teacher: no agent samples it")
 
 
+def test_a_frozen_policy_an_entry_s_credit_options_name_at_any_depth_is_not_warned_of():
+    by_role = {
+        "generator": {"credit": "running", "kl": {"to": "reference", "coef": 0.1}},
+        "solver": {"credit": "keyed"},
+    }
+    environments = [
+        {"name": "envgen", "credit": "roles", "credit_options": {"by_role": by_role}},
+        {"name": "distill", "credit": "reverse_kl", "credit_options": {"teacher": "teacher"}},
+    ]
+    loaded = config(policies={"reference": TEACHER, "teacher": TEACHER, "idle": TEACHER}, environments=environments)
+    [line] = policy_warnings(loaded)
+    assert line.startswith("policies.idle: no agent samples it")
+
+
 def test_a_policy_bound_to_the_root_agent_s_role_is_warned_of():
     loaded = config(policies={"teacher": TEACHER}, agents={"roles": {"policy": {"policy": "teacher"}}})
     [line] = policy_warnings(loaded)

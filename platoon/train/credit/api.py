@@ -24,7 +24,8 @@ torch when they are called.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+import dataclasses
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
@@ -200,7 +201,8 @@ class CreditGroup:
     began (``versions``; it does not move during the call, although the policies may publish meanwhile), where the
     group's own statistics go (``stats``: in a training group the ``DeferredStats`` that the step that consumes the
     group records, outside one the stats tracker; an estimator's metrics belong under ``credit/``), and the task's own
-    columns (``columns``)."""
+    columns (``columns``).  :meth:`only` views it over the agents of some roles alone, as ``credit: roles`` hands each
+    role's estimator its part of the group."""
 
     task_id: str
     label: str | None
@@ -224,6 +226,27 @@ class CreditGroup:
         """Every agent of the group, member by member (none when the estimator did not ask for them)."""
 
         return [agent for member in self.members for agent in member.agents]
+
+    def only(self, *, roles: Collection[str]) -> CreditGroup:
+        """A view of the group over the agents of ``roles`` alone, and their rows: the same task, settings, policies,
+        versions, statistics and columns, and every member, in its order and with its index, its root's reward and
+        its result, holding only its agents of those roles and the rows tagged with them.  The view's rows are the
+        group's own, not copies: an advantage set on one is set on the group's row.  Without tags (an estimator that
+        does not read agents) a view holds no row.  A ``TypeError`` for a single string, which is no collection of
+        roles."""
+
+        if isinstance(roles, str) or not all(isinstance(role, str) for role in roles):
+            raise TypeError(f"roles: a collection of agent roles, such as ['solver'], got {roles!r}")
+        kept = frozenset(roles)
+        members = [
+            dataclasses.replace(
+                member,
+                samples=[sample for sample in member.samples if sample.role in kept],
+                agents=[agent for agent in member.agents if agent.role in kept],
+            )
+            for member in self.members
+        ]
+        return dataclasses.replace(self, members=members)
 
 
 @dataclass(frozen=True)

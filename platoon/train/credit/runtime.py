@@ -1,13 +1,13 @@
 """What the run calls of the environment entries' credit estimators (RFC 0021, section 6), beside the API an estimator
 is written against (:mod:`platoon.train.credit.api`): its ``assign`` over a group, under its time limit
 (:func:`assign_credit`); its ``settle`` as the run files the group (:func:`settle_credit`); its state in a full
-checkpoint (:func:`credit_states`, :func:`load_credit_states`); and, for the warnings of a config's entries, whether
-the estimator an entry names credits a group of one member (:func:`credits_single_members`).  An estimator that raises
-in any of them, or whose ``assign`` does not return in time, stops the run with a :class:`CreditEstimatorError` that
-names it, its entry and the group: a group it could not credit is never trained otherwise, nor counted as a failed
-rollout.  The one exception is a policy's scoring that failed (:class:`~platoon.train.credit.api.ScoringFailed`: a
-teacher's service that raised or did not answer in time), which :func:`assign_credit` lets through: the group fails,
-and the run goes on.
+checkpoint (:func:`credit_states`, :func:`load_credit_states`); for the warnings of a config's entries, whether the
+estimator an entry names credits a group of one member (:func:`credits_single_members`); and, for the steps, whether
+they log their metrics by agent role (:func:`steps_log_by_role`).  An estimator that raises in any of them, or whose
+``assign`` does not return in time, stops the run with a :class:`CreditEstimatorError` that names it, its entry and the
+group: a group it could not credit is never trained otherwise, nor counted as a failed rollout.  The one exception is
+a policy's scoring that failed (:class:`~platoon.train.credit.api.ScoringFailed`: a teacher's service that raised or
+did not answer in time), which :func:`assign_credit` lets through: the group fails, and the run goes on.
 
 This module is part of the training code's contract (``tests/train/test_layers.py``): the rollout source, the runner,
 the checkpoint saves and the entries' settings, which are generic code, call the estimators through it.  It imports
@@ -159,6 +159,14 @@ def credits_single_members(ref: str | None) -> bool:
     except ExtensionError:
         return False
     return getattr(cls, "credits_single_members", False) is True
+
+
+def steps_log_by_role(workflow: Any) -> bool:
+    """Whether the run's steps log their metrics by agent role (:mod:`platoon.train.step.roles`): an estimator of
+    ``workflow``'s entries credits each role of its trees apart, as its class says (``logs_by_role``, which ``roles``
+    sets, and so does a class of its own that derives from it, however a config names it)."""
+
+    return any(getattr(estimator, "logs_by_role", False) is True for estimator in _estimators(workflow).values())
 
 
 def _named(estimator: Any, entry: str | None) -> str:

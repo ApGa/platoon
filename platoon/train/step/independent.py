@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from platoon.train import entry_settings
 from platoon.train.checkpoints.saving import _feeding
+from platoon.train.credit.runtime import steps_log_by_role
 from platoon.train.dispatch.permits import _rollouts_at_once
 from platoon.train.dispatch.settled import SettledGroup
 from platoon.train.dispatch.shares import PLAN_END, Share
@@ -198,6 +199,7 @@ class PolicyLoop:
             lanes=(self._lane(state, settings),),
             clock=self.clock,
             run=run,
+            role_metrics=steps_log_by_role(workflow),
         )
 
     def _lane(self, state: "TrainLoopSharedState", settings: Any) -> PolicyLane:

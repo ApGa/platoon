@@ -115,8 +115,9 @@ class Share:
     """One policy's part of a settled group, as the rl trainer's step of that policy takes it.
 
     - ``group``: the share as a settled group, its draw's key, entry and label, with an output that holds this
-      policy's rows only (the group's report goes with the leader's share, which every group has; the other shares keep
-      its statistics and verdict, without its workload), and the group's record for the share that carries the report;
+      policy's rows only, and their agents' roles when the group's rows are tagged (the group's report goes with the
+      leader's share, which every group has; the other shares keep its statistics and verdict, without its workload),
+      and the group's record for the share that carries the report;
     - ``age``: for a share that a resume put back, the age it had when its policy first consumed it, by which it is
       judged again (None for a fresh share);
     - ``peers``: the oldest version of each other trained policy stamped on the group's rows (a peer's lag); none for
@@ -262,11 +263,17 @@ class Shares:
             holders.insert(0, self.leader)
         report = report_of(output)
         oldest = {policy: _oldest_version(rows.get(policy, ())) for policy in holders}
+        roles = _row_roles(output)
         shares = {}
         for index, policy in enumerate(holders):
             own = report if index == 0 else _without_workload(report)
             record = item.record if index == 0 else None
-            group = SettledGroup(item.entry, item.label, _ShareRows(rows.get(policy, ()), own), record, item.key)
+            held: _ShareRows = (
+                _ShareRows(rows.get(policy, ()), own)
+                if roles is None
+                else _TaggedShareRows(rows.get(policy, ()), own, policy, roles.get(policy, ()))
+            )
+            group = SettledGroup(item.entry, item.label, held, record, item.key)
             peers = {peer: version for peer, version in oldest.items() if peer != policy and version is not None}
             shares[policy] = Share(policy, group, peers=peers if rows.get(policy) else {})
         return shares
@@ -475,6 +482,32 @@ class _ShareRows(list):
     def __init__(self, rows: Sequence[Any], report: OutputReport) -> None:
         super().__init__(rows)
         self.report = report
+
+
+class _TaggedShareRows(_ShareRows):
+    """A share's output of a group whose rows are tagged by who produced them (a ``PolicyGroupOutput``'s, under an
+    estimator that reads agents): its rows and report, and the role of each row's agent, in their order, as the step
+    reads a tagged output's (``row_roles()``) to log its metrics by role."""
+
+    def __init__(
+        self, rows: Sequence[Any], report: OutputReport, policy: PolicyId, roles: Sequence[str | None]
+    ) -> None:
+        super().__init__(rows, report)
+        self.policy = policy
+        self.roles = tuple(roles)
+
+    def row_roles(self) -> dict[PolicyId, tuple[str | None, ...]]:
+        """The role of the agent of each of its rows, under its policy."""
+
+        return {self.policy: self.roles}
+
+
+def _row_roles(output: Any) -> Mapping[PolicyId, Sequence[str | None]] | None:
+    """The role of the agent of each of a group's rows, by policy, in the order of its rows, for an output whose rows
+    are tagged (its ``row_roles()``, as a ``PolicyGroupOutput`` gives them); None for any other."""
+
+    row_roles = getattr(output, "row_roles", None)
+    return row_roles() if callable(row_roles) else None
 
 
 def _without_workload(report: OutputReport) -> OutputReport:

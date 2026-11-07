@@ -173,8 +173,8 @@ entry's `package` registers.
 | `task_sampler_options` | dict[str, Any] | `{}` | Options of the entry's task_sampler, checked against its options when the config loads (pass_rate's: explore, max_draws_per_epoch, max_outstanding_per_task, candidates, seed); `uniform` takes none. |
 | `group_admission` | str \| None | `null` | Which of the entry's settled training groups count toward the batch (experimental; null: the run's, `train.group_admission`, with its options): `all`, `informative`, a name the entry's `package` registers with `@group_admission`, or `module:Class`. Once any entry's rule is not `all`, every entry's groups are counted as train.group_admission says (a stale or failed group of an entry at `all` no longer counts toward the batch), and train.refill's cap is the run's. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
 | `group_admission_options` | dict[str, Any] | `{}` | Options of the entry's own group_admission, which they go with (an entry that sets none inherits the run's rule and options); `all` takes none. |
-| `credit` | str \| None | `null` | How the entry's training groups turn rewards into advantages (experimental; null: the workflow's own credit, each rollout's datums centered on the group's completed-root baseline): `group` (that credit, as an estimator), `keyed` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), `reverse_kl` (on-policy distillation from a frozen teacher), `running` (each agent centered on running statistics of the groups that settled before it, for groups of one rollout), a name the entry's `package` registers with `@credit_estimator`, or `module:Class`. Its estimator runs once per group in the trainer, never in an evaluation. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
-| `credit_options` | dict[str, Any] | `{}` | Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key, leave_one_out; running's: strata, priors, ...); `group` takes none. `running`'s `priors` may name a YAML or JSON file, relative to the config file that names it. |
+| `credit` | str \| None | `null` | How the entry's training groups turn rewards into advantages (experimental; null: the workflow's own credit, each rollout's datums centered on the group's completed-root baseline): `group` (that credit, as an estimator), `keyed` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), `reverse_kl` (on-policy distillation from a frozen teacher), `running` (each agent centered on running statistics of the groups that settled before it, for groups of one rollout), `roles` (each agent role credited by an estimator of its own, with a share of the advantage mass per role), a name the entry's `package` registers with `@credit_estimator`, or `module:Class`. Its estimator runs once per group in the trainer, never in an evaluation. A named environment cannot set it. See docs/how-to/train-and-eval.md. |
+| `credit_options` | dict[str, Any] | `{}` | Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key, leave_one_out; running's: strata, priors, ...; roles': by_role); `group` takes none. `running`'s `priors` may name a YAML or JSON file, relative to the config file that names it, also as a role's under `roles`. |
 | `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's own training settings, laid over `train.workflow_config` for its training groups: the keys that act on one group or one rollout (EntryWorkflowSettings), such as `group_size`, `min_successful_group_size`, `leave_one_out_baseline` and `rollout_config.max_steps`. A key it leaves out keeps the run's; `null` unsets it. Its rollout settings are also its evaluation's defaults, below the phase's section (eval.workflow_config, inference.workflow), and `eval_overrides.workflow_config` sets what its evaluation rollouts change. `platoon config show` prints each entry's effective settings and where each came from. |
 | `max_staleness` | int \| None | `null` | How many policy versions old the entry's training groups may be and still train (null: the run's, `train.max_staleness`): the stale filter's bound for its groups. At least the run's, which stays the bound on how far rollouts run ahead of training: an entry whose groups take many steps raises its own. Recovery pruning keeps the checkpoints within the largest bound of the run and its entries. |
 | `success_threshold` | float | `1.0` | The lowest reward that counts a training rollout of the entry as a pass, in the per-task statistics and their metrics (platoon.train.task_stats), judged as platoon eval judges success: on the reward the entry's environment scored, before any reward processor. A partial-credit environment sets its own. |
@@ -878,6 +878,7 @@ long, and how each conversation is cut and which of its turns train.
 | `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, `policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the subagents'. Reads agents: the rollout workers tag each row with its agent. | [below](#keyed-options) |
 | `reverse_kl` | On-policy distillation: a frozen teacher (a `policies:` entry with `trainable: false`) scores every token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share the student's tokenizer. | [below](#reverse-kl-options) |
 | `running` | Each scored agent's rows centered on running statistics of the groups that settled before it sampled, for groups of one rollout: `clip((reward - baseline) / scale)`, the baseline its stratum's decayed mean (the task's values of the `strata` columns) shrunk toward its parent stratum's, the scale a decayed root mean square, both read as they were at the version the agent sampled at, and a negative reward never above 0. Reads agents. | [below](#running-options) |
+| `roles` | Each role of an entry's agent trees credited by an estimator of its own, `by_role.<role>.credit` with its options, on a view of the group's agents of that role; a role it does not name trains nothing. Per role, an optional reverse KL term to a frozen policy, scored as `reverse_kl` scores, and an optional share of the advantage mass, held by a positive weight from decayed masses that move as groups settle. Reads agents; a run with an entry under it logs its steps' metrics by role. | [below](#roles-options) |
 
 <a id="keyed-options"></a>
 
@@ -940,3 +941,37 @@ long, and how each conversation is cut and which of its turns train.
 |---|---|---|---|
 | `stratum` | list[str \| int \| float \| bool] | required | The stratum: its values of the strata columns, in order, as many as one or more of them ([masked], or [masked, numeric] for the stratum below it), each as the task's column holds it (a string, a number or a boolean: 3 is the column's 3, true its true). |
 | `mean` | float | required | Its prior mean reward. |
+
+<a id="roles-options"></a>
+
+### `roles`'s options
+
+`platoon.train.credit.roles.RolesOptions`: the keys of `credit_options` under `credit: roles`.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `by_role` | dict[str, [`RoleCredit`](#role-credit)] | required | Each role's credit, by role: a role of the entry's agents (a root's is policy unless its program says otherwise, a child's the role it was minted with). The agents of a role it does not name train nothing. |
+
+<a id="role-credit"></a>
+
+#### `RoleCredit`
+
+`platoon.train.credit.roles.RoleCredit`: each value of `credit_options.by_role` under `credit: roles`: how one role's agents are credited.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `credit` | str | required | The role's estimator, as an entry names its own: one of core's (group, keyed, reverse_kl, running), a name an entry's package registers, or module:Class; not roles. |
+| `options` | dict[str, Any] | `{}` | Its options, as an entry's credit_options would be, checked against its options when the config loads. |
+| `share` | float \| None | `null` | The role's share of the advantage mass its policy's rows of the entry carry, above 0 and below 1, held by a weight on its rows. None: its rows keep the mass its estimator gives them. |
+| `kl` | [`RoleKL`](#role-k-l) \| None | `null` | A reverse KL term on the role's rows (to, coef). None: none. |
+
+<a id="role-k-l"></a>
+
+#### `RoleKL`
+
+`platoon.train.credit.roles.RoleKL`: `by_role.<role>.kl` under `credit: roles`: a reverse KL term on the role's rows, `-coef * (logprob - to's logprob)` on each action token.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `to` | str | required | The frozen policy the role's sampled tokens are compared with: the id of a policies: entry with trainable: false, of the student's tokenizer. |
+| `coef` | float | required | The weight of the term, above 0: each action token's advantage less coef times the reverse KL at it. |

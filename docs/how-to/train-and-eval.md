@@ -785,13 +785,14 @@ environments:
 | `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key: under `[task, role]` the roots on the roots' mean and the subagents on the subagents', where `group` centers every agent on its rollout's root baseline | `key`: one or more of `task`, `policy`, `role` and `depth` (default `[task, policy, role]`); `leave_one_out` (default false): the mean of the other agents of its key, an agent alone in its key getting 0 |
 | `reverse_kl` | On-policy distillation: a frozen teacher scores every token the student sampled, and each action token's advantage is the negative reverse KL between them ([Distill a frozen teacher](#distill-a-frozen-teacher-experimental)) | `teacher` (required): a frozen policy of `policies:`; `kl_coef` (default 1); `reward_coef` (default 0): the weight of the row's reward centered on its member's baseline |
 | `running` | Each scored agent's rows centered on running statistics of the groups that settled before it began sampling, by its role and the stratum of the task's columns, and divided by a running scale: groups of one rollout train. Needs a staleness bound ([Credit groups of one rollout](#credit-groups-of-one-rollout-experimental)) | `strata` (default none), `priors` (default none), `half_life` (default 4), `shrink` (default 8), `clip` (default 3), `cap_penalties` (default true) |
+| `roles` | Each agent role of the entry's trees credited by an estimator of its own, on the group's agents of that role, with an optional KL term and share of the advantage mass per role ([Credit each role of a tree apart](#credit-each-role-of-a-tree-apart-experimental)) | `by_role` (required): each role's `credit`, `options`, `share` and `kl` |
 | a name an entry's `package` registers with `@credit_estimator`, or `module:Class` | yours ([Write a credit estimator](../extending/credit-estimators.md); [`examples/credit-by-role`](../../examples/credit-by-role/README.md) is one of about 40 lines) | its own |
 
 **Where it runs.** The training workflow awaits the entry's estimator once per group, in the trainer process, after
 every member of the group has settled; the error-token filter, the group's verdict and its output come after it, as
 without one. Under `train.permit_release: rollout`, the default, the members have returned their rollout permits by
 then; under `group` the group holds them, and in both modes its label slot, until the estimator returns. Evaluation never runs an
-estimator, so an evaluation's rollouts cost nothing more. An estimator that reads agents (`keyed`, `running`,
+estimator, so an evaluation's rollouts cost nothing more. An estimator that reads agents (`keyed`, `running`, `roles`,
 `by_role`) has the rollout workers tag each row with the agent that produced it (worker protocol 3), and sees each
 member's agents: each agent's role (the root's is `policy`, a subagent's the role its harness minted it with,
 `subagent` for `ctx.agents.spawn`), its depth and parent, its rows, and its own reward, the processed reward of its
@@ -820,7 +821,8 @@ takes up both; a resume whose entry names another estimator than the one that sa
 warning. Credit metrics go with the group, recorded in the step that trains it: `keyed` logs
 `credit/keyed/baselines` (the keys a group's agents fell into) and `credit/agent_advantage/abs_avg`, beside the
 `credit/baseline/*` of the workflow's own credit; `running` logs `credit/running/*`
-([below](#credit-groups-of-one-rollout-experimental)).
+([below](#credit-groups-of-one-rollout-experimental)), and `roles` each role's estimator's under `credit/roles/<role>/`
+with `credit/role_*` of its own ([further below](#credit-each-role-of-a-tree-apart-experimental)).
 
 ## Credit groups of one rollout (experimental)
 
@@ -910,6 +912,95 @@ some 20 kB for a hundred strata, a bound of 10 and 16 settles a version. An entr
 (the policy versions between an agent's sampling and its credit), and the shares of agents in the warm-up
 (`credit/running/warmup`), whose statistics were no longer kept (`credit/running/out_of_ring`), clipped
 (`credit/running/clipped`) and capped (`credit/running/capped`).
+
+## Credit each role of a tree apart (experimental)
+
+An entry whose agent trees hold several roles may need other credit for each. In an environment generator, a
+paper-to-task pipeline say, the root writes one task per draw and hands it to children that solve it: the root has no
+peer in its group, and needs a baseline across groups, while the solvers of one task are each other's peers.
+`credit: roles` credits each role with an estimator of its own, in the group's one credit call:
+
+```yaml
+train:
+  max_staleness: 4                        # running's statistics reach as far back as rows may be old
+environments:
+  - name: generate
+    # service, harness, ...: a root that writes a task and mints children of role solver to solve it
+    workflow_config: {group_size: 1}       # one task per draw
+    credit: roles
+    credit_options:
+      by_role:
+        policy:                            # the root agent's role: the generator
+          credit: running
+          options: {strata: [kind], priors: priors/generator.yaml}
+          share: 0.1                       # its share of the advantage mass the policy's rows carry
+        solver:                            # the role its harness mints the solvers with
+          credit: keyed
+          options: {key: [role], leave_one_out: true}   # each solver against the task's other solvers
+```
+
+- **Each role's estimator.** `by_role.<role>.credit` names it as an entry names its own (core's, a name a package
+  registers, or `module:Class`; not `roles`), with its `options`, checked as an entry's `credit_options` are, and it
+  credits the group's agents of that role alone: a view of the group (`CreditGroup.only`) over the very rows, every
+  member in its order, holding only the role's agents and their rows. It sees only the groups that hold an agent of
+  its role, settles them as the run files them, and records its metrics under `credit/roles/<role>/` in place of
+  `credit/` (`credit/roles/policy/running/advantage/avg`). An agent whose role `by_role` does not name trains nothing:
+  its rows get advantages of 0, with a warning once per role, so name every role that should train. A role's
+  `running` reads its priors file relative to the config file, as an entry's does.
+- **A share of the mass** (`share`, above 0 and below 1). One policy trains all of its roles' rows in one loss, under
+  one learning rate and one token mean per microbatch, so a role whose advantages are large or whose rows are long
+  takes most of each update, and a fixed weight drifts as the roles' masses do. `share` holds the role's share of the
+  advantage mass its policy's rows of the entry carry, `sum |A|` over their action tokens, with a positive weight on
+  its rows: `w = share / (1 - shares) * M_unshared / M_role`, where `M_role` is the decayed mass of the role's rows as
+  its estimator (and its KL term) left them, per settled group, `M_unshared` that of the named roles of its policy
+  without a share, and `shares` the sum of the shares of the roles whose mass is known. The masses move only as groups
+  settle, each halving every 4 versions of its policy, and a group's weight reads them as they were when the group's
+  agents of the role began sampling (the oldest version of their rows, as `running` reads its statistics, kept as far
+  back as the rows may be old and still train): fixed before the group was sampled, the weight is blind to its outcome
+  and to how long it took to settle, so it keeps the estimator's signs and expectation, where a weight read as each
+  group is credited would lean toward the groups that settle late, or early, as the masses drift. A group whose agents
+  began sampling before the masses were known reads them as they are when its credit begins, and until its role's mass
+  and the unshared roles' mass are known, a role trains at weight 1. When a role with a share first carries mass (as
+  `running`'s warm-up ends, say), its policy's masses start over from that group, so that both cover the same groups.
+  Shares add up to less than 1, and each share's policy has a named role without one. The share is of the mass before
+  the optimizer, which weighs each update its own way: read it beside the step's metrics by role (below).
+- **A KL term** (`kl: {to, coef}`). After the role's estimator, each action token of its scored agents' rows adds
+  `-coef * (logprob - to's logprob)`, the reverse KL to the frozen policy `to`, a `policies:` entry with
+  `trainable: false` of the student's tokenizer, scored as `reverse_kl` scores its teacher's ([Distill a frozen
+  teacher](#distill-a-frozen-teacher-experimental)): in the trainer, after the group's rollouts returned their permits,
+  each call bounded by `to`'s `sample_timeout_seconds`. A call that fails fails the group alone. Off unless set.
+- **What loading refuses** (exit 78, `platoon config validate` too), each problem under its path: a role's estimator
+  that does not resolve, that is `roles`, or whose options it refuses
+  (`environments.0.credit_options.by_role.solver.options.key: ...`), and what its own check refuses (`running` needs a
+  staleness bound); a `share` outside (0, 1), shares that add up to 1 or more, a share on every role, or a share whose
+  role's agents sample a policy (`agents.roles.<role>.policy`, the root's role `agents.policy`) that no named role
+  without a share samples, which could never hold (two adapters: the generator's rows are a lane of their own); a `kl`
+  whose `coef` is not above 0, or whose `to` is not a frozen policy of `policies:`, is `main`, or reads another
+  tokenizer. A frozen policy that a role's `kl` names is not warned of as unused, and an entry of `group_size: 1` under
+  `roles` is not warned of. `lock.json` records each role's options, defaults included, in the entry's record, and each
+  role's estimator in a record of its own (`level: role`): what it resolved to, and the distribution and version that
+  provide it.
+- **Its state.** Each role's estimator's state and the masses of each version a weight may still read, which each full
+  checkpoint saves with the groups it keeps; a resume gives each role's estimator its own back, and starts afresh, with
+  a warning, the estimator of a role whose `credit` changed.
+
+Each group's metrics add `credit/role_mass/<role>`, the advantage mass of the role's rows as they train, summed over
+the step's groups (`credit/role_groups` counts them); `credit/role_weight/<role>`, the weight the rows of a role with a
+share trained at; and `credit/role_kl/<role>`, the mean reverse KL per action token of a role with a KL term. A run with an entry under
+`roles` also logs at each step, by the role of each row's agent, over the rows of every entry (a row of an entry whose
+estimator reads no agents counts in the whole, under no role):
+
+| Metric | What it is |
+|---|---|
+| `roles/<role>/mass_share` | The role's share of the advantage mass the step sends, its rows' absolute advantages summed over their action tokens, each microbatch's scaled as it is sent: under one policy, how much of each update the role takes |
+| `roles/<role>/log_ratio/abs_avg` | The mean absolute log of the importance ratio `r` over its action tokens, `r` a token's probability as the step trains it over its probability as it was sampled: how far its rows drifted from their sampler, as they aged |
+| `roles/<role>/ratio_outside_frac` | The share of its action tokens whose `r` is outside `[0.5, 2]` |
+| `roles/<role>/entropy` | The sampler's entropy over its action tokens: the mean negative log-probability they were sampled at, as `optim/entropy` is the policy's |
+
+A trained policy other than `main` logs its own under `policies/<id>/`, whether the policies step in lockstep or each
+on its own clock. A run with no entry under `roles` logs none of these, and steps as it did. KL to the starting
+checkpoint is not among them: it needs a scorer of the starting weights; a role's `kl` logs `credit/role_kl/<role>`
+against its frozen policy.
 
 ## Distill a frozen teacher (experimental)
 

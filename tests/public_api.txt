@@ -222,6 +222,7 @@ platoon.experimental.CreditGroup.columns: field Mapping[str, str] = <factory dic
 platoon.experimental.CreditGroup.entry: field str | None
 platoon.experimental.CreditGroup.label: field str | None
 platoon.experimental.CreditGroup.members: field list[MemberRollout]
+platoon.experimental.CreditGroup.only: def only(*, roles: Collection[str]) -> CreditGroup
 platoon.experimental.CreditGroup.policies: field Mapping[PolicyId, PolicyView]
 platoon.experimental.CreditGroup.samples: def samples() -> list[TrainingSample]
 platoon.experimental.CreditGroup.settings: field WorkflowConfig

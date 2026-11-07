@@ -509,13 +509,14 @@ class EnvironmentConfig:
     # rollout's datums centered on the group's completed-root baseline): ``group`` (that credit, as an estimator),
     # ``keyed`` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth),
     # ``reverse_kl`` (on-policy distillation from a frozen teacher), ``running`` (each agent centered on running
-    # statistics of the groups that settled before it, for groups of one rollout), a name the entry's ``package``
+    # statistics of the groups that settled before it, for groups of one rollout), ``roles`` (each agent role credited
+    # by an estimator of its own, with a share of the advantage mass per role), a name the entry's ``package``
     # registers with ``@credit_estimator``, or ``module:Class``. Its estimator runs once per group in the trainer, never
     # in an evaluation. A named environment cannot set it. See docs/how-to/train-and-eval.md.
     credit: str | None = None
     # Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key,
-    # leave_one_out; running's: strata, priors, ...); ``group`` takes none. ``running``'s ``priors`` may name a YAML or
-    # JSON file, relative to the config file that names it.
+    # leave_one_out; running's: strata, priors, ...; roles': by_role); ``group`` takes none. ``running``'s ``priors``
+    # may name a YAML or JSON file, relative to the config file that names it, also as a role's under ``roles``.
     credit_options: dict[str, Any] = field(default_factory=dict)
     # The entry's own training settings, laid over ``train.workflow_config`` for its training groups: the keys that act
     # on one group or one rollout (EntryWorkflowSettings), such as ``group_size``, ``min_successful_group_size``,
