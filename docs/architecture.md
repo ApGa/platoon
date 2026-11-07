@@ -654,8 +654,10 @@ async def my_program(ep: pt.EpisodeContext) -> pt.Outcome:
     return await ep.grade()  # the failure taxonomy above, then the session's grade
 ```
 
-`EpisodeContext` holds the episode's `task`, `session`, rollout `config`, `route` (the environment entry) and
-`root` (the root agent's gateway record), and offers:
+`EpisodeContext` holds the episode's `task`, `session`, rollout `config`, `route` (the environment entry), `root`
+(the root agent's gateway record) and `options` (the program's options: the entry's `program_options`, parsed against
+the schema the program declares with `@pt.program(name, options=...)`, which a load-time `check=` may refuse when
+the config loads), and offers:
 
 | Method | Does |
 |---|---|

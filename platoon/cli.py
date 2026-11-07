@@ -199,10 +199,11 @@ def train(config: Path, /, *overrides: str, prepare: bool = False) -> int:
     settings = resolved.config
     run_dir = Path(settings.log_path) / settings.stats.experiment_name / settings.stats.trial_name
     check_run_directory(run_dir, resolved.site)  # one the site profile named after another file of this name
+    components = _run_components(resolved)  # and the programs' checks pass, before a prepare spends any time
     if prepare and (code := _prepare_first(config, overrides)):
         return code  # not ready: training does not start
     refuse_running(run_dir, "train")  # before the record below replaces a running run's
-    record = write_run_record(run_dir, resolved, argv=_invocation, components=_run_components(resolved))
+    record = write_run_record(run_dir, resolved, argv=_invocation, components=components)
     _configure_logging()
     _lock_tool_call_parsing(record.lock_path, settings.train)
     from platoon.train.supervise import run_training
@@ -249,6 +250,9 @@ def eval_(config: Path, /, *overrides: str, prepare: bool = False) -> int | None
     if rollouts:  # nor serves a policy
         _check_policy_environment(resolved.config.inference.policy())
     _warn_ignored_output_dirs(resolved, "eval")
+    # A report-only run reads finished rollouts and names no component; the others' resolve, and their programs'
+    # checks pass, before a prepare spends any time.
+    components = None if resolved.config.stage == "report" else _run_components(resolved)
     if prepare and resolved.config.stage == "report":  # it reads finished rollouts: a prepare could only delay it
         print(
             "platoon: --prepare is ignored: stage=report runs no rollout, so it needs nothing that platoon prepare "
@@ -258,8 +262,6 @@ def eval_(config: Path, /, *overrides: str, prepare: bool = False) -> int | None
     elif prepare and (code := _prepare_first(config, overrides)):
         return code  # not ready: the evaluation does not start
     _refuse_an_output_dir_in_use(resolved.config)  # before the record below replaces a running run's
-    # A report-only run reads finished rollouts and names no component.
-    components = None if resolved.config.stage == "report" else _run_components(resolved)
     named = resolved.config.inference.output_dir is not None
     # Without one, each start gets a new directory under the site profile's runs, else under the working directory's.
     runs = resolved.site.profile.runs if resolved.site is not None else None
@@ -368,7 +370,8 @@ def prepare(config: Path, /, *overrides: str, dry_run: bool = False) -> int:
     lock, the images its tasks build from Dockerfiles, its harnesses' toolchains and the policy's tokenizer.
 
     CONFIG is a training or evaluation config, or a file of environments that they extend; only its environments are
-    read, and checked as a run checks them.  The datasets go into the Harbor cache (harbor in the site profile's
+    read, and checked as a run checks them, but for the programs' load-time checks, which read the run's settings and
+    which the run itself runs.  The datasets go into the Harbor cache (harbor in the site profile's
     cache, else ~/.cache/platoon/harbor), the images into each entry's image map (`images/<provider>.json` in that
     cache), built with its sandbox provider's builder, and the toolchains under the toolchain root (toolchains in the
     site profile's cache).  The site profile it uses is named on stderr first, and a provider from it that this node
@@ -410,7 +413,9 @@ def _prepare(
     if report_site:
         _site(resolved, run=False, available=not dry_run)
     _warn_of_deprecations(resolved.deprecations)
-    _run_components(resolved)  # every component resolves and takes its options, as when a run starts
+    # Every component resolves and takes its options, as when a run starts.  The programs' checks, which read the
+    # run's settings, wait for a run's own config: train, eval and rollout run them before their --prepare.
+    _run_components(resolved)
     steps = run_prepare(resolved, dry_run=dry_run, command=prepare_command(config, overrides), out=out)
     line, code = summary(steps, dry_run=dry_run)
     out(line)
@@ -629,12 +634,13 @@ def rollout(
     split = split or (getattr(settings, "split", "eval") if inference else "train")
     policy = _rollout_policy(settings, model=model, model_path=model_path, renderer=renderer)
     _check_policy_environment(policy)
+    components = _run_components(resolved, split=split)  # and the programs' checks pass, before a prepare runs
     if prepare:  # the tokenizer it loads is the one the rollout's policy loads: the flags replace the config's
         code = _prepare_first(config, [*overrides, *_policy_overrides(settings, model=model, renderer=renderer)])
         if code:
             return code  # not ready: the rollout does not start
     run_dir = output_dir or Path("runs/adhoc") / f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{_slug(task)}"
-    record = write_run_record(run_dir, resolved, argv=_invocation, components=_run_components(resolved, split=split))
+    record = write_run_record(run_dir, resolved, argv=_invocation, components=components)
     rollout_config = _rollout_config(settings, split, run_dir, task)
     if model is not None:
         rollout_config.model_name = model
@@ -1421,7 +1427,9 @@ def program_list() -> None:
 
 @program_app.command(name="show")
 def program_show(name: str, /) -> None:
-    """Show one episode program: its reference, source, distribution, root role (when it declares one) and docstring.
+    """Show one episode program: its reference, source, distribution, root role (when it declares one), its options
+    (each option's type, default, allowed values or range and description, which an environments entry sets in
+    program_options), its load-time check (when it declares one) and docstring.
 
     Parameters
     ----------
@@ -1443,10 +1451,137 @@ def program_show(name: str, /) -> None:
     ]
     if record.root_role is not None:  # the role of an entry's root that names none (agents.root_role)
         lines.append(f"root role: {record.root_role}")
+    lines += _program_options(record.options_schema)
+    if record.check is not None:
+        lines.append(f"check: {_qualified(record.check)}")
     doc = inspect.getdoc(record.fn)
     if doc:
         lines += ["", doc]
     print("\n".join(lines))
+
+
+def _program_options(schema: Any) -> list[str]:
+    """``program show`` lines for a program's options: each option's name, type, default, the values it takes and
+    what it does, for a dataclass or a pydantic model, as ``harness show`` lists a spec's; the parser for a function.
+    An environments entry sets them in ``program_options``."""
+
+    if schema is None:
+        return ["options: - (program_options must be empty)"]
+    rows = _schema_rows(schema)
+    if rows is None:
+        return [f"options: parsed by {_qualified(schema)} (set in an environments entry's program_options)"]
+    table = _table(("option", "type", "default", "values", "description"), rows, indent="  ")
+    return [f"options ({_qualified(schema)}, set in an environments entry's program_options):", table]
+
+
+def _schema_rows(schema: Any) -> list[tuple[str, str, str, str, str]] | None:
+    """Each option of a dataclass or pydantic schema: its name, its type, its default (``required`` without one), the
+    values it takes beyond its type (a ``Literal``'s or an enum's, and a pydantic field's bounds) and its description
+    (a pydantic field's ``description``, a dataclass field's ``metadata["description"]``), ``-`` for none; None for a
+    schema of another kind, a parser."""
+
+    import dataclasses
+    import typing
+
+    from platoon.utils.config import _is_pydantic
+
+    if isinstance(schema, type) and dataclasses.is_dataclass(schema):
+        try:
+            hints = typing.get_type_hints(schema)
+        except Exception:  # noqa: BLE001 - an annotation that does not resolve is shown as written
+            hints = {}
+        rows = []
+        for item in dataclasses.fields(schema):
+            if not item.init:
+                continue
+            if item.default is not dataclasses.MISSING:
+                default = _option_value(item.default)
+            elif item.default_factory is not dataclasses.MISSING:
+                default = _option_value(item.default_factory())
+            else:
+                default = "required"
+            annotation = hints.get(item.name, item.type)
+            kind, values = (annotation, "-") if isinstance(annotation, str) else _option_type(annotation)
+            description = item.metadata.get("description") or "-"
+            rows.append((item.name, kind, default, values, str(description)))
+        return rows
+    if _is_pydantic(schema):
+        rows = []
+        for name, info in schema.model_fields.items():
+            kind, values = _option_type(info.annotation, info.metadata)
+            default = "required" if info.is_required() else _option_value(info.get_default(call_default_factory=True))
+            rows.append((info.alias or name, kind, default, values, info.description or "-"))
+        return rows
+    return None
+
+
+def _option_type(annotation: Any, metadata: Sequence[Any] = ()) -> tuple[str, str]:
+    """An option's type, and the values it takes beyond it, for ``program show``: a ``Literal``'s choices as ``one
+    of ...`` under the type of its choices (``str``), an enum's members' values likewise, and a pydantic field's
+    bounds (``metadata``) as ``harness show`` words a spec's (``0 to 1``, ``>= 1``, ``< 2``); ``-`` when nothing
+    narrows the type."""
+
+    import typing
+
+    from platoon.utils.config import _is_union, _strip, _type_name
+
+    annotation = _strip(annotation)
+    members, optional = [annotation], False
+    if _is_union(annotation):
+        members = [member for member in typing.get_args(annotation) if member is not type(None)]
+        optional = len(members) < len(typing.get_args(annotation))
+    if len(members) == 1 and typing.get_origin(_strip(members[0])) is Literal:
+        choices = typing.get_args(_strip(members[0]))
+        kinds = dict.fromkeys("null" if choice is None else type(choice).__name__ for choice in choices)
+        if optional:
+            kinds["null"] = None
+        return " | ".join(kinds), "one of " + ", ".join(_option_value(choice) for choice in choices)
+    if len(members) == 1 and isinstance(members[0], type) and issubclass(members[0], enum.Enum):
+        return _type_name(annotation), "one of " + ", ".join(_option_value(member) for member in members[0])
+    bounds = {
+        name: getattr(item, name)
+        for item in metadata
+        for name in ("ge", "gt", "le", "lt")
+        if getattr(item, name, None) is not None
+    }
+    if "ge" in bounds and "le" in bounds:
+        return _type_name(annotation), f"{_option_value(bounds['ge'])} to {_option_value(bounds['le'])}"
+    signs = {"ge": ">=", "gt": ">", "le": "<=", "lt": "<"}
+    values = ", ".join(f"{sign} {_option_value(bounds[name])}" for name, sign in signs.items() if name in bounds)
+    return _type_name(annotation), values or "-"
+
+
+def _option_value(value: Any) -> str:
+    """A default or an allowed value as ``harness show`` writes a spec's: ``true``/``false``, a number in decimal, a
+    string as it is (``""`` when empty), ``null``, an enum member as its value and a path as its text; anything else
+    as JSON, else its repr."""
+
+    import decimal
+
+    if isinstance(value, enum.Enum):
+        return _option_value(value.value)
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return format(decimal.Decimal(repr(value)), "f")
+    if isinstance(value, str):
+        return value or '""'
+    if isinstance(value, int):
+        return str(value)
+    try:
+        return json.dumps(value)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _qualified(value: Any) -> str:
+    """``module:qualname`` of a function or class."""
+
+    return f"{getattr(value, '__module__', '?')}:{getattr(value, '__qualname__', type(value).__qualname__)}"
 
 
 # --- toolchains ------------------------------------------------------------------------------------------------

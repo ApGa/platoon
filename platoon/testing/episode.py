@@ -82,6 +82,7 @@ async def run_episode(
     service_kwargs: Mapping[str, Any] | None = None,
     harness_options: Mapping[str, Any] | None = None,
     program: str = "single",
+    program_options: Mapping[str, Any] | None = None,
     agents: Mapping[str, Any] | None = None,
     max_steps: int | None = None,
     rollout: RolloutConfig | Mapping[str, Any] | None = None,
@@ -97,7 +98,10 @@ async def run_episode(
         harness: The harness, as an environment entry names it (``platoon-react``, ``my-agent@2``, a spec path).
         policy: What the model writes: a ``ScriptedPolicy``, a script to wrap in one, or a gateway from
             :func:`~platoon.testing.make_gateway` (for other gateway settings).
-        service_kwargs, harness_options, program, agents: The environment entry's keys of the same names.
+        service_kwargs, harness_options, program, program_options, agents: The environment entry's keys of the
+            same names. The program is resolved, and ``program_options`` parsed against its schema, before anything
+            runs, as a config's are when it loads: a program that does not resolve raises, and options it does not
+            take, or a required one left out, raise a ``ConfigError`` (a ``ValueError``).
         max_steps: The root agent's step budget (default: the task's, else unbounded).
         rollout: Other rollout settings (``RolloutConfig`` fields such as ``timeout`` or ``inference_params``).
         output_dir: Where the rollout writes its files (default: a new temporary directory, kept).
@@ -109,11 +113,15 @@ async def run_episode(
     from platoon.config_defs import RolloutConfig
     from platoon.gateway import ModelGateway
     from platoon.harness.rollout import EmbeddedGateway, run_harness_rollout
+    from platoon.programs import resolve_program
     from platoon.task import Task
     from platoon.testing.gateway import make_gateway
     from platoon.train.components import AgentTreeConfig, EnvironmentRoute
     from platoon.train.tinker.proxy import proxy_interactions
 
+    # Resolved and its options parsed (a required one it leaves out included) here, before anything runs, as when a
+    # config loads, rather than as the episode's error outcome.
+    resolve_program(program).parse_options(program_options)
     gateway = policy if isinstance(policy, ModelGateway) else make_gateway(policy)
     if isinstance(rollout, RolloutConfig):
         config = copy.deepcopy(rollout)
@@ -132,6 +140,7 @@ async def run_episode(
         harness=harness,
         harness_options=dict(harness_options or {}),
         program=program,
+        program_options=dict(program_options or {}),
         agents=AgentTreeConfig.coerce(agents),
         resolve_task=isinstance(task, str),
     )

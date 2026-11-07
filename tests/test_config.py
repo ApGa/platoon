@@ -3,6 +3,7 @@ records."""
 
 from __future__ import annotations
 
+import enum
 import json
 import re
 import subprocess
@@ -549,6 +550,36 @@ def test_an_override_that_names_a_trainer_config_that_does_not_resolve_is_a_conf
 
     with pytest.raises(ConfigError, match=r"environments.0.trainer_config: 'no.such.module:Config' does not resolve"):
         resolve_config(run, ["environments.0.trainer_config=no.such.module:Config"], PlatoonTinkerRLTrainerConfig)
+
+
+class Speed(enum.Enum):
+    FAST = "fast"
+    SLOW = "slow"
+
+
+@dataclass
+class Placement:
+    workdir: Path = Path("work")
+    speed: Speed = Speed.FAST
+    cache: Path | None = None
+    speeds: list[Speed] = field(default_factory=list)
+
+
+def test_enum_and_path_fields_are_built_as_their_classes(tmp_path):
+    """Validation takes a member's value for an enum field and a string for a path field; the field gets the member
+    and the path, not the value as written."""
+
+    run = _write(tmp_path / "run.yaml", {"workdir": "/srv/run", "speed": "slow", "speeds": ["fast", "slow"]})
+
+    resolved = resolve_config(run, ["cache=/tmp/cache"], Placement)
+
+    assert resolved.config == Placement(
+        workdir=Path("/srv/run"), speed=Speed.SLOW, cache=Path("/tmp/cache"), speeds=[Speed.FAST, Speed.SLOW]
+    )
+    assert resolved.config.speed is Speed.SLOW and isinstance(resolved.config.workdir, Path)
+    assert lay_over(Placement(speed=Speed.SLOW), {"workdir": "/elsewhere"}) == Placement(Path("/elsewhere"), Speed.SLOW)
+    with pytest.raises(ConfigError, match=r"speed: 'medium' is not a Speed"):
+        resolve_config(_write(tmp_path / "bad.yaml", {"speed": "medium"}), [], Placement)
 
 
 class PydanticInner(pydantic.BaseModel):

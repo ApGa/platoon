@@ -13,6 +13,10 @@ async def solve_then_check(ep: pt.EpisodeContext) -> pt.Outcome:
     ep.add_finalizer(my_reward_shaping)              # runs on the built TrajectoryCollection
     return await ep.grade()
 ```
+
+A program may declare options (``@pt.program(name, options=Schema)``), which an environment sets next to it, in
+``program_options``, and the program reads parsed, as ``ep.options``; and a ``check`` that refuses, when the config
+loads, an entry it cannot serve (RFC 0016, :mod:`platoon.options`).
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ import threading
 import types
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from platoon import extensions
 from platoon.utils.judges import JUDGING_ROLES
@@ -39,6 +43,7 @@ if TYPE_CHECKING:
     from platoon.harness.agent import AgentResult, ModelEndpoint
     from platoon.harness.inline import InlineRuntime
     from platoon.harness.verify import SubagentBehaviorJudge
+    from platoon.options import CheckContext
     from platoon.task import Task
     from platoon.train.components import EnvironmentRoute
     from platoon.trajectory import TrajectoryCollection
@@ -77,14 +82,18 @@ class DrawInfo:
 
 
 Finalizer = Callable[["TrajectoryCollection"], "Awaitable[None] | None"]
+# The type of a program's options, as ``ep.options`` gives them: ``pt.EpisodeContext[MyOptions]``.
+OptionsT = TypeVar("OptionsT", covariant=True)
 
 
-class EpisodeContext(Protocol):
+class EpisodeContext(Protocol[OptionsT]):
     """One rollout of one task, as a program sees it.
 
     ``behavior_judge`` (verifier grading of children) and ``tool_transform`` (rewrites the MCP tool listing of
     every agent, ``platoon.gateway.mcp.bind_agent_tools``) may be set before :meth:`run`.  ``root`` is the root
     agent's record (``platoon.gateway.AgentSession``: its misc, result and calls), e.g. for self-graded harnesses.
+    It is generic in the type of the program's options (``ep.options``): annotate a program that declares
+    ``options=MyOptions`` with ``ep: pt.EpisodeContext[MyOptions]``.
     """
 
     # The task the rollout works on.
@@ -108,6 +117,14 @@ class EpisodeContext(Protocol):
     # The run and the training draw this episode belongs to, when its trainer asks for them (experimental); None in an
     # evaluation and otherwise.
     draw: DrawInfo | None
+
+    @property
+    def options(self) -> OptionsT:
+        """The program's options (``@pt.program(name, options=...)``), parsed against its schema with its defaults:
+        the entry's ``program_options``, with its ``eval_overrides.program_options`` merged over them in an
+        evaluation rollout.  An instance of a dataclass or pydantic schema, what a parser returned, or None for a
+        program that declares no options."""
+        ...
 
     async def run(
         self,
@@ -155,17 +172,20 @@ PROGRAM_ATTRIBUTE = "__platoon_program__"
 
 @dataclass(frozen=True)
 class RegisteredProgram:
-    """An episode program as configs name it: ``name@version``, its function, and the role of the root agent of an
-    environment entry that runs it and names no root role of its own (``root_role``; None: ``policy``).
+    """An episode program as configs name it: ``name@version``, its function, the role of the root agent of an
+    environment entry that runs it and names no root role of its own (``root_role``; None: ``policy``), the schema of
+    its options (``options_schema``; None: it takes none) and its load-time check (``check``; None: none).
 
     A ``module:attr`` reference to a function that ``@pt.program`` did not register resolves to a record named
-    by that reference, with no version and no root role.
+    by that reference, with no version, no root role and no options.
     """
 
     name: str
     version: str
     fn: EpisodeProgram = field(repr=False, compare=False)
     root_role: str | None = None
+    options_schema: Any = field(default=None, repr=False, compare=False)
+    check: Callable[[Any, CheckContext], None] | None = field(default=None, repr=False, compare=False)
 
     @property
     def ref(self) -> str:
@@ -177,13 +197,27 @@ class RegisteredProgram:
         """``module:qualname`` of the function."""
         return f"{self.fn.__module__}:{getattr(self.fn, '__qualname__', type(self.fn).__qualname__)}"
 
+    def parse_options(self, values: Mapping[str, Any] | None, where: str = "program_options") -> Any:
+        """``values`` parsed against the program's schema, what ``ep.options`` gives: an instance of a dataclass or
+        pydantic schema, a parser's result, or None for a program that declares no options.  A
+        :class:`~platoon.utils.config.ConfigError` (a ``ValueError``) with every problem, each under ``where``."""
+
+        from platoon.options import schema_options
+
+        return schema_options(self.options_schema, name=f"program {self.ref}").parse(values, where)
+
 
 _lock = threading.Lock()
 _programs: dict[str, RegisteredProgram] = {}
 
 
 def program(
-    name: str, *, version: str = "1", root_role: str | None = None
+    name: str,
+    *,
+    version: str = "1",
+    root_role: str | None = None,
+    options: Any = None,
+    check: Callable[[Any, CheckContext], None] | None = None,
 ) -> Callable[[EpisodeProgram], EpisodeProgram]:
     """Register the decorated ``async def fn(ep: EpisodeContext) -> Outcome`` as episode program ``name@version``.
 
@@ -198,6 +232,23 @@ def program(
     tools, of the agent ``ep.run()`` runs.  Without one the root's role is ``policy``.  The config still binds each
     role to its policy: a program names a role, never a policy.  No root takes ``verifier`` or ``judge``, the roles of
     the agents platoon opens to judge others.
+
+    ``options`` is the schema of the program's options, which an environments entry sets next to ``program``, in
+    ``program_options`` (and in ``eval_overrides.program_options`` for its evaluation rollouts), and which the program
+    reads parsed, with their defaults, as ``ep.options``: a dataclass (each unknown key refused with a did-you-mean,
+    each wrong type with its path; an enum or a path field is built as its class), a pydantic model (an unknown key
+    refused with a did-you-mean too, unless the model keeps such keys, ``extra="allow"``), or a function that takes
+    the options' mapping, returns them parsed and raises ``ValueError``.  Without one the program takes no options,
+    and an entry that sets some for it is refused.  ``platoon program show`` lists a schema's options, each with the
+    description that a pydantic field's ``description``, or a dataclass field's ``metadata["description"]``, gives.
+
+    ``check`` is a plain function ``check(options, ctx)``, not an ``async def``, which refuses an entry the program
+    cannot serve by raising ``ValueError``: it runs when a training or an evaluation config loads, in
+    ``platoon config validate`` and before ``train``, ``eval`` or ``rollout`` runs anything (their ``--prepare``
+    included), once for each entry that runs the program and each phase the command runs, with that phase's options
+    parsed and a ``pt.CheckContext`` (the entry, the phase and its rollout config); a refusal is a configuration error
+    (exit 78) that names the entry, the program and the phase.  A file of environments alone, and ``platoon prepare``,
+    check the options but run no check: they give no run's rollout settings for it to read.
     """
 
     extensions.check_name(name, what="program")
@@ -209,12 +260,26 @@ def program(
             f"@program({name!r}): root_role {root_role!r} is the role of agents platoon opens to judge others, which "
             "never train, so no root takes it: give the program's roots a role of their own"
         )
+    if options is not None and not callable(options):
+        raise TypeError(
+            f"@program({name!r}): options must be a schema (a dataclass, a pydantic model, or a function of the "
+            f"options' mapping that returns them parsed), got {options!r}"
+        )
+    if check is not None and not callable(check):
+        raise TypeError(f"@program({name!r}): check must be a function check(options, ctx), got {check!r}")
+    if inspect.iscoroutinefunction(check):
+        raise TypeError(
+            f"@program({name!r}): check must be a plain function check(options, ctx), not an async def: it runs when "
+            f"the config loads, where nothing awaits it, got {check!r}"
+        )
 
     def decorate(fn: EpisodeProgram) -> EpisodeProgram:
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"@program({name!r}) needs an async function, got {fn!r}")
         extensions.check_registration("program", name, module=getattr(fn, "__module__", None))
-        record = RegisteredProgram(name=name, version=version, fn=fn, root_role=root_role)
+        record = RegisteredProgram(
+            name=name, version=version, fn=fn, root_role=root_role, options_schema=options, check=check
+        )
         register_program(record)
         setattr(fn, PROGRAM_ATTRIBUTE, record)
         return fn
@@ -358,7 +423,8 @@ async def single(ep: EpisodeContext) -> Outcome:
 
 
 class Episode:
-    """The :class:`EpisodeContext` ``harness_rollout`` gives a program, over an inline runtime."""
+    """The :class:`EpisodeContext` ``harness_rollout`` gives a program, over an inline runtime; ``options`` are the
+    program's, parsed from the route's ``program_options`` (:meth:`RegisteredProgram.parse_options`)."""
 
     def __init__(
         self,
@@ -376,6 +442,7 @@ class Episode:
         self.route = route
         self.runtime = runtime
         self.root = root
+        self.options: Any = None  # set by the rollout before the program runs
         self.behavior_judge: SubagentBehaviorJudge | None = None
         self.tool_transform: Callable[..., Any] | None = None
         self.root_result: AgentResult | None = None

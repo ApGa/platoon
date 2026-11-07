@@ -2,7 +2,8 @@
 
 **Goal.** Write an episode program (`@pt.program`) that runs the root agent, grades it, and post-processes the
 rollout's trajectories with a finalizer: here, one that shapes number-search rewards toward fewer guesses and asks
-a judge for a critique. Then run it, check it on CPU and train with it.
+a judge for a critique, by a penalty that the config sets as the program's option. Then run it, check it on CPU and
+train with it.
 
 **Prerequisites.**
 
@@ -36,8 +37,9 @@ the episode an `error` outcome, which never trains as reward 0.
 | `EpisodeContext` member | What it is |
 |---|---|
 | `task`, `session` | The task and its environment session (`session.instruction` is the goal) |
-| `config` | The rollout config (in training, `train.workflow_config.rollout_config`), including its free-form `extra` mapping |
-| `route` | The environment entry as the rollout sees it: harness, `harness_options`, `agents`, `program` |
+| `options` | The program's options, as the environment entry sets them in `program_options`, parsed against the schema the program declares (`@pt.program(name, options=...)`), defaults included; None for a program that declares none |
+| `config` | The rollout config (in training, `train.workflow_config.rollout_config`) |
+| `route` | The environment entry as the rollout sees it: harness, `harness_options`, `agents`, `program`, `program_options` |
 | `root` | The root agent's record: its `misc`, `result` and calls |
 | `run(harness=None, *, goal=None, options=None)` | Run the root agent once (default: the route's harness, on the instruction) and return its `AgentResult` |
 | `grade()` | Grade the session, failing closed (a run that crashed or timed out gets its untrainable outcome) |
@@ -51,26 +53,39 @@ the episode an `error` outcome, which never trains as reward 0.
 
 ### 1. Write the program
 
-The example's program runs and grades the root like `single`, and registers a finalizer:
+The example's program runs and grades the root like `single`, and registers a finalizer. It declares one option,
+the penalty per extra guess, with `options=`:
 
 ```python
 # examples/program-reward-shaping/efficient_search.py
-@pt.program("example-efficient-search")
-async def efficient_search(ep: pt.EpisodeContext) -> pt.Outcome:
+@dataclass(frozen=True)
+class SearchOptions:
+    """The program's options, which an environments entry sets in ``program_options``."""
+
+    guess_penalty: float = 0.1  # reward lost per guess beyond binary search's
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.guess_penalty <= 1:
+            raise ValueError(f"guess_penalty: must be between 0 and 1, got {self.guess_penalty}")
+
+
+@pt.program("example-efficient-search", options=SearchOptions)
+async def efficient_search(ep: pt.EpisodeContext[SearchOptions]) -> pt.Outcome:
     await ep.run()
     ep.add_finalizer(
         EfficiencyShaping(
             goal=ep.session.instruction,
             judge=ep.judge_endpoint(),
-            penalty=float(ep.config.extra.get("guess_penalty", 0.1)),  # rollout_config.extra in the config
+            penalty=ep.options.guess_penalty,  # program_options in the config, checked when it loads
         )
     )
     return await ep.grade()
 ```
 
-The returned outcome is the episode's grade: the root trajectory's outcome, and the reward of every subagent that
-has no grade of its own. A program may also build its own `pt.Outcome`, as the built-in `gym` program does with the
-return its harness recorded.
+The schema's fields are the keys a config may set, and their defaults apply to the keys it leaves out; the program reads
+them, parsed, as `ep.options`, and `pt.EpisodeContext[SearchOptions]` types them. The returned outcome is the episode's
+grade: the root trajectory's outcome, and the reward of every subagent that has no grade of its own. A program may also
+build its own `pt.Outcome`, as the built-in `gym` program does with the return its harness recorded.
 
 ### 2. Write the finalizer
 
@@ -151,6 +166,8 @@ environments:
     service: python://platoon.envs.number_search.env:NumberSearchEnvironment
     harness: platoon-react
     program: example-efficient-search
+    program_options:
+      guess_penalty: 0.1          # the program's option: reward lost per guess beyond binary search's
     package: efficient_search     # imported first, so @pt.program("example-efficient-search") registers
     reward_processor: efficient_search:reward_parts   # train on the shaped reward, report its parts
     agents:
@@ -160,12 +177,16 @@ train:
   workflow_config:
     rollout_config:
       max_steps: 12
-      extra:
-        guess_penalty: 0.1        # read by the program: reward lost per guess beyond binary search's
 ```
 
-`program:` takes a registered name or a `module:function` reference. `rollout_config.extra` is a free-form mapping
-that programs read through `ep.config.extra`.
+`program:` takes a registered name or a `module:function` reference, and `program_options:` sets its options, next
+to it. They are checked when the config loads, by `platoon config validate` and before `platoon rollout`, `eval` or
+`train` runs anything: a key the program does not take fails with exit code 78 and a did-you-mean
+(`environments.0.program_options.guess_penalt: unknown key; did you mean environments.0.program_options.guess_penalty?`),
+and so does a value the schema refuses (`guess_penalty: 2`). `platoon program show example-efficient-search` lists
+the options with their types, defaults, the values they take and what they do, a command-line override sets one as
+it sets any key (`environments.0.program_options.guess_penalty=0`), and the run's `lock.json` records the options
+each entry ran with, defaults included.
 
 ### 4. Run one task
 
@@ -235,7 +256,9 @@ returns `reward/success` would undo the shaping.
 - **The root runs once.** A second `ep.run()` raises. Programs run function harnesses (`@pt.harness`); an
   environment whose harness is a TOML spec runs it directly, without a program.
 - **Failures.** A program that raises gives an `error` outcome (failure kind `unexpected:<Type>`); a finalizer that
-  raises gives one with failure kind `finalizer:<Type>`, and the rollout's trajectories are rebuilt untrainable.
+  raises gives one with failure kind `finalizer:<Type>`, and the rollout's trajectories are rebuilt untrainable. A
+  rollout parses the program's options again before the program runs, and options it does not take, which only a
+  route built without the config's check can carry, give an `error` outcome with failure kind `program_options`.
 - **Deadlines.** When the root hits the rollout's `timeout`, `run()` returns `AgentResult("timeout")`: subagents
   that already finished keep their grades, and those still running are cancelled.
 - **Built-in programs.** `single` (the default) and `gym`, which scores a `pt.gym.loop` harness by the return it
@@ -246,6 +269,26 @@ returns `reward/success` would undo the shaping.
   `program: name@version`; and an installed package can declare a `platoon.programs` entry point named after the
   program instead, which platoon imports when a config names it ([Publish an extension
   package](../extending/publish-a-package.md#step-5-declare-the-entry-points)).
+- **Options and checks.** `@pt.program(name, options=Schema)` declares the program's options: a dataclass (each
+  unknown key refused with a did-you-mean, each wrong type with its path, an enum or a path field built as its class,
+  and a `ValueError` its `__post_init__` raises reported under the field it names), a pydantic model (an unknown key
+  refused with a did-you-mean too, unless the model keeps such keys with `extra="allow"`), or a function that takes
+  the options' mapping, returns them parsed and raises `ValueError`. `platoon program show` prints each option's
+  description from a pydantic field's `description`, or a dataclass field's `metadata["description"]`
+  (`field(default=0.1, metadata={"description": "..."})`). A program without a schema takes no options, and an entry
+  that sets some for it is refused, as is one that sets them on an entry without a harness, which runs no program.
+  An entry's `eval_overrides.program_options` merge over its `program_options`, key by key, for its evaluation
+  rollouts (every split but `train`). `check=` takes a plain function `check(options, ctx)` (not an `async def`),
+  which refuses an entry the program cannot serve by raising `ValueError`: it runs when a training or an evaluation
+  config loads, once for each phase the command runs (`train`, and `eval` when `platoon train` evaluates), with that
+  phase's options and a `pt.CheckContext` (`environment`, the entry; `phase`; `rollout`, the phase's rollout config
+  for the entry), and its message becomes a configuration error that names the entry, the program and the phase.
+  `platoon train`, `eval` and `rollout` run it before their `--prepare` prepares anything; `platoon prepare`, which
+  loads only a config's environments, and `platoon config validate` of a file of environments alone, check the
+  options but run no check, since the run's rollout settings are not there to read. A check reads the config only,
+  and must be quick. A named environment that sets its `program` may set its `program_options`, and its
+  `eval_overrides.program_options`, too, which apply beneath the entry's own while the entry that selects it keeps
+  that program.
 - **The root's role** (experimental). `@pt.program(name, root_role="generator")` gives the root agent of the
   program's episodes (`ep.root`, which `ep.run()` runs) that role, and so its policy and its tools, for its whole
   life, unless the entry names its own (`agents.root_role`). The config binds the role to a policy

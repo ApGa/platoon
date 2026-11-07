@@ -33,6 +33,51 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   role](docs/how-to/train-and-eval.md#give-an-entrys-root-agent-a-role-experimental)). A config that names no root role,
   with programs that declare none, runs as before, request for request: a route leaves an unset `root_role` out, and
   `identity.json` gains no key.
+- **Episode programs take options (RFC 0016): `@pt.program(name, options=..., check=...)` and
+  `environments[].program_options`.** A program had nowhere to put its settings but `rollout_config.extra`, which
+  nothing checks: a misspelled key there loaded, and the program read its default. Now a program declares the schema of
+  its options (a dataclass, a pydantic model, or a function that parses the options' mapping), an environments entry
+  sets them next to its `program`, in `program_options`, with `eval_overrides.program_options` merged over them, key by
+  key, for its evaluation rollouts, and the program reads them parsed, with its defaults, as `ep.options`
+  (`pt.EpisodeContext[MyOptions]` types them). They are checked when the config loads, in `platoon config validate`,
+  `platoon prepare` and before `train`, `eval` or `rollout` runs anything: a key the program does not take fails with
+  exit code 78 and a did-you-mean, and so does a value its schema refuses; a program that declares no options takes
+  none, and an entry without a harness, which runs no program, takes none either. A program's `check(options, ctx)`, a
+  plain function, refuses an entry it cannot serve by raising `ValueError`: it runs when a training or an evaluation
+  config loads, in `platoon config validate` and before `train`, `eval` or `rollout` runs anything, their `--prepare`
+  included, once for each phase the command runs, with that phase's options and a `pt.CheckContext` (the entry, the
+  phase and the entry's rollout config of that phase), and its message is a configuration error that names the entry,
+  the program and the phase. A file of environments alone, and `platoon prepare`, which loads only a config's
+  environments, give no run's rollout settings, so they run no check. `lock.json` records the options each entry ran
+  its program with, defaults included, per phase, as it records a TOML harness spec's; `platoon program show` lists a
+  program's options, each with its type, default, allowed values or range and description, and its check;
+  `platoon.testing.run_episode` takes `program_options`. A named environment that names its program may set that
+  program's `program_options` and `eval_overrides.program_options`, which apply beneath the entry's own while the entry
+  that selects it keeps the program. The program-reward-shaping example and the reward guide's step-cost program now
+  take their settings as options ([Episode programs](docs/tutorials/programs.md#reference)). A config that sets no
+  program options runs as before, request for request: a route leaves empty `program_options` out.
+
+### Changes
+
+- A pydantic model that is the options schema of a task sampler, a group admission rule, a credit estimator or a
+  program now refuses a key of the options it does not take as a config section's unknown key is refused, with a
+  did-you-mean, unless the model keeps such keys (`extra="allow"`). Under pydantic's default (`extra="ignore"`) the key
+  was dropped without a word, so a misspelled option loaded and its default ran; a model that forbids extra keys
+  (`extra="forbid"`) gave pydantic's `Extra inputs are not permitted`. A nested model keeps pydantic's own rules.
+- `platoon.testing.run_episode` resolves its program before anything runs: a program that does not resolve raises, as
+  a config that names it fails when it loads, where the episode ended as an `error` outcome.
+- `platoon train`, `eval` and `rollout` with `--prepare` refuse what only the whole config shows (a task sampler's, an
+  admission rule's or a credit estimator's options and checks, and now a program's check) before the prepare makes
+  anything, where they found it once the prepare had ended ready: they resolve the config's components first.
+
+### Fixes
+
+- A config class, or a component's options schema that is a dataclass, whose field is an enum or a path (a
+  `pathlib.Path`, or another `os.PathLike` class) now gets the member or the path a config's value names, which
+  validation accepted for the field, where it got the value as written (the string `"slow"`, not `Mode.SLOW`).
+  `lock.json`, and a task sampler's sampling fingerprint, record such an option as its value or its text, where
+  writing `lock.json` failed with `TypeError: Object of type PosixPath is not JSON serializable` before the run
+  started. No config class of platoon's has such a field.
 
 ## 0.5.0 (2026-10-29)
 

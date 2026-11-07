@@ -187,8 +187,9 @@ entry's `package` registers.
 | `on_harness_exit` | [HarnessExitPolicy](#harnessexitpolicy) | `HarnessExitPolicy()` | What a harness that ran out of time or crashed counts as: `{timeout: grade \| exclude, crash: grade \| grade_if_gateway_clean \| exclude}`, or `grade`/`exclude` for both (default: exclude both). |
 | `seed` | int | `0` | Seed of the per-task harness draw and of the entry's task order in a mixture. |
 | `program` | str | `"single"` | The episode program (`@pt.program` name or `module:attr`). |
+| `program_options` | dict[str, Any] | `{}` | The program's options, checked against the options it declares when the config loads (`platoon program show NAME` lists them) and read by the program, parsed with its defaults, as `ep.options`; a program that declares none takes none. A named environment that sets its program may set them too, as the lowest layer of the entry's own, while the entry keeps that program. |
 | `harness_options` | dict[str, Any] | `{}` | The harness's options: a function harness reads them as `ctx.options`; a TOML spec checks them against its `[options]` table and renders them into its launch (`platoon harness show NAME` lists them). |
-| `eval_overrides` | [EvalOverrides](#evaloverrides) | `EvalOverrides()` | What evaluation rollouts change (every split but `train`): `{harness_options: {...}}`, merged over the entry's own, key by key. |
+| `eval_overrides` | [EvalOverrides](#evaloverrides) | `EvalOverrides()` | What evaluation rollouts change (every split but `train`): `{harness_options: {...}, program_options: {...}}`, merged over the entry's own, key by key, and `workflow_config`, laid over the evaluation's settings. |
 | `agents` | [AgentTreeConfig](#agenttreeconfig) | `AgentTreeConfig()` | How the function harness's subagents run. |
 
 <a id="checkpointconfig"></a>
@@ -450,6 +451,7 @@ key merges over the entry's own key of the same name, key by key, and is checked
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `harness_options` | dict[str, Any] | `{}` | Harness options of evaluation rollouts, merged over the entry's `harness_options`. |
+| `program_options` | dict[str, Any] | `{}` | Program options of evaluation rollouts, merged over the entry's `program_options`, key by key. A named environment that sets its program may set them too, beneath these, while the entry keeps that program. |
 | `workflow_config` | [EntryWorkflowSettings](#entryworkflowsettings) | `{}` | The entry's settings for its evaluation rollouts, laid over the evaluation's settings for the entry: the keys of its own workflow_config (EntryWorkflowSettings), such as `group_size` and `rollout_config.max_steps`. They win over the phase's section (eval.workflow_config; platoon eval applies only their rollout_config, over inference.workflow.rollout_config). |
 
 <a id="agenttreeconfig"></a>

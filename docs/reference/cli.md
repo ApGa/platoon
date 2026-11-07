@@ -190,7 +190,7 @@ List the episode programs an environment's `program:` can name, with the distrib
 platoon program show NAME
 ```
 
-Show one episode program: its reference, source, distribution, root role (when it declares one) and docstring.
+Show one episode program: its reference, source, distribution, root role (when it declares one), its options (each option's type, default, allowed values or range and description, which an environments entry sets in program_options), its load-time check (when it declares one) and docstring.
 
 **Arguments**:
 
@@ -633,7 +633,8 @@ platoon prepare [OPTIONS] CONFIG [ARGS...]
 Make, once per site, what a config's runs need and never make themselves: each Harbor dataset fetched into its lock, the images its tasks build from Dockerfiles, its harnesses' toolchains and the policy's tokenizer.
 
 CONFIG is a training or evaluation config, or a file of environments that they extend; only its environments are
-read, and checked as a run checks them.  The datasets go into the Harbor cache (harbor in the site profile's
+read, and checked as a run checks them, but for the programs' load-time checks, which read the run's settings and
+which the run itself runs.  The datasets go into the Harbor cache (harbor in the site profile's
 cache, else ~/.cache/platoon/harbor), the images into each entry's image map (`images/<provider>.json` in that
 cache), built with its sandbox provider's builder, and the toolchains under the toolchain root (toolchains in the
 site profile's cache).  The site profile it uses is named on stderr first, and a provider from it that this node

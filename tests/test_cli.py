@@ -283,6 +283,22 @@ def test_the_runs_take_prepare_and_their_help_says_where_to_use_it(command, caps
     assert "Use it on a laptop or a single node. On a cluster, prepare once on a CPU node instead: in a GPU" in out
 
 
+def test_a_run_with_prepare_refuses_what_only_its_whole_config_shows_before_it_prepares(tmp_path, monkeypatch, capsys):
+    """platoon prepare checks a config's environments alone. What only the whole config shows, such as an entry's
+    credit options, which a training config's components check, refuses train --prepare before the prepare starts."""
+
+    def never(*args, **kwargs):
+        raise AssertionError("prepared before the config's components were checked")
+
+    monkeypatch.setattr(cli, "_prepare_first", never)
+    monkeypatch.setattr("platoon.train.launch.run_tinker_training", lambda args: pytest.fail("it trained"))
+    entry = {**_environment("tree"), "credit": "group", "credit_options": {"leave_one_out": True}}
+
+    assert _exit_code(["train", str(_train_config(tmp_path, environments=[entry])), "--prepare"]) == cli.EXIT_CONFIG
+    assert "environments.0.credit_options" in capsys.readouterr().err
+    assert not (tmp_path / "logs").exists()
+
+
 # --- rollout -----------------------------------------------------------------------------------------------------
 
 

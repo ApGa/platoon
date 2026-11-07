@@ -15,6 +15,8 @@ from typing import Any
 import pytest
 from efficient_search import binary_search_guesses, reward_parts
 
+from platoon import cli
+
 CONFIG = "examples/program-reward-shaping/efficient_search.yaml"
 CRITIQUE = "Start in the middle of the range."
 _GUESSES = re.compile(r'"name": "guess", "arguments": \{"number": (-?\d+)\}')
@@ -75,12 +77,12 @@ def test_the_finalizer_shapes_the_root_reward_and_records_the_judge(serve_policy
     )
 
 
-def test_the_penalty_comes_from_the_rollout_config(serve_policy, platoon_cli, tmp_path, capsys):
+def test_the_penalty_comes_from_the_program_options(serve_policy, platoon_cli, tmp_path, capsys):
     serve_policy(wasteful_bisection)
     platoon_cli(
         "rollout",
         CONFIG,
-        "train.workflow_config.rollout_config.extra.guess_penalty=0",
+        "environments.0.program_options.guess_penalty=0",
         "--task",
         "train:0",
         "--output-dir",
@@ -89,3 +91,33 @@ def test_the_penalty_comes_from_the_rollout_config(serve_policy, platoon_cli, tm
     collection: dict[str, Any] = json.loads((tmp_path / "trajectory_collection.json").read_text())
     (root,) = collection["trajectories"].values()
     assert root["reward"] == 1.0
+    lock = json.loads((tmp_path / "lock.json").read_text())
+    (program,) = [component for component in lock["components"] if component["kind"] == "program"]
+    assert program["options"] == {"number-search": {"train": {"guess_penalty": 0}}}
+
+
+@pytest.mark.parametrize(
+    ("override", "problem"),
+    [
+        (
+            "guess_penalt=0",
+            "environments.0.program_options.guess_penalt: unknown key; did you mean "
+            "environments.0.program_options.guess_penalty?",
+        ),
+        ("guess_penalty=2", "environments.0.program_options.guess_penalty: must be between 0 and 1, got 2"),
+    ],
+)
+def test_options_the_program_does_not_take_stop_the_rollout_before_it_starts(
+    serve_policy, tmp_path, capsys, override, problem
+):
+    policy = serve_policy(wasteful_bisection)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(
+            ["rollout", CONFIG, f"environments.0.program_options.{override}", "--task", "train:0"]
+            + ["--output-dir", str(tmp_path)]
+        )
+
+    assert exit_info.value.code == cli.EXIT_CONFIG
+    assert problem in capsys.readouterr().err
+    assert policy.calls == [] and not (tmp_path / "trajectory_collection.json").exists()

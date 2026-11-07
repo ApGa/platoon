@@ -380,6 +380,9 @@ class EvalOverrides:
 
     # Harness options of evaluation rollouts, merged over the entry's ``harness_options``.
     harness_options: dict[str, Any] = field(default_factory=dict)
+    # Program options of evaluation rollouts, merged over the entry's ``program_options``, key by key. A named
+    # environment that sets its program may set them too, beneath these, while the entry keeps that program.
+    program_options: dict[str, Any] = field(default_factory=dict)
     # The entry's settings for its evaluation rollouts, laid over the evaluation's settings for the entry: the keys of
     # its own workflow_config (EntryWorkflowSettings), such as ``group_size`` and ``rollout_config.max_steps``. They
     # win over the phase's section (eval.workflow_config; platoon eval applies only their rollout_config, over
@@ -390,6 +393,9 @@ class EvalOverrides:
         if not isinstance(self.harness_options, Mapping):
             raise ValueError(f"eval_overrides.harness_options must be a mapping, got {self.harness_options!r}")
         self.harness_options = dict(self.harness_options)
+        if not isinstance(self.program_options, Mapping):
+            raise ValueError(f"eval_overrides.program_options must be a mapping, got {self.program_options!r}")
+        self.program_options = copy.deepcopy(dict(self.program_options))
         if problems := entry_workflow_problems(self.workflow_config, "eval_overrides.workflow_config"):
             raise ValueError("; ".join(problems))
         self.workflow_config = copy.deepcopy(dict(self.workflow_config))
@@ -572,11 +578,16 @@ class EnvironmentConfig:
     seed: int = 0
     # The episode program (``@pt.program`` name or ``module:attr``).
     program: str = "single"
+    # The program's options, checked against the options it declares when the config loads (``platoon program show
+    # NAME`` lists them) and read by the program, parsed with its defaults, as ``ep.options``; a program that declares
+    # none takes none. A named environment that sets its program may set them too, as the lowest layer of the entry's
+    # own, while the entry keeps that program.
+    program_options: dict[str, Any] = field(default_factory=dict)
     # The harness's options: a function harness reads them as ``ctx.options``; a TOML spec checks them against its
     # ``[options]`` table and renders them into its launch (``platoon harness show NAME`` lists them).
     harness_options: dict[str, Any] = field(default_factory=dict)
-    # What evaluation rollouts change (every split but ``train``): ``{harness_options: {...}}``, merged over the
-    # entry's own, key by key.
+    # What evaluation rollouts change (every split but ``train``): ``{harness_options: {...}, program_options: {...}}``,
+    # merged over the entry's own, key by key, and ``workflow_config``, laid over the evaluation's settings.
     eval_overrides: EvalOverrides = field(default_factory=EvalOverrides)
     # How the function harness's subagents run.
     agents: AgentTreeConfig = field(default_factory=AgentTreeConfig)
@@ -585,6 +596,9 @@ class EnvironmentConfig:
         where = f"environment {self.name!r}" if self.name else "environment"
         if not isinstance(self.program, str) or not self.program.strip():
             raise ValueError(f"{where}: program must be a non-empty program name, got {self.program!r}")
+        if not isinstance(self.program_options, Mapping):
+            raise ValueError(f"{where}: program_options must be a mapping, got {self.program_options!r}")
+        self.program_options = copy.deepcopy(dict(self.program_options))
         if not isinstance(self.harness_options, Mapping):
             raise ValueError(f"{where}: harness_options must be a mapping, got {self.harness_options!r}")
         self.harness_options = dict(self.harness_options)
@@ -1041,6 +1055,9 @@ class EnvironmentRoute:
     on_harness_exit: HarnessExitPolicy = field(default_factory=HarnessExitPolicy)
     resolve_task: bool = False
     program: str = "single"
+    # The program's options for the route's phase, as the entry writes them (its eval_overrides merged in for an
+    # evaluation route); the rollout parses them against the program's schema (``ep.options``).
+    program_options: dict[str, Any] = field(default_factory=dict)
     harness_options: dict[str, Any] = field(default_factory=dict)
     agents: AgentTreeConfig = field(default_factory=AgentTreeConfig)
 
@@ -1048,17 +1065,21 @@ class EnvironmentRoute:
         # Routes travel as plain dicts in Task.misc (asdict); rebuild the nested configs.
         object.__setattr__(self, "agents", AgentTreeConfig.coerce(self.agents))
         object.__setattr__(self, "on_harness_exit", HarnessExitPolicy.coerce(self.on_harness_exit))
+        object.__setattr__(self, "program_options", dict(self.program_options or {}))
         object.__setattr__(self, "harness_options", dict(self.harness_options or {}))
 
     def attach(self, task: Task) -> Task:
         """A shallow copy of ``task`` whose misc carries this route (the original is left untouched).
 
         The route travels as the plain values of its fields (``asdict``), without an ``agents.root_role`` its entry
-        leaves unset: a config that sets none keeps every rollout request's bytes."""
+        leaves unset, and without ``program_options`` when it has none: a config that sets neither keeps every
+        rollout request's bytes."""
 
         payload = asdict(self)
         if self.agents.root_role is None:
             del payload["agents"]["root_role"]
+        if not self.program_options:
+            del payload["program_options"]
         routed = copy.copy(task)
         routed.misc = {**task.misc, ROUTE_MISC_KEY: payload}
         return routed

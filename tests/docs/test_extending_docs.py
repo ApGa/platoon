@@ -148,12 +148,19 @@ def run_script(code: str, name: str) -> str:
 class FakeEpisode:
     """An ``EpisodeContext`` stand-in that records what a program does, for programs that compose ``single``."""
 
-    def __init__(self, *, extra: dict[str, Any] | None = None, propagate_root_success: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        extra: dict[str, Any] | None = None,
+        options: Any = None,
+        propagate_root_success: bool = False,
+    ) -> None:
         self.config = SimpleNamespace(
             extra=dict(extra or {}),
             propagate_root_success=propagate_root_success,
             skip_subagent_reward_computation=False,
         )
+        self.options = options
         self.behavior_judge = None
         self.judge_at_run = "not run"
         self.finalizers: list[Any] = []
@@ -229,21 +236,25 @@ def test_the_reward_processor_and_the_finalizer_pass_their_tests(snippets) -> No
 
 
 def test_the_step_cost_program_runs_its_finalizer_after_the_root_success_one(snippets):
-    from platoon.programs import get_program
+    from platoon.programs import resolve_program
     from platoon.utils.subagent_rewards import propagate_root_success
 
     snippets("rewards.md", "# my_rewards/step_cost.py")
     module = importlib.import_module("my_rewards.step_cost")
-    episode = FakeEpisode(extra={"step_cost": 0.02}, propagate_root_success=True)
+    [config] = [code for code in blocks("rewards.md", "yaml") if "my-step-cost" in code]
+    [entry] = yaml.safe_load(config)["environments"]
+    program = resolve_program(entry["program"])
+    episode = FakeEpisode(options=program.parse_options(entry["program_options"]), propagate_root_success=True)
 
-    outcome = asyncio.run(get_program("my-step-cost")(episode))
+    outcome = asyncio.run(program.fn(episode))
 
     assert outcome.reward == 1.0
     first, second = episode.finalizers
     assert first is propagate_root_success
     assert isinstance(second, module.StepCost) and second.cost == 0.02
-    [config] = [code for code in blocks("rewards.md", "yaml") if "my-step-cost" in code]
-    assert yaml.safe_load(config)["train"]["workflow_config"]["rollout_config"]["extra"] == {"step_cost": 0.02}
+    assert program.parse_options({}) == module.StepCostOptions(step_cost=0.01)  # the default, as the guide says
+    with pytest.raises(ValueError, match=r"program_options.step_cots: unknown key; did you mean .*step_cost\?"):
+        program.parse_options({"step_cots": 0.02})
 
 
 def test_the_step_cost_leaves_untrainable_and_verifier_trajectories_alone(snippets) -> None:

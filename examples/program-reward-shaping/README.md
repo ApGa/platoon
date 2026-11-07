@@ -7,8 +7,8 @@ also asks a judge (`ep.judge_endpoint()`) for a one-line critique, kept for audi
 
 | File | What it is |
 |---|---|
-| `efficient_search.py` | `@pt.program("example-efficient-search")`, the `EfficiencyShaping` finalizer, and `reward_parts`, the reward processor that trains on the shaped reward and reports its parts |
-| `efficient_search.yaml` | Number search (the environment that ships with platoon) with the `platoon-react` harness, this program, and a training section; `rollout_config.extra.guess_penalty` sets the penalty |
+| `efficient_search.py` | `@pt.program("example-efficient-search", options=SearchOptions)`, the `EfficiencyShaping` finalizer, and `reward_parts`, the reward processor that trains on the shaped reward and reports its parts |
+| `efficient_search.yaml` | Number search (the environment that ships with platoon) with the `platoon-react` harness, this program, and a training section; the program's option `guess_penalty` (`program_options`) sets the penalty |
 
 ## Run it
 

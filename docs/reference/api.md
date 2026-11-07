@@ -32,6 +32,7 @@ This page is generated from the docstrings of the names `platoon` exports by `sc
 | [`pt.program`](#pt-program) | Register the decorated `async def fn(ep: EpisodeContext) -> Outcome` as episode program `name@version`. |
 | [`pt.EpisodeContext`](#pt-episodecontext) | One rollout of one task, as a program sees it. |
 | [`pt.EpisodeProgram`](#pt-episodeprogram) | An episode program: `async def program(ep: EpisodeContext) -> Outcome`. |
+| [`pt.CheckContext`](#pt-checkcontext) | What an episode program's load-time check sees beside its options: the entry, the phase and its rollout config. |
 | [`pt.EnvironmentService`](#pt-environmentservice) | A source of tasks that opens sessions for rollouts. |
 | [`pt.EnvSession`](#pt-envsession) | One rollout's live view of a task. |
 | [`pt.SessionNeeds`](#pt-sessionneeds) | What the harness drawn for a rollout needs from the session's sandbox; the rollout computes it before the sandbox starts, and `EnvironmentService.open` applies it to the sandbox it opens (`apply`). |
@@ -416,7 +417,7 @@ What an agent may do with the env's tools: everything, everything but the termin
 
 ## Episode programs
 
-An episode program decides how one task's rollout runs its agents and grades the result. The default program, `single`, runs the environment's harness on the root agent and grades the session.
+An episode program decides how one task's rollout runs its agents and grades the result. The default program, `single`, runs the environment's harness on the root agent and grades the session. A program may declare options, which an environment sets in `program_options`, and a check that refuses, when the config loads, an environment it cannot serve.
 
 <a id="pt-program"></a>
 
@@ -428,6 +429,8 @@ def program(
     *,
     version: str = "1",
     root_role: str | None = None,
+    options: Any = None,
+    check: Callable[[Any, CheckContext], None] | None = None,
 ) -> Callable[[EpisodeProgram], EpisodeProgram]
 ```
 
@@ -445,6 +448,23 @@ tools, of the agent `ep.run()` runs.  Without one the root's role is `policy`.  
 role to its policy: a program names a role, never a policy.  No root takes `verifier` or `judge`, the roles of
 the agents platoon opens to judge others.
 
+`options` is the schema of the program's options, which an environments entry sets next to `program`, in
+`program_options` (and in `eval_overrides.program_options` for its evaluation rollouts), and which the program
+reads parsed, with their defaults, as `ep.options`: a dataclass (each unknown key refused with a did-you-mean,
+each wrong type with its path; an enum or a path field is built as its class), a pydantic model (an unknown key
+refused with a did-you-mean too, unless the model keeps such keys, `extra="allow"`), or a function that takes
+the options' mapping, returns them parsed and raises `ValueError`.  Without one the program takes no options,
+and an entry that sets some for it is refused.  `platoon program show` lists a schema's options, each with the
+description that a pydantic field's `description`, or a dataclass field's `metadata["description"]`, gives.
+
+`check` is a plain function `check(options, ctx)`, not an `async def`, which refuses an entry the program
+cannot serve by raising `ValueError`: it runs when a training or an evaluation config loads, in
+`platoon config validate` and before `train`, `eval` or `rollout` runs anything (their `--prepare`
+included), once for each entry that runs the program and each phase the command runs, with that phase's options
+parsed and a `pt.CheckContext` (the entry, the phase and its rollout config); a refusal is a configuration error
+(exit 78) that names the entry, the program and the phase.  A file of environments alone, and `platoon prepare`,
+check the options but run no check: they give no run's rollout settings for it to read.
+
 <a id="pt-episodecontext"></a>
 
 ### `pt.EpisodeContext`
@@ -458,6 +478,8 @@ One rollout of one task, as a program sees it.
 `behavior_judge` (verifier grading of children) and `tool_transform` (rewrites the MCP tool listing of
 every agent, `platoon.gateway.mcp.bind_agent_tools`) may be set before `run`.  `root` is the root
 agent's record (`platoon.gateway.AgentSession`: its misc, result and calls), e.g. for self-graded harnesses.
+It is generic in the type of the program's options (`ep.options`): annotate a program that declares
+`options=MyOptions` with `ep: pt.EpisodeContext[MyOptions]`.
 
 | Attribute | Type | Description |
 |---|---|---|
@@ -470,6 +492,7 @@ agent's record (`platoon.gateway.AgentSession`: its misc, result and calls), e.g
 | `tool_transform` | `Callable[..., Any] \| None` | Rewrites the MCP tool listing of every agent; set it before `run`. |
 | `judges` | `bool` | Whether this rollout's judges run (the rollout config's `judges`, which `platoon eval` sets from `inference.judges`). While they are off, `judge_endpoint` and `judge` calls are refused (`platoon.gateway.JudgesOffError`) and verifiers do not run: a program that judges reads it and does without. |
 | `draw` | `DrawInfo \| None` | The run and the training draw this episode belongs to, when its trainer asks for them (experimental); None in an evaluation and otherwise. |
+| `options` | `OptionsT` | The program's options (`@pt.program(name, options=...)`), parsed against its schema with its defaults: the entry's `program_options`, with its `eval_overrides.program_options` merged over them in an evaluation rollout. An instance of a dataclass or pydantic schema, what a parser returned, or None for a program that declares no options. Read-only. |
 
 #### `EpisodeContext.run`
 
@@ -534,6 +557,31 @@ EpisodeProgram = Callable[[EpisodeContext], Awaitable["Outcome"]]
 ```
 
 An episode program: `async def program(ep: EpisodeContext) -> Outcome`.
+
+<a id="pt-checkcontext"></a>
+
+### `pt.CheckContext`
+
+```python
+class CheckContext
+```
+
+What an episode program's load-time check sees beside its options: the entry, the phase and its rollout config.
+
+A program's `check` (`@pt.program(name, options=..., check=...)`, RFC 0016, section 3) is called when a
+training or an evaluation config loads, before anything runs, for each entry that runs the program and once for
+each phase the command runs (`platoon train` runs `eval` too when it evaluates), with that phase's options
+parsed; it refuses the entry by raising `ValueError`.  A config of environments alone, a file that such configs
+extend, gives no run's rollout config, so its checks wait for the configs that run it; so does `platoon prepare`,
+which loads only a config's environments.  A check reads the config only: whether a server answers, or a variable
+is set where the run executes, is for the program to find out when it runs.  Each field is a copy, so a check that
+changes one changes nothing.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `environment` | `EnvironmentConfig` | required | The environments entry, as the config loaded it: its named environment laid under its own keys, and the command line's overrides applied. |
+| `phase` | `Phase` | required | The phase whose options the check got: `train`, the train split's rollouts, run with the entry's own options; `eval`, every other split's, with its `eval_overrides` merged over them. |
+| `rollout` | `RolloutConfig` | required | The rollout config the entry's rollouts of the phase run with: in a training config, the run's (its `train.workflow_config.rollout_config`, or for `eval` its `eval.workflow_config.rollout_config`) with the entry's own rollout settings laid over it; in an evaluation config, `inference.workflow.rollout_config` with the entry's. |
 
 ## Environments
 
@@ -839,7 +887,9 @@ is built.  A run chooses the rest (`FORBIDDEN_KEYS`): `env`, `name`, `weight`, `
 not offer a task leaves it out of its own task lists, in a new version), `harness_options`, for which
 `harness_defaults` maps a harness name to the options the environment needs from that harness, of
 `workflow_config` all but the rollout settings (`rollout_config`) its tasks were measured with, and
-`eval_overrides.workflow_config`.
+`eval_overrides.workflow_config`.  `program_options` and `eval_overrides.program_options` go with the
+`program` beside them, and apply, each beneath the selecting entry's key of the same name, while that entry keeps
+the program.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

@@ -58,9 +58,10 @@ def test_a_route_whose_entry_names_no_root_role_travels_as_it_did_before():
     assert "root_role" not in payload["agents"]
     # The same keys, values and order as before: a pickled request, and a golden's JSON, keep their bytes.
     assert json.dumps(payload["agents"]) == json.dumps(_agents_before_root_roles(max_depth=1))
-    assert list(payload) == list(asdict(route))
     expected = asdict(route)
     del expected["agents"]["root_role"]
+    del expected["program_options"]  # an entry that sets no program options leaves them out too
+    assert list(payload) == list(expected)
     assert pickle.dumps(payload) == pickle.dumps(expected)
 
 

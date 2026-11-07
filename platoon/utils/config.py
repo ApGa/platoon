@@ -942,6 +942,9 @@ def _build(
             if isinstance(item, Mapping):
                 _keep_given(found[key], item)
         return found
+    if isinstance(annotation, type) and issubclass(annotation, (enum.Enum, os.PathLike)):
+        # A member's value, or a path's text, which validation takes for the class (_scalar_problems), built as it.
+        return value if isinstance(value, annotation) else annotation(value)
     return value
 
 
