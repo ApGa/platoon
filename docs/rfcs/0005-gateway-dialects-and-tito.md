@@ -115,6 +115,8 @@ Sampling settings key on the call kind (`gateway.by_call_kind.compaction.samplin
 
 SSE stays synthetic: the gateway samples the whole completion, then emits the dialect's events, with keepalives every 10-15 s while a call queues or samples. The gateway never returns 429; calls queue per shard and fail the agent as `error/gateway_overload` only after a timeout. Policy problems (malformed tool calls, unparseable output) return 200 with annotations, because a 5xx makes harnesses resample and biases data toward short answers. Every HarnessSpec turns harness retries off and declares a model-client timeout at least as long as the gateway's queue, push-pause and sample budgets. Per-agent budgets (`max_calls`, output tokens) end with a dialect-native terminal reply.
 
+[RFC 0023](0023-sessions-that-platoon-did-not-start.md) departs from "never returns 429" at one point: `platoon serve` answers a session start with 429 and `Retry-After` past its cap on open sessions, since a product's client keeps its own retries and timeouts. The calls of an admitted session still queue.
+
 ### 5. The MCP tool plane
 
 One MCP endpoint per agent, `/s/<fp>/mcp` over streamable HTTP, authenticated by the agent key, serving the env session's tools (`EnvSession.tools` and `call_tool`) plus the orchestrator tools the agent's role grants (`launch_subagent`, `finish`, `submit_verdict`; [RFC 0001](0001-native-multi-agent.md)).

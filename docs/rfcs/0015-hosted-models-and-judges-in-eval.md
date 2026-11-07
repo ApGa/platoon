@@ -15,6 +15,10 @@ judge of another model family, say, and the gateway dispatches each call by the 
 serves inside a Tinker gateway. A hosted call records text, not token ids, so nothing it returns can train. Evaluation,
 and the rest of this RFC, stand as written.
 
+**Extended by [RFC 0023](0023-sessions-that-platoon-did-not-start.md)** to sessions that platoon did not start:
+`platoon serve` may answer a product's sessions through this pass-through, as a shadow that records each request beside
+its reply, and judges of those sessions may be hosted. Their calls never train either.
+
 ## Summary
 
 `platoon eval` and `platoon rollout` can sample the policy only through Tinker. This RFC lets an evaluation config
