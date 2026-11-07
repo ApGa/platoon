@@ -1879,9 +1879,10 @@ verifier's time limit, kills every process the grader left, and writes the only 
 `/logs/verifier/launcher.json` (at most 64 KiB: a larger one leaves out the verdict's checks, then the artifacts'
 names), which the outcome's metadata holds as `launcher`. It reads every file whose contents it uses (its settings, a
 JSON artifact, a replayed output, the verdict, a log's tail) without following a link or waiting on a FIFO, checking
-the open file. That report is the grade: the entry's `verifier_classifiers`, its reading of reward files that are not
-regular files and its reward contract's `check` hook apply to its curated tasks only, since a grader that runs as root
-could write what they read.
+the open file, and refuses JSON there that nests more than 256 levels deep before it parses it, as it refuses text
+that is not JSON, on every Python alike. That report is the grade: the entry's `verifier_classifiers`, its reading of
+reward files that are not regular files and its reward contract's `check` hook apply to its curated tasks only, since
+a grader that runs as root could write what they read.
 
 | What happened | Outcome |
 |---|---|
