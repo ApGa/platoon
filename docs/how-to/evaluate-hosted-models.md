@@ -190,7 +190,8 @@ unchanged. It is not recorded and takes no step.
 Some calls never reach the server, as with Tinker: a policy call past the agent's gateway step budget (a harness spec's
 `[budget] enforce = "gateway"`, counting the calls in flight) gets the gateway's budget stop, a final message without
 tool calls, and a harness in a task sandbox gets the dialect's permission error (403) for its `judge` calls, and
-under a gateway step budget for its `aux` calls too.
+under a gateway step budget for its `aux` calls too. It also gets a 403 for a `judge` agent it asks to mint (`POST
+/v1/platoon/agents {"role": "judge"}`), whose calls the report would count as judge calls.
 
 ### Tools behave as in training
 
@@ -309,7 +310,7 @@ must speak their dialect too. `inference.judges: false` turns all of them off:
 |---|---|
 | Verifier agents and behavior judges | Not started. A child its environment grades by verifier shares the episode's outcome, as with `child_grading: none`, and its trajectory says so: `child_grading: {configured: verifier, applied: none, reason: judges_off}` |
 | Parent-usage judges | Skipped: each candidate child records `{status: skipped, reason: judges_off}` and keeps its data |
-| Judge agents and `judge` calls | Refused (`platoon.gateway.JudgesOffError`; over HTTP, a 403 permission error). The first rollout that meets a refusal stops the evaluation with exit 78, naming the program or harness. A program reads `EpisodeContext.judges` to do without them |
+| Judge agents and `judge` calls | Refused (`platoon.gateway.JudgesOffError`; over HTTP, a 403 permission error). The first rollout that meets a refusal stops the evaluation with exit 78, naming the program or harness. A program reads `EpisodeContext.judges` to do without them. A harness in a task sandbox is refused its `judge` calls and `judge` agents with judges on too (a 403): that refusal is not counted as a refused judge, and the evaluation goes on |
 
 `policy` and `aux` calls and the environment's own grader (a Harbor task's tests, an environment's grading code)
 run as before. An entry that grades children by verifier and has its own `reward_processor`, or a `program` other

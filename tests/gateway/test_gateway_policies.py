@@ -1,20 +1,25 @@
 """A gateway that serves several policies (``ModelGateway.serve_policies``): each agent samples one policy for its whole
 life, the default for a root agent and its role's for a child, and its calls render, sample and parse in that policy's
 runtime, with that policy's tokenizer.  Converted with the rollout's policies, only the trained policy's agents make
-datums, each stamped with its own policy's version, while the frozen policy's agents keep their rewards and tags."""
+datums, each stamped with its own policy's version, while the frozen policy's agents keep their rewards and tags.  Code
+the policy runs mints no judge agent, so it never samples a frozen judge through one."""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 
+import openai
 import pytest
 from gateway_fakes import Completion
+from test_gateway_budget import post
 
 from platoon.gateway.core import ChatRequest, ModelGateway
+from platoon.gateway.server import GatewayServer
 from platoon.gateway.trace import build_trajectory_collection
 from platoon.task import Task
 from platoon.testing import ScriptedPolicy, make_gateway, toy_tokenizer
+from platoon.utils.judges import JUDGE_ROLE
 from platoon.utils.tinker_data_processing import RolloutPolicies, get_train_data_for_trajectory_collection
 
 TASK = Task(goal="Count the keys", id="vault-1")
@@ -61,6 +66,18 @@ def served() -> tuple[ModelGateway, ScriptedPolicy, ScriptedPolicy]:
     gateway.model_name, helper.model_name = "main-model", "helper-model"
     gateway.serve_policies("main", runtimes={"helper": helper}, roles={"counter": "helper"})
     return gateway, main_policy, helper_policy
+
+
+@pytest.fixture
+def judged() -> tuple[ModelGateway, ScriptedPolicy, ScriptedPolicy]:
+    """A gateway of policy ``main`` that also serves a frozen ``judge`` to the agents of role ``judge``, as
+    ``agents.roles.judge.policy`` binds it."""
+
+    main_policy, judge_policy = ScriptedPolicy(lambda prompt: "main answers"), ScriptedPolicy(lambda prompt: "PASS")
+    gateway, judge = make_gateway(main_policy), make_gateway(judge_policy)
+    gateway.model_name, judge.model_name = "main-model", "judge-model"
+    gateway.serve_policies("main", runtimes={"judge": judge}, roles={JUDGE_ROLE: "judge"})
+    return gateway, main_policy, judge_policy
 
 
 def chat(gateway: ModelGateway, agent, text: str):
@@ -186,3 +203,56 @@ def test_a_role_bound_to_an_unknown_runtime_fails_its_first_call_not_another_pol
     with pytest.raises(KeyError):
         chat(gateway, stray, "hello")
     assert main_policy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_code_the_policy_runs_mints_no_judge_agent_to_sample_the_frozen_judge(judged):
+    """Red team: a harness in a task sandbox, whose agent key code the policy runs can read (``policy_only``), may make
+    no judge call, so it mints no judge agent either, whose policy calls would sample the frozen judge in a subtree
+    that never trains.  ``POST /v1/platoon/agents {"role": "judge"}`` gets the permission error (403), from its agent
+    and from every agent minted under it, and nothing is minted, counted or sampled.  A harness on the rollout host
+    still mints its judge, which samples the judge's policy."""
+
+    gateway, main_policy, judge_policy = judged
+    server = GatewayServer(gateway)
+    await server.start(host="127.0.0.1")
+    try:
+        url = f"{server.base_url}/v1/platoon/agents"
+        sandboxed = gateway.open_agent(rollout_id="sandboxed", trajectory_id="root", interactions={})
+        sandboxed.policy_only = True  # as harness_rollout sets it for a harness in the task sandbox
+        refusals = [await post(url, {"role": JUDGE_ROLE}, sandboxed.api_key)]
+        _, helper = await post(url, {"role": "helper"}, sandboxed.api_key)
+        refusals.append(await post(url, {"role": JUDGE_ROLE}, helper["api_key"]))  # the helper inherits policy_only
+        host = gateway.open_agent(rollout_id="host", trajectory_id="root", interactions={})
+        status, minted = await post(url, {"role": JUDGE_ROLE}, host.api_key)
+        async with openai.AsyncOpenAI(base_url=minted["base_url"], api_key=minted["api_key"], max_retries=0) as client:
+            verdict = await client.chat.completions.create(
+                model="policy", messages=[{"role": "user", "content": "Grade it."}]
+            )
+    finally:
+        await server.stop()
+
+    for refused, body in refusals:
+        assert (refused, body["error"]["type"]) == (403, "permission_error")
+        assert "may not mint a judge agent" in body["error"]["message"]
+    assert [agent.role for agent in gateway.agents("sandboxed")] == ["policy", "helper"]
+    assert gateway._minted["sandboxed"] == 1  # the helper alone counts against the rollout's limit
+    assert status == 201 and gateway.authenticate(minted["api_key"]).policy == "judge"
+    assert (verdict.model, verdict.choices[0].message.content) == ("judge-model", "PASS")
+    assert len(judge_policy.calls) == 1 and main_policy.calls == []  # the host's judge alone sampled the judge
+
+
+def test_trusted_code_still_opens_a_judge_under_a_sandboxed_root(judged):
+    """A program's judge (``EpisodeContext.judge_endpoint``) is opened by trusted code, not minted over HTTP, so a root
+    whose harness runs in the task sandbox does not limit it: it samples the frozen judge and makes judge calls."""
+
+    gateway, main_policy, judge_policy = judged
+    root = gateway.open_agent(rollout_id="r", trajectory_id="root", interactions={})
+    root.policy_only = True
+    judge = gateway.open_subagent(root, role=JUDGE_ROLE, goal="judge")  # as EpisodeContext.judge_endpoint opens it
+
+    request = ChatRequest.from_params([{"role": "user", "content": "Grade it."}], {})
+    reply = asyncio.run(gateway.chat(judge, request, kind="judge"))
+
+    assert (judge.policy, judge.policy_only, reply.model) == ("judge", False, "judge-model")
+    assert len(judge_policy.calls) == 1 and main_policy.calls == []

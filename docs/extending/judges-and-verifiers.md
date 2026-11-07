@@ -200,7 +200,8 @@ those calls.
 An evaluation can run without judges: `inference.judges: false` starts no verifier agent or behavior judge (a child
 graded by verifier shares the episode's outcome, and its trajectory records `child_grading: {configured: verifier,
 applied: none, reason: judges_off}`), skips parent-usage judges, and refuses judge agents and `judge` calls with
-`platoon.gateway.JudgesOffError`, which stops the evaluation (exit 78). A program that judges reads
+`platoon.gateway.JudgesOffError`, which stops the evaluation (exit 78). A harness in a task sandbox is refused both
+with judges on too, and that refusal does not stop the evaluation. A program that judges reads
 `EpisodeContext.judges` and does without:
 
 ```python

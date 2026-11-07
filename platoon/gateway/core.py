@@ -270,7 +270,8 @@ class AgentLimitError(GatewayError, ValueError):
 class CallKindRefusedError(GatewayError, ValueError):
     """A call of a kind its agent may not make (``AgentSession.check_kind``): a ``judge`` call of an agent whose key
     code the policy runs can read (``AgentSession.policy_only``), or an ``aux`` call of such an agent while a call cap
-    counts its ``policy`` calls.  The HTTP server answers it as a permission error (403)."""
+    counts its ``policy`` calls.  Also a ``judge``-role agent that such an agent mints (``ModelGateway.mint_subagent``),
+    whose calls would be judge calls in all but name.  The HTTP server answers it as a permission error (403)."""
 
 
 # --------------------------------------------------------------------------- request side
@@ -943,10 +944,10 @@ class AgentSession:
     budget_stops: int = 0  # policy calls answered with the budget stop instead of a sample
     policy_calls_in_flight: int = field(default=0, repr=False)
     # Whether code the policy runs can read the agent's key: set for a harness in a task sandbox.  Its ``judge`` calls,
-    # which never train, are refused, and so are its ``aux`` calls while a call cap counts its ``policy`` calls
-    # (``call_cap``), since the cap does not count them (CallKindRefusedError, HTTP 403; nothing is sampled for them).
-    # Its other ``aux`` calls sample as its ``policy`` calls do (``sampling_kind``).  Agents it mints over HTTP inherit
-    # it.
+    # which never train, are refused, and so are the ``judge``-role agents it mints over HTTP, whose calls never train
+    # either, and its ``aux`` calls while a call cap counts its ``policy`` calls (``call_cap``), since the cap does not
+    # count them (CallKindRefusedError, HTTP 403; nothing is sampled or minted for them).  Its other ``aux`` calls
+    # sample as its ``policy`` calls do (``sampling_kind``).  Agents it mints over HTTP inherit it.
     policy_only: bool = False
     misc: dict[str, Any] = field(default_factory=dict, repr=False)  # -> trajectory misc
     step_misc: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)  # call_id -> step misc
@@ -1585,9 +1586,20 @@ class ModelGateway:
         The child gets its parent's call cap and shares its call tally, so its policy calls count against the
         parent's step budget and the cap bounds the parent and every agent minted under it together: a capped
         harness cannot escape its budget through children.  It also inherits ``policy_only``.
+
+        A parent with ``policy_only`` may mint no ``judge``-role agent (:class:`CallKindRefusedError`).  A judge
+        samples the policy its role is bound to, a frozen judge in a run that binds one, and its calls never train
+        (its subtree makes no trajectory), so through one, code the policy runs would make the ``judge`` calls it is
+        refused.  As for those calls, the refusal comes before the judges switch, and nothing is minted.  Trusted code
+        opens its judges with :meth:`open_subagent` (``EpisodeContext.judge_endpoint``), which this does not limit.
         """
         self._ensure_running()
         self._ensure_open(parent)
+        if parent.policy_only and role == JUDGE_ROLE:
+            raise CallKindRefusedError(
+                "This agent may not mint a judge agent: code the policy runs can read its key, and a judge's calls "
+                "never train"
+            )
         minted = self._minted.get(parent.rollout_id, 0)
         if minted >= self.max_minted_agents:
             raise AgentLimitError(

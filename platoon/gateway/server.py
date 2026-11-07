@@ -21,7 +21,8 @@ rollout worker):
   do (``AgentSession.sampling_kind``).
 * ``POST /v1/platoon/agents``: mint a subagent (``{role, goal?}`` -> ``{agent_id, api_key, base_url}``), so a
   cooperative harness gets exact per-agent attribution.  A rollout mints at most ``ModelGateway.max_minted_agents``
-  (400 past it), and a child's policy calls count against its parent's call cap.
+  (400 past it), and a child's policy calls count against its parent's call cap.  An agent with ``policy_only`` gets
+  the permission error (403) for a ``judge``-role child, whose calls never train, and nothing is minted.
 * ``/mcp``: the agent's env tools over streamable-HTTP MCP (:mod:`platoon.gateway.mcp`, the tool plane).
 
 An agent authenticates with its key as ``Authorization: Bearer``, as ``x-api-key``, or in the path
