@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0021](0021-trainers-credit-and-policies.md) (credit estimators, policies and roles, step hooks, draw provenance; its rules hold here), [RFC 0020](0020-rollout-permits.md) (rollout permits and the start limit; its section 8's `weight`, built here), [RFC 0016](0016-component-configuration.md) (program options, built here), [RFC 0015](0015-hosted-models-and-judges-in-eval.md) (hosted models, amended here), [RFC 0013](0013-extension-model.md) (components by name), [RFC 0017](0017-public-surface-and-conformance.md) (`platoon.experimental`, conformance kits), [RFC 0019](0019-training-mixtures.md) (per-entry settings, the dispatcher), [RFC 0010](0010-harbor-registry-and-multi-container-tasks.md) (Harbor tasks, root verifiers) |
 | Discussion | The pull request that adds this RFC |
-| Implementation | Built, in open pull requests: M0 in "fix: Refuse judge agents minted by sandboxed harnesses"; M1 in "feat: Add the running credit estimator", and M2, stacked on it, in "feat: Add the roles credit composite"; M3 in "feat: Add a root role per environment entry", and M4, stacked on it, in "feat: Add program options"; M5 in "feat: Add runtime Harbor tasks", M6, stacked on it, in "feat: Add regrades of generated graders", and M5b, stacked on M6's, in "feat: Add replay checks to runtime tasks"; M7 in "feat: Add a shared-service check for adapters". Not yet: M8 to M17 and M12b. The sections of built milestones describe the code |
+| Implementation | Built, in open pull requests: M0 in "fix: Refuse judge agents minted by sandboxed harnesses"; M1 in "feat: Add the running credit estimator", and M2, stacked on it, in "feat: Add the roles credit composite"; M3 in "feat: Add a root role per environment entry", and M4, stacked on it, in "feat: Add program options"; M5 in "feat: Add runtime Harbor tasks", M6, stacked on it, in "feat: Add regrades of generated graders", and M5b, stacked on M6's, in "feat: Add replay checks to runtime tasks"; M7 in "feat: Add a shared-service check for adapters". Built, each as one commit on the one before, whose pull requests open once those above merge: M8 "feat: Reserve rollout permits for episodes with several sessions", M9 "feat: Run rollouts of other entries from programs", M10 "feat: Run CLI harness children under programs", M11 "feat: Add the envgen program" and M12 "feat: Add the envgen archive". Not yet: M12b and M13 to M17. The sections of built milestones describe the code |
 
 ## Summary
 
@@ -80,7 +80,7 @@ run. **The generator keeps training:** without proposer training, AutoEnvScaling
 
 ## Proposal
 
-The sketches are Python 3.12, and paths are today's. For the built milestones (M0, M1 to M7 and M5b) the sketches
+The sketches are Python 3.12, and paths are today's. For the built milestones (M0 to M12 and M5b) the sketches
 give the names that were built and the text says what the code does, with the reasons for its choices. Every new name
 but RFC 0016's program options (section 6.2), which are stable, is experimental at first (RFC 0017): new types live in
 `platoon.experimental`, and new members of existing types are documented as experimental, as `EpisodeContext.draw`
@@ -113,6 +113,8 @@ async def inspect(self, task: Task, *, entry: str, harness: str, role: str,  # e
                   max_steps: int | None = None, timeout_s: float | None = None,
                   grade: bool = True, keep_artifacts: bool = False) -> ChildRollout: ...
 def drop(self, child: ChildRollout, *, censor: bool = False) -> None: ...     # section 2.1
+def rescore(self, child: ChildRollout, reward: float, *, reason: str) -> None: ...  # section 2.1 (M11)
+def child_entry(self, entry: str) -> ChildEntry: ...  # its route, rollout config and group (M11)
 async def materialize(self, source: Path, *, entry: str,                       # section 3: the entry service's
                       grader_owner: Literal["generated", "trusted"] = "generated",
                       replay_checks: ReplayChecks | None = None,
@@ -126,35 +128,62 @@ class ChildRollout:
     entry: str
     role: str
     outcome: Outcome | None                        # its own grade, with its failure kind and metadata
-    result: AgentResult | HarnessResult            # a function harness's, or a CLI harness's
+    result: AgentResult | HarnessResult            # a function harness's, or a CLI harness's once it ran
     final_message: str | None                      # what a judge hands the program
     artifacts: Path | None                         # with keep_artifacts
     versions: Mapping[PolicyId, tuple[int, int]]   # per policy, the oldest and newest version it sampled
-    seconds: float                                 # running
-    wait_seconds: float                            # waiting for a session seat, a permit or a start slot
+    seconds: float                                 # running: from its seat and start slot to its grade
+    wait_seconds: float                            # waiting for a session seat and a start slot (from M13, a permit)
+    gateway_errors: int = 0                        # its root's calls the gateway failed: a sampler's fault (M11)
 ```
 
 **2.1 Rollouts.** `ep.rollout(task, entry=e)` runs what a root rollout of entry `e` on `task` runs: `e`'s root role and
-that role's policy (section 6.1), its harness, its own rollout config (sampling defaults and precedence, `max_steps`,
-`timeout`, judges), its grading, session needs, call cap and tally, and a start slot. The child takes a session seat
-(section 4.1), never raises into the program (a failure is its `outcome`), and is cancelled with the call.
+that role's policy (section 6.1), its harness, the task as `e`'s service resolves it, its own rollout config (sampling
+defaults and precedence, `max_steps`, `timeout`, judges), its `agents` settings, its grading and failure rules, session
+needs, call cap and tally, a limit on minted agents of its own, the finalizers its root runs (a function harness's,
+under the `single` program; a CLI harness's root runs none, section 2.6), and a start slot. The child takes a session
+seat (section 4.1), never raises into the program (a failure is its `outcome`), and is cancelled with the call; the
+program's own mistakes raise, such as an entry that is none of its child entries. With `keep_artifacts=True` it keeps
+what its session collected for grading, where the session can (`ChildRollout.artifacts`, through an optional session
+method): a Harbor session keeps what it handed its separate verifier, whose report stays in the outcome's metadata.
 - **Its rows train in the episode's group:** the parent entry's estimator credits them with the rest of the tree, its
   staleness bound filters them (`platoon/train/step/staleness.py`), and they count under the parent draw's label,
-  horizon slot and statistics. Child rows are young, so a looser bound rarely matters; the step logs child-row ages.
-- **Its subtree trains as a unit.** An agent minted under the child with no outcome of its own takes the child's
-  outcome, as it would the root's were the child a root. `ep.drop(child)` excludes the child and every agent under it
-  from policy training; `censor=True` also rewrites the child's outcome to `invalid`, so its reward enters no baseline.
-- `environments[].child_entries: [e, ...]` names the entries whose routes the program may run; only then does the
-  worker request carry their rollout configs and conversion policies, which routes lack (`platoon/train/components.py`).
-- **Loading refuses** `child_entries` without `rollout_permits` of 2 or more (section 4), a child entry with a program
-  or children of its own (depth 1), and conversion settings or `filter_errors` unlike the child entry's, since the
-  parent's convert the child rows (`platoon/train/workflow/group.py`).
+  horizon slot and statistics. Child rows are young, so a looser bound rarely matters; a step metric of their ages is
+  not built (section 12). Depth weighting and subagent datum sampling see a child's agents at their depth in the
+  episode's tree, the child's root at 1, while its `max_depth` counts from its root.
+- **Its subtree trains as a unit.** An agent minted or spawned under the child with no outcome of its own takes the
+  child's outcome, as it would the root's were the child a root. `ep.drop(child)` excludes the child and every agent
+  under it from policy training, its reward kept; `censor=True` also rewrites the child's outcome to `invalid`, so its
+  reward enters no baseline. `ep.rescore(child, reward, reason=)` (M11) rewrites the outcome to that score, on which its
+  rows train and which enters its siblings' baselines, and keeps what it replaced in the child's `child_rollout` record.
+  Both refuse an inspection and raise once the episode's trajectories are built. Nothing of a child trains before its
+  program has settled it: the children of a program that raises, or whose finalizer raises, are dropped and censored, a
+  child still running when the program returns is cancelled and fails closed, and one asked for after the program
+  returned is refused.
+- `environments[].child_entries: [e, ...]` names the entries whose routes the program may run, which the parent's route
+  then carries; only then does the worker request carry their rollout configs and conversion policies, which routes lack
+  (`platoon/train/components.py`), and from M11 their groups' `group_size` and `min_successful_group_size`
+  (`ep.child_entry(e)`). A rollout whose request would convert a child entry's rows otherwise refuses that entry's
+  children, as their outcome (`child_conversion`).
+- **Loading refuses** `child_entries` without `rollout_permits` of 2 or more (section 4), in training and in evaluation;
+  a name that is no other entry of the config; a child entry with a program or children of its own (depth 1); a parent
+  or child that `harness_rollout` does not run (without a harness or a service, or with a rollout function of its own),
+  or a parent whose harness is a TOML spec (until M17, section 2.6); child entries in a named environment; and
+  conversion settings (`filter_errors`, `filter_message_actions`, subagent datum sampling) unlike the child entry's, in
+  training or in evaluation, since the parent's convert the child rows (`platoon/train/workflow/group.py`). `platoon
+  eval` and `platoon rollout` refuse entries with child entries, and so does `platoon config validate` of an evaluation
+  config: they reserve no permits, so their episodes would have no seats; such an entry is evaluated during training
+  (`eval.every`, section 12).
 
-**2.2 Inspections.** `ep.inspect` runs a harness and a role the program names, in a session of `entry`'s service, and
-never trains: it and every agent minted under it are excluded from policy training, as judge subtrees already are
-(`platoon/gateway/trace.py`; the converter honours the exclusion for children). The role is one the program reserves
-(section 2.5), or platoon's `judge` role, which leaves no trajectory: the trace folds its calls into the root's
-`judge_calls`. Controls (an oracle, a no-op), judges and probes are inspections.
+**2.2 Inspections.** `ep.inspect` runs a harness and a role the program names, in a session of `entry`'s service (a
+child entry's, or the episode's own entry's), and never trains: it and every agent minted under it are excluded from
+training (`exclude_from_training`), as judge subtrees already are (`platoon/gateway/trace.py`; the converter honours the
+exclusion for children). The role is one the program reserves (section 2.5), or platoon's `judge` role, which leaves no
+trajectory: the trace folds its calls into the root's `judge_calls`, and a judge asked for while the run's judges are
+off is refused, as its outcome. Its options default to its entry's for its entry's harness, its goal to its task's, and
+its step budget and time limit to its entry's rollout config's; one left ungraded (`grade=False`), with every agent
+under it, has no outcome. Controls (an oracle, a no-op), judges and probes are inspections, of a function harness or a
+CLI harness (section 2.6).
 
 **2.3 Start slots.** A rollout nested in another takes no start slot today (`_member_start_slot` in
 `platoon/train/workflow/members.py`), so K sandboxes starting at once would bypass `train.max_starting_rollouts`.
@@ -163,15 +192,19 @@ never waits for a seat or a permit while it holds a slot. Two release causes joi
 `cancelled` (`platoon/train/workflow/start_limit.py`), for children in runs that set `child_entries`, the only runs
 whose metrics gain `rollout_client/start_limit/releases/{ready,child}`:
 - `ready`: a child whose harness calls no model (`@pt.harness(..., calls_model=False)`, as `platoon-oracle` and
-  `platoon-noop` will declare) returns its slot once its session has opened, where a root holds it to its end or the
+  `platoon-noop` declare) returns its slot once its session has opened, where a root holds it to its end or the
   slot's timer, as a model-free harness still does everywhere else.
 - `child`: `ep.rollout` and `ep.inspect` first give back the caller's slot, if any: a slot holder waits for nothing.
 
 **2.4 The grant channel.** Under `rollout_isolation: process` the start limit and the permit pool live in the
 trainer, so a worker asks for, receives and returns start slots (and, from M13, permits) over one bidirectional
 channel, in `platoon/train/workers/` with the limit passed in, served by a task on the trainer's loop; a worker's exit
-releases what it held. The channel and its grant-latency metric exist only with `child_entries`; other runs keep the
-first-call marker (`platoon/train/workers/protocol.py`). If grant latency binds, a thread that decides grants follows.
+releases what it held. The channel is a Unix socket that a file beside the worker's request names, with a token: only
+the connection that shows the token first is served, and the trainer refuses a worker that holds or waits for more child
+slots than its episode has seats. The channel and its grant-latency metric
+(`rollout_client/start_limit/grant_latency_p50` and `_max`: a grant's round trip less the trainer's wait for a free
+slot) exist only with `child_entries`; other runs keep the first-call marker (`platoon/train/workers/protocol.py`). If
+grant latency binds, a thread that decides grants follows.
 
 **2.5 Reserved roles (R2).** Today any key holder may mint any role (`ModelGateway.mint_subagent`), and the child
 samples its role's policy for life. Two refusals answer 403, and only M0's needs no key:
@@ -186,26 +219,59 @@ samples its role's policy for life. Two refusals answer 403, and only M0's needs
   evaluation counts it with the judges: whether M0's refusal should take `verifier` too is open question 8.
 - **Under a program that declares `mints=` (M9):** the program reserves its root role, the roles it opens itself
   (`@pt.program(mints=("control", "judge"))`) and its child entries' root roles, and `mint_subagent` refuses a
-  reserved role to every agent of another role; else a solver child could mint a `generator` agent, which samples the
-  generator's policy and earns generator credit. Red-team cases: a solver child's `POST /v1/platoon/agents` for
+  reserved role to every agent of another role, before the mint limit counts the request, as an inline
+  `ctx.agents.spawn` of one fails to launch; else a solver child could mint a `generator` agent, which samples the
+  generator's policy and earns generator credit. A program without `mints=` reserves nothing. `mints=` refuses
+  `verifier`, the role of the agents platoon opens to verify children, so no program reserves it, and a sandboxed
+  harness still mints one (open question 8). Red-team cases: a solver child's `POST /v1/platoon/agents` for
   `judge` or `generator` gets 403, and a subagent it mints trains on its outcome.
 
-**2.6 CLI harnesses under programs.** Children with TOML harness specs run through `HarnessSetup.prepare` and
-`_run_and_grade` with their `SessionNeeds` (`platoon/harness/rollout.py`), with their `HarnessResult` as the child's
-`result` (M10). CLI roots follow (M17), lifting the refusals in `Episode.run` and `platoon/train/auto.py`.
+**2.6 CLI harnesses under programs (M10).** A child entry's harness, and an inspection's, may be a TOML spec, which runs
+as a TOML spec's root runs it, through the same code: `HarnessSetup.prepare` and `_run_and_grade` with its
+`SessionNeeds` (`platoon/harness/rollout.py`), so its placement, its call kinds in a task sandbox, its call cap, its
+time limit and its failure rules are a root's. Its `result` is the harness's `HarnessResult`, now experimental public
+API, once the harness ran, else an error `AgentResult` that says why (a session that did not open, a toolchain that is
+not built). Like a TOML spec's root, it runs no finalizer of its entry's; the program's own finalizers run over the
+whole tree. A child whose session or gateway could not be set up, where a root would leave no trajectory, keeps one,
+marked `child_rollout.failed_to_open` with its task.
+- **A gateway server of its own.** Each CLI child reaches a server of the episode's gateway that takes only its
+  subtree's keys (401 for any other), on loopback and on the socket its sandbox's route reaches, so a sandbox without a
+  network reaches no other server; the episode's own server still takes every key of the rollout. Once the harness has
+  run, graded, failed or cancelled, the subtree's keys end on every server (410, `ModelGateway.end_unit`) and the
+  child's server stops, before its artifacts are kept and its session closes, as a root's agents close once it is
+  graded: a process the harness left behind calls in vain.
+- **CLI inspections.** `goal` is the spec's instruction, `options` its options, which the spec checks before anything
+  opens (options it refuses raise into the program), and `max_steps`, `timeout_s` and `grade` act as for a function
+  harness, `timeout_s` under the spec's own limit. A `judge` runs a CLI harness only through an entry placed `local`,
+  never in the sandbox of the task it judges, where the code it judges could read its key and write its verdict
+  (`ep.inspect` raises `ValueError`).
+
+CLI roots follow (M17), lifting the refusals in `Episode.run` and `platoon/train/auto.py`: until then loading refuses a
+parent entry whose harness is a TOML spec, and only children run CLI harnesses.
 
 **2.7 Datum parity,** the acceptance test of child rollouts (M10). Under a scripted model (recorded completions and
-logprobs; the fake records each request's sampling parameters, token limit and call cap), a pinned clock and seeds and
-one image, a task run as a root of the solver entry and as an `ep.rollout` child yields equal datums (tokens, masks,
-logprobs, `checkpoint_version`) and sampling parameters, ids normalized, also for a harness that mints a subagent.
-Live runs cannot be byte-identical (sampling varies, and some harnesses write the date into their prompts), so a GPU
-smoke compares 64 tasks run as roots and as children on turns, tokens, reward and failure kinds with two-sample tests.
+logprobs; the fake records each request's sampling parameters and token limit, and the gateway each call's cap, since a
+sampler sees no agent), with the clock the agent reads pinned (`SOURCE_DATE_EPOCH`, whose date the test finds in the
+prompts), the seeds of the harness draw and of the recording, and one image, a task run as a root of the solver entry
+and as an `ep.rollout` child yields equal datums (input and target tokens, masks, logprobs, the advantages before
+credit, `checkpoint_version` and each datum's own version, routing handles numbered by first appearance) and equal
+sampling (parameters, token limit and call cap, by role, without ids). It does so for a CLI agent of two specs drawn per
+task and for function harnesses, each minting a subagent, with the solver entry's subtree finalizers off and with each
+on, and with depth weighting and subagent datum sampling off, their defaults, which see a child's agents at their depth
+in the episode's tree (section 2.1). Live runs cannot be byte-identical (sampling varies, and some harnesses write the
+date into their prompts), so a GPU smoke, `scripts/child_parity.py`, compares 64 tasks run as roots and as children on
+turns, completion tokens, reward and failure kinds, with permutation tests within each policy version, Holm-adjusted.
+`platoon eval` runs no children (section 2.1), so the smoke trains at a learning rate of 0, beside the entry to check an
+entry whose program runs each task as its child, with a deadline that covers its child's whole run. Children that failed
+to open are left out and counted; a rollout that raises in its worker leaves no record for the script, and the run's
+logs count those. The smoke needs a GPU service and has not run.
 
 ### 3. Runtime tasks
 
 The service's half is built: `HarborEnvironmentService.materialize`, its config, the store and the launcher (M5),
 regrades (M6) and replay checks (M5b). `ep.materialize(source, entry=)` reaches the child entry's service, so it ships
-with child rollouts (M9).
+with child rollouts (M9); it routes the task to that entry, and a replay setting that the program leaves None takes the
+service's default.
 
 ```python
 @dataclass(frozen=True)
@@ -252,7 +318,8 @@ installs the launcher with its settings (`tests/platoon/launch.json`: the grader
 verifier's time limit, the artifacts, the grader's command and the replay, the variables the replay keeps, the replay
 checks and time, and a fingerprint of the `runtime_tasks` it checked against), and renames the copy to
 `<store>/<digest>`, a SHA-256 of every file with its executable bit, so that the same directory twice, or from two
-producers at once, is one task; the store is also the index of tasks in flight. Nothing a generator wrote is patched:
+producers at once, is one task; the store also holds the files of the tasks in flight, for a producer's final check to
+read, while the producer keeps the list of them (section 9.6). Nothing a generator wrote is patched:
 it must learn the rules.
 - **What stays the producer's to refuse.** `materialize` refuses no dotfile and no module shadow among the task's own
   files (a `numpy.py`, a `.pth`): a repository's task needs its `.git`, and only the producer knows what its grader
@@ -463,17 +530,34 @@ run in CI.
 A draw reserves its group size of permits, and a rollout that a member runs inside its own takes none (RFC 0020,
 section 8), so an episode's children would run outside `train.max_concurrent_rollouts` (P below).
 
-**4.1 Static permits (M8): `workflow_config.rollout_permits: W`.** A draw of such an entry reserves `group_size × W`
-permits whole (`rolling=False`, whatever `train.permit_release`), on today's whole-grant path
-(`platoon/train/dispatch/permits.py`), and keeps them until its episode returns. The worker keeps each episode at no
-more than W open sessions with a draw-local semaphore of W **session seats**, one of them the root's, which returns
-when the program closes the root's session (`HarborSession.close` is idempotent). So W = K runs every child at once,
-and W < K runs them in waves. `BoundDraw.permits` carries the reservation, so `group_size` keeps meaning the credit
-group (RFC 0020: "do not overload `group_size`"). This is RFC 0020's unit-plan `weight`, without the unit plan.
-- **No deadlock:** a draw starts only once it holds all its permits, a child takes its seat before its start slot and
-  waits only on its episode's seats, and loading refuses `child_entries` with W below 2 or P below `group_size × W`.
-- **Counts:** evaluation and the client metrics count permits, not groups, and the entry's label cap
-  (`train.rollout_group_limits.<label>`) defaults to ⌊P / (group_size × W)⌋, which the raised-bound warning counts.
+**4.1 Static permits (M8): `workflow_config.rollout_permits: W`.** A draw of an entry whose W is above 1 reserves
+`group_size × W` permits whole and inactive (`rolling=False`, whatever `train.permit_release`), granted together and in
+turn on today's whole-grant path (`platoon/train/dispatch/permits.py`), and keeps them until its group's workflow
+returns: an episode that ends first keeps its W permits idle until its slowest sibling ends, and in process a member
+returns only once the teardowns its rollout left running have ended (at most 60 s). Each episode of a function harness
+keeps at most W sessions open on W **session seats** of its own, granted first come, first served
+(`platoon/harness/seats.py`). The root's session takes one once it has opened, which comes back when the program's close
+of that session returns (`HarborSession.close` is idempotent), and a child's holds one from before its start slot until
+its own close has returned (M9); a close that raised or was cancelled, the root's or a child's, keeps its seat until the
+episode ends, since the sandbox may still be up. So with the root's session closed, W = K runs every child at once, and
+a smaller W runs them in waves. `BoundDraw.permits`, internal, carries the reservation, so `group_size` keeps meaning
+the credit group (RFC 0020: "do not overload `group_size`"), and `RolloutLease.size` is the reservation of a draw that
+runs its group size of rollouts (a clause of RFC 0020's lease rule 2). W reaches the episode in its rollout config's
+`extra` (`platoon_rollout_permits`, only above 1), a key of platoon's that a config may not set. This is RFC 0020's
+unit-plan `weight`, without the unit plan.
+- **No deadlock:** a draw starts only once it holds all its permits; every child keeps one order, its seat and then its
+  start slot, and waits only on its episode's seats; and loading refuses P below an entry's `group_size × W`, in
+  training and in evaluation, and `child_entries` with W below 2 (M9). M8's randomized fake shows the order is
+  load-bearing: a child that takes its slot first, among siblings that take their seat first, can hold the start limit
+  until a slot's timer, and children that all take their slot first deadlock nowhere but hold slots while they wait for
+  seats.
+- **Counts:** an evaluation's group reserves its group size times its entry's W, and its worker count and the client
+  metrics' ceiling are computed from permits, not group sizes. In a mixture under the default label column, whose labels
+  are its entries, an entry's label cap (`train.rollout_group_limits.<label>`) defaults to ⌊P / (group_size × W)⌋, which
+  the raised-bound warning counts and the skip warnings call derived; under another label column, or for a single
+  environment, no label names the entry, and none is derived.
+- **Evaluation:** an evaluation during training takes an entry's W from training unless its own settings set it;
+  `platoon eval` reserves no permits and hands its episodes no seats (section 2.1).
 
 **4.2 Rolling child permits (M13).** Static permits idle while the root works and children run in waves (Appendix A.2).
 - **A permit stands for one open session**, not for the rollout's worker and sandboxes: for such episodes this changes
@@ -641,9 +725,11 @@ lists them, and a rollout parses the route's options again: options the program 
   `root_role=` (M3, its roots' role unless the entry names one), `mints=` (M9, the roles it opens itself, reserved:
   section 2.5), `children_with_open_root=` (M13, section 4.2) and `needs_draws=` (M11, for `ep.draw`, which the `rl`
   trainer's `needs()` ORs in).
-- **Child entries (M9).** For an entry with `child_entries`, `pt.CheckContext` will also hold, read-only, the child
-  entries, the role bindings and the `train:` settings the entry's rows depend on, which such a program must check
-  (section 9.8); every other check keeps RFC 0016's boundary.
+- **Child entries (M9).** For an entry of a training config that names `child_entries`, `pt.CheckContext` also holds
+  copies of what the entry's rows depend on and such a program must check (section 9.8): the child entries (`children`,
+  read-only), the run's policies (`policies`, read-only), which say whether a bound role's policy trains, the role
+  bindings (`agents`) and the `train:` settings (`train`). They are None for every other entry, and every other check
+  keeps RFC 0016's boundary.
 - **Not built with M4:** the rest of RFC 0016's M2 (options and checks of function harnesses, named environments and
   reward processors, and a generic `pt.AgentContext`), `platoon extensions check --load` of a named environment's
   program options, and `platoon config show --defaults` filling in a program's defaults.
@@ -681,9 +767,16 @@ calls complete does not restart; a fake push hang and a fake sampler hang do.
 
 **8.3 Crashes and resume.** A full save holds kept groups as whole trees with their advantages, `roles`' state (each
 role's estimator's, `running`'s as a base and its settles, and the masses), the dispatcher's state and the archive's
-offset; `recovery_every: 1` makes every step one. A resume re-runs every outstanding episode as a new draw, since draw
-keys never repeat (`platoon/train/task_stats.py`); kept trees carry their verdicts, so no judge is asked twice; what
-nothing names is deleted. Appendix A.5 prices a crash.
+(its journal's length and its alarms' counters, section 9.6); `recovery_every: 1` makes every step one. A resume re-runs
+every outstanding episode as a new draw, since draw keys never repeat (`platoon/train/task_stats.py`); kept trees carry
+their verdicts, so no judge is asked twice. What nothing names is deleted, but only what the run alone holds (M12): the
+productions' directories of the archive's own starts that no kept group or journal row names, and of the runtime tasks
+such a production took in (`stored.json`) those that no other production of the run took in, from the stores the run
+owns alone, a solver entry's default `runtime-tasks` in the run's directory. Store entries are content-addressed and
+shared (the grading canary is one task for every production of a template), so a store that `runtime_tasks.store` names,
+which other runs may share, is never collected. An evaluation during training notes what its productions take in from
+the run's store in directories of its own, which collection does not read, so an entry that only such an evaluation and
+the garbage took in goes with the garbage. Appendix A.5 prices a crash.
 
 ### 9. The envgen program (experimental)
 
@@ -692,9 +785,10 @@ nothing names is deleted. Appendix A.5 prices a crash.
 wrote, the gates, K solver rollouts on that task and their audits. A **seed** is an authoring task the toolkit built.
 The **toolkit** is a task-generation pipeline's command line, such as a paper-to-task pipeline's, which supplies data
 and pure functions (section 9.7); platoon runs every sandbox and every model call. The solver entry's own curated
-groups train beside the productions and anchor the solver. A variant overrides one of the five stages, never `run()`,
-which also scores, in a package of its own (RFC 0013) that registers its own program, as SPADE's regret does below; a
-configuration-only project (RFC 0018) selects `platoon-envgen` and writes no Python.
+groups train beside the productions and anchor the solver. A variant, in a package of its own (RFC 0013) that registers
+its own program, as SPADE's regret does below, overrides the five stages, `archive`, `workspace` and the budgets' knobs
+and names, and may add roles to `mints`; `register()` refuses one that overrides anything else, such as `run()`, which
+also scores. A configuration-only project (RFC 0018) selects `platoon-envgen` and writes no Python.
 
 ```python
 class EnvGenProgram:                               # run() fixes the order, budgets, attribution and scoring
@@ -707,23 +801,32 @@ class EnvGenProgram:                               # run() fixes the order, budg
     async def gate(self, ep, ev, task): ...        # the final check and the controls (inspections)
     async def solve(self, ep, ev, task): ...       # K rollouts of the child entry
     async def audit(self, ep, ev, task): ...       # the pre-committed sample (inspections)
-    @staticmethod
-    def check(options, ctx) -> None: ...           # load-time refusals (section 9.8)
+    def archive(self, ep) -> Archive: ...          # what a production reads of the archive (section 9.6)
+    def workspace(self, ep) -> Workspace: ...      # the authoring sandbox: memory in, outputs out, the seed's data
+    @classmethod
+    def check(cls, options, ctx) -> None: ...      # load-time refusals (section 9.8), with a variant's budgets
     @classmethod
     def register(cls, name: str, *, options: type) -> EpisodeProgram: ...   # @pt.program(name, check=cls.check, ...)
 
 @dataclass
 class ProductionEvidence:                          # envgen.evidence/v1: run() fills it, a reward only reads it
     seed: SeedRecord                               # task id, strata, visits
-    generator: AgentRecord                         # outcome, turns, tokens, check calls, versions
-    stages: list[StageRecord]                      # name, ok, reason, fault, seconds, wait seconds
-    task: TaskRecord | None                        # digest, the grader's owner, difficulty knobs, pass_audit
+    generator: AgentRecord                         # status, turns, tokens, tool calls, versions, error
+    stages: list[StageRecord]                      # name, ok, reason, fault, seconds, wait seconds, budget
+    task: TaskRecord | None                        # digest, the grader's owner, difficulty knobs, pass_audit, and
+                                                   #   from M12 its instruction and the final check's answer
     controls: list[ChildRecord]                    # per child: status, reward, reason, fault, failure kind,
-    solves: list[ChildRecord]                      #   versions, seconds, replay results, regrades, margins
-    probes: list[ChildRecord]
-    audits: list[AuditRecord]                      # kind, target, schema-checked verdict, clean, consequential
+    solves: list[ChildRecord]                      #   versions, seconds, replay results, regrades, margins, and
+    probes: list[ChildRecord]                      #   whether it was retried, censored or rescored
+    audits: list[AuditRecord]                      # kind, trials, schema-checked verdict, clean, consequential
     canaries: list[CanaryRecord]                   # attribution rule 2's canaries and their results
     verdict: Verdict                               # section 9.3
+    draw: list[int] | None                         # the draw's key
+    abstention: dict | None                        # the generator's claim, when it abstains
+    adjudication: dict | None                      # adjudicate's answer
+    reward: str | None                             # the reward that scored it,
+    score: dict | None                             #   and its ProductionScore
+    stop: str | None                               # why a usage error of the toolkit's stops the run (section 9.7)
 
 class ProductionReward(Protocol):                  # pure and total
     def __call__(self, evidence: ProductionEvidence, options: Any) -> ProductionScore: ...
@@ -739,6 +842,7 @@ class ProductionScore:
 platoon_envgen = EnvGenProgram.register("platoon-envgen", options=EnvGenOptions)
 
 class HintedEnvGen(EnvGenProgram):                 # SPADE's regret, in a package of its own
+    mints = ("control", "judge", "probe")          # a variant may add the roles it opens
     async def solve(self, ep, ev, task):
         solves = await super().solve(ep, ev, task)      # the K measuring rollouts
         ev.probes = await self.hinted(ep, task, n=4)    # hinted runs: inspections, never trained
@@ -751,12 +855,12 @@ acme_hinted = HintedEnvGen.register("acme-hinted", options=HintedOptions)
 
 | Stage | What runs | Sandbox | Typical (EST, short / long) | Budget |
 |---|---|---|---|---|
-| `generate` | memory files from the archive, then the trained policy through the entry's harness, with the toolkit's `check` inside the sandbox | authoring: materials read-only, no network | 2-10 min / 0.5-2 h | the seed's `[agent].timeout_sec` (20 min for short productions) |
-| `package` | collect (regular files, caps), the toolkit's `export` (runs nothing generated), `materialize` with the grader's owner, replay checks and replay time that `export.json` gives (section 9.7); the root's session closes | host | under a minute | 2 min |
-| `gate` | the toolkit's final check (model-free), then 6 controls as inspections | agent and verifier sandboxes | 1-3 min / 5-15 min | per control a quarter of the solver's budget, plus its verifier |
-| `solve` | K rollouts of the solver entry, concurrent, no straggler cut | the solver's | 10-15 min / 30-60 min | the solver route's `timeout` (15 min) plus its verifier |
-| `audit` | judge inspections of a review task; the toolkit's `adjudicate` classifies the verdicts | review: the privileged task and the sampled trials, no network | up to 10 / 20 min | `audit.cap_seconds` (10 / 20 min) |
-| score, in `run()` | attribution with canaries and one retry, then the reward | host | seconds | the canary and retry budgets |
+| `generate` | memory files from the archive, then the trained policy through the entry's harness, with the toolkit's `check` inside the sandbox | authoring: materials read-only, no network | 2-10 min / 0.5-2 h | the seed's `[agent].timeout_sec` (20 min for short productions), at most what the deadline leaves once the later budgets are set aside |
+| `package` | collect (regular files, caps), the toolkit's `export` (runs nothing generated), `materialize` with the grader's owner, replay checks and replay time that `export.json` gives (section 9.7); the root's session closes | host | under a minute | 2 min, and the export three times (its run, its retry and the toolkit's canary, 2 min each) |
+| `gate` | the toolkit's final check (model-free), then 6 controls as inspections | agent and verifier sandboxes | 1-3 min / 5-15 min | the final check three times; the 6 controls, then as long again for their retries, in waves of the permits, each a sandbox start, a quarter of the solver's time limit and its grades (a verifier start and time limit, once more per regrade); the grading canary |
+| `solve` | K rollouts of the solver entry, concurrent, no straggler cut | the solver's | 10-15 min / 30-60 min | the K solves, then as long again for their retries, in waves of the permits, each a sandbox start, the solver route's `timeout` (15 min) and its grades; the grading canary |
+| `audit` | judge inspections of a review task; the toolkit's `adjudicate` classifies the verdicts | review: the privileged task and the sampled trials, no network | up to 10 / 20 min | as many reviews as K, in waves of the permits, each the review's export three times and two judge attempts of a start and `audit.cap_seconds` (10 / 20 min); the judge specs, the judge canary and `adjudicate`; a second round for the failures a review calls infrastructure's |
+| score, in `run()` | attribution with canaries and one retry, then the reward | host | seconds | in the stages' budgets, and a grace of 1 min |
 
 - **The trust boundary.** The host runs program code and the toolkit's pure verbs, which run nothing generated;
   everything the generator wrote runs in sandboxes; and a grader it wrote can only choose 0 or 1, which controls and
@@ -764,46 +868,73 @@ acme_hinted = HintedEnvGen.register("acme-hinted", options=HintedOptions)
   resources, timeouts, the verifier mode or a reward file. Its only feedback is the toolkit's validity check, never a
   solver's outcome, and its harness cannot open solvers, choose K, read verifier output or edit gates.
 - **One deadline, stage budgets under it.** The worker's deadline caps the whole tree (`rollout_config.timeout`, plus
-  the seed's sandbox overhead and a grace, `platoon/train/workflow/requests.py`), and `run()` enforces each stage's
-  budget. A child's clock starts when it starts running; its wait for a seat, a permit or a start slot is recorded as
-  `wait_seconds` and charged to no one. An overrun takes its stage's row of the fault table, never the deadline's.
-  Loading refuses a deadline below the sum of the budgets plus a grace, printing the sum and the queueing allowance
-  left, so only infra waits can reach the deadline (Appendix A.1).
+  the seed's sandbox overhead and a grace, `platoon/train/workflow/requests.py`), and `run()` holds every stage to it. A
+  stage's budget is the most it can run whatever the generator wrote, since nothing the generator can cause may reach
+  the deadline (attribution rule 3): it counts every retry and canary attribution may run, each toolkit verb three times
+  (`toolkit_seconds`), each sandbox's start (`start_seconds`; a slower start is infrastructure's wait), each grade and
+  regrade, and children in waves of the permits. The budgets are bookkeeping, not timers: each child runs under its own
+  limit, each verb under its timeout, each judge attempt under `audit.cap_seconds`, and the generator under the seed's
+  own limit, cut to what the deadline leaves once the later budgets are set aside; a deadline that leaves it nothing
+  voids the production at once (`void(deadline)`). A child's clock starts when it starts running; its wait for a seat or
+  a start slot is recorded as `wait_seconds` and charged to no one. An overrun takes its own row of the fault table; a
+  production that infrastructure holds up past its deadline is `void(deadline)`, and a timeout of platoon's own within a
+  stage `void(infra)`. Loading refuses a deadline at or below the sum of every budget but the generation's, which is the
+  seed's and unknown at load, plus a grace, and prints the sum: 12,360 s for section 10.1's shape with a 4-minute
+  verifier, so the 90-minute deadline this RFC first priced is refused (Appendix A.1, open question 9).
 
 **9.2 Attribution.** On curated data platoon censors what it cannot measure (`platoon/envs/service.py`). On a
 generated task the dataset is the policy's output, so the taxonomy flips. Four rules:
 1. **Provenance.** What the generator wrote is its fault; a contract-breaking artifact or a submission that does not
    replay is the solver's; a failure of platoon, a sandbox, a sampler, a judge or a trusted command is infra.
-2. **A canary and one retry before censoring.** A known-good canary on the same service (a stored oracle task, a judge
-   item with a known verdict, a sampler probe): a failing canary or a successful retry means infra, and a healthy
-   canary with a reproduced failure means the generator's.
+2. **A canary and one retry before censoring.** A known-good canary on the same service: a failing canary or a
+   successful retry means infra, and a healthy canary with a reproduced failure means the generator's. The program makes
+   its canaries itself (M11): the grading canary, the oracle on a task with a trusted grader that its reference solution
+   passes, written from the solver entry's runtime-task template and taken in with `ep.materialize`, so that it vouches
+   for the sandboxes, the verifiers and the launcher at the gate as well as after it; the judge canary, a judge on a
+   review whose answer its instruction gives, asked once per production; the toolkit's, its data verb (`judge-spec`)
+   answering and the production's directory taking a file; and the collection's, a file the program writes into the
+   authoring sandbox. No canary judges a sampler or a verb that reads nothing generated, and the toolkit ships no
+   known-good input per verb: a solve whose two attempts fail as infrastructure would, one of them in its sampler, a
+   review whose judge's sampler failed it or whose sandbox did not start, `judge-spec`'s failures and a verb that a
+   signal killed from outside are censored; the generator's own sampler failure voids the production at once; and a verb
+   that crashes on every input while `judge-spec` answers is charged to the generator, loudly, since every production's
+   validity drops. Where the table names no row, this rule decides: a judge out of its time twice beside a healthy judge
+   canary is the generator's, `invalid(review_malformed)`, as a judge malformed twice is.
 3. **No escape hatches.** Nothing the generator can cause maps to censoring, the deadline included.
 4. **No role pays for another's fault.** A generator fault *drops* the solver rows, since zero-advantage rows keep
    their token denominator (`platoon/train/step/step.py`); an infra fault censors the generator, never penalizes it.
 
 | Fault | What is observed | Verdict | Solver rows |
 |---|---|---|---|
-| infra, in the production | authoring infrastructure fails; a trusted command crashes and its canary fails; export refuses trusted input the host handed over (`fault: infra`, such as an unusable seed); fewer valid solves than the solver entry's `min_successful_group_size`; a judge outage with a failing judge canary, after backoff within the queueing allowance; an infra fault in the task review or the duplicate index; the worker dies or the deadline passes | `void(infra)` | none train (lost with a dead worker) |
+| infra, in the production | authoring infrastructure fails; a trusted command crashes and its canary fails; export refuses trusted input the host handed over (`fault: infra`, such as an unusable seed); fewer valid solves than the solver entry's `min_successful_group_size`; a judge outage with a failing judge canary, after backoff within the queueing allowance; an infra fault in the duplicate index; the worker dies; the deadline passes, which only infrastructure slower than the budgets allow can cause, or a usage error of the toolkit's | `void(infra)`; `void(deadline)` and `void(toolkit_usage)` for the last two | none train (lost with a dead worker) |
 | infra, in one child | a child's sandbox start or platoon-side grading fails (`verifier_start`, `verifier_trusted_launcher`), a trusted grader gives no score (`verifier_trusted_*`), a solver crashes with gateway errors or a sampler times out, unless rule 2 reproduces it with a healthy canary, which makes it the generator's; an audited failure whose review calls it infrastructure | s and n leave that member out; an audited one is replaced by the seeded rule | that member censored |
-| generator | no bundle within the budget; a malformed bundle; export refuses what the generator wrote (`fault: generator`), or `materialize` or the final check refuses; a trusted command crashes on the content with a healthy canary; the oracle fails, disagrees with itself or takes over a quarter of the solver's budget; a no-op, a mutant or an author control passes; a metamorphic variant fails; a generated grader gives no score (`verifier_generated_*`; an `_unfinished` one once a healthy canary rules out the sandbox); a regrade disagrees on the same bytes (`verifier_flaky`); an audited failure whose review is not clean (a false negative, a grader the specification does not support, unresolved); a pass that exploits the grader; a rejected task review; a judge malformed twice with a healthy canary; a sampled all-fail audit that finds a false negative or an intractable task | `invalid(<kind>)` | dropped |
+| generator | no bundle within the budget; a malformed bundle; export refuses what the generator wrote (`fault: generator`), or `materialize` or the final check refuses; a trusted command crashes on the content with a healthy canary; the oracle fails, disagrees with itself or takes over a quarter of the solver's budget; a no-op, a mutant or an author control passes; a metamorphic variant fails; a generated grader gives no score (`verifier_generated_*`; an `_unfinished` one once a healthy canary rules out the sandbox); a regrade disagrees on the same bytes (`verifier_flaky`); an audited failure whose review is not clean (a false negative, a grader the specification does not support, unresolved); a pass that exploits the grader; a judge malformed or out of its time twice with a healthy canary; a sampled all-fail audit that finds a false negative or an intractable task | `invalid(<kind>)` | dropped |
 | claim | the generator abstains: no viable task in the seed; 25% of abstentions are audited | `abstained(unaudited)`, `abstained(confirmed)` or `abstained(refuted)` | none |
 | duplicate | an exact or near duplicate of the archive or of a task in flight | `duplicate` | not solved |
-| solver | its budget runs out; it crashes with a clean gateway; the launcher scores it 0: its artifacts break the output contract (`solver_output_contract`), its replay fails or times out, or a regrade's replay writes other bytes that score otherwise (`solver_nonreproducible`), it misses a variant (`solver_variant_failed`) or states a forbidden literal (`solver_hardcoded`); a pass that its pass review finds faked, rescored as a failure | s and n count it as a failure | that member scores 0 |
+| solver | its budget runs out; it crashes with a clean gateway; it fills its context window; the launcher scores it 0: its artifacts break the output contract (`solver_output_contract`), its replay fails or times out, or a regrade's replay writes other bytes that score otherwise (`solver_nonreproducible`), it misses a variant (`solver_variant_failed`) or states a forbidden literal (`solver_hardcoded`); a pass that its pass review finds faked, rescored as a failure | s and n count it as a failure | that member scores 0 |
 | none | all n valid outcomes are equal | `valid(s, n)` with s = 0 or s = n | zero advantage |
 | none | mixed outcomes, and every audit clean | `valid(s, n)` | trained, leave-one-out |
 
-The program applies the table with `ep.drop` (section 2.1), which only children allow: a root's rows always train. A
-veto drops every solver child and needs no rewrite, since none of the production's solver rows train. A censored
-member is dropped with `censor=True`: its outcome becomes `invalid`, so its reward is None and enters no sibling's
-leave-one-out baseline (`platoon/train/credit/keyed.py`), which a scored 0 that was the infrastructure's would
-otherwise lower. For a `void(infra)` production the program returns `Outcome.infra(...)`: nothing in its tree trains.
+The program applies the table with `ep.drop` and `ep.rescore` (section 2.1), which only children allow: a root's rows
+always train. A veto drops every solver child and needs no rewrite, since none of the production's solver rows train. A
+censored member is dropped with `censor=True`: its outcome becomes `invalid`, so its reward is None and enters no
+sibling's leave-one-out baseline (`platoon/train/credit/keyed.py`), which a scored 0 that was the infrastructure's would
+otherwise lower. The solver's own failures that its entry leaves unscored, and a pass that its review found faked, are
+rescored to 0, so that the solver learns from them, the child's record keeping what they were. A root of the solver
+entry would be left out instead: under `on_harness_exit`'s defaults a time limit that ran out and a crash with a clean
+gateway are, and so is a filled context window where `on_context_overflow` is `exclude` (its default, `grade`, grades
+it). R1 governs how a child runs and grades; what its rows train on is its program's to settle, as `ep.drop` already is.
+For a void production the program returns an infra outcome: nothing in its tree trains.
 
 **9.3 Evidence and rewards.** `ProductionEvidence` is versioned JSON, `envgen.evidence/v1`, in the root's misc and in
-a directory per draw under `DrawInfo.run_dir`, named by `DrawInfo.key`, where the archive hook reads it; judge
-transcripts go to side files keyed by digest. **The schema is additive:** a field keeps its meaning once defined, and
-readers ignore fields they do not know. Its verdict is `valid(s, n)` (n valid solves, s of them passes),
-`invalid(<kind>)`, `abstained(unaudited | confirmed | refuted)`, `duplicate`, or `void(<kind>)` for what was not
-measured: `void(infra)`, and for an audit while judges are off, `void(judges_off)`. Only a reward turns evidence into
+a directory per draw under `DrawInfo.run_dir`, named by `DrawInfo.key` (`envgen/<start>-<seq>/evidence.json`, synced to
+disk before the group settles), where the archive hook reads it; beside it lie the final check's answer of a task that
+passed it (`final-check.json`) and the runtime tasks the production took in (`stored.json`), and judge transcripts go to
+side files keyed by digest. **The schema is additive:** a field keeps its meaning once defined, and readers ignore
+fields they do not know. Its verdict is `valid(s, n)` (n valid solves, s of them passes), `invalid(<kind>)`,
+`abstained(unaudited | confirmed | refuted)`, `duplicate`, or `void(<kind>)` for what was not measured: `void(infra)`,
+`void(deadline)` for a production that infrastructure held up past its deadline, `void(toolkit_usage)` for a usage error
+of the toolkit's, and for audits while judges are off, `void(judges_off)`. Only a reward turns evidence into
 numbers (R5), so any reward can re-score the archive offline.
 
 Rewards are pure functions of the evidence, registered in `platoon.experimental.envgen` with
@@ -841,15 +972,18 @@ the version the generator sampled, with a share of 0.10 of the entry's advantage
 proposer on about 6% of its updates. The solver's rows are credited by `keyed` on `[role]` with leave-one-out, which
 over a production's K children is GRPO without the std division, `A_j = r_j − (s − r_j) / (n − 1)`
 (`platoon/train/credit/keyed.py`). K and the minimum of valid solves are the solver entry's `group_size` and
-`min_successful_group_size`; `program_options.solve: false` skips the solves, to measure generation alone in an
-evaluation. ρ_G, the generator's share of the step's advantage-token mass over every entry's rows, is
+`min_successful_group_size`, which the request carries with its child settings (`ep.child_entry`);
+`program_options.solve: false` skips the solves, to measure generation alone in an evaluation during training
+(`eval_overrides.program_options`), and loading refuses it in training, where the generator would learn validity alone.
+ρ_G, the generator's share of the step's advantage-token mass over every entry's rows, is
 `roles/generator/mass_share`. Generator rows are sampled at version v and train at about v + L / T_step:
 - the default `cispo` loss applies truncated importance ratios (`platoon/train/config_defs.py`), SPADE's correction for
   its delayed designer;
 - **the envgen entry's bound covers the deadline,** `max_staleness = ⌈deadline / p05(T_step)⌉ + 1`, so a production
   that ends within its deadline is masked only when steps run abnormally fast. A bound at p95 latency would mask, by
   construction, the generator rows of the slowest productions: mixed tasks with audits, the only class with positive
-  reward. The same bound judges the production's solver rows (section 2.1);
+  reward. The same bound judges the production's solver rows (section 2.1). The how-to's 28 covers its 16,200 s deadline
+  at a step every 10 minutes at the fastest (open question 9); no load check ties the bound to the deadline;
 - `train.stale_filter: datum` is required. It is run-wide, which makes it a deliberate change for the solver entry
   too: its partly stale groups train their fresh rows instead of dropping whole. Masked generator rows raise an alarm
   (section 9.6); the structural fix is two adapters, whose generator rows age in generator versions (section 10.2);
@@ -864,9 +998,12 @@ evaluation. ρ_G, the generator's share of the step's advantage-token mass over 
 **9.5 Judges and audits.**
 - **A judge is an inspection** in platoon's `judge` role: `ep.inspect(review, entry=<solver entry>,
   harness="platoon-react", role="judge", options=..., grade=False)`, where `entry` names the entry whose service opens
-  the session, not a route to run. `review` is a materialized review task that holds the privileged task, the
-  controls' reports and the sampled trials (`trial.json`, an ATIF trajectory, the kept artifacts). The judge's tools
-  act only on that sandbox; its final message (`ChildRollout.final_message`) is checked against the judge spec's schema
+  the session, not a route to run. `review` is a review task that the toolkit exports and the program materializes,
+  which holds the privileged task, the controls' reports and the sampled trials (`trial.json`, an ATIF trajectory, the
+  kept artifacts). A judge runs on the rollout host, never in the review's sandbox, where the trials it judges could
+  read its key and write its verdict: a function harness, as here, or a CLI harness only through an entry placed `local`
+  (section 2.6). Its tools act only on that sandbox, each of its two attempts at most takes `audit.cap_seconds` (section
+  9.1), and its final message (`ChildRollout.final_message`) is checked against the judge spec's schema
   and classified by the toolkit's `adjudicate`.
 - **Why not platoon's other judges.** `ep.judge_endpoint()` is a bare endpoint, and an audit needs tools on the review
   sandbox; verifier agents grade one child and gate its score, while audits are drawn across siblings after all K
@@ -876,42 +1013,81 @@ evaluation. ρ_G, the generator's share of the step's advantage-token mass over 
   25%, with 2 failures and a tractability review each; of an all-pass task, nothing; of abstentions, 25%. One
   exception: a task whose export sets `pass_audit: every` (its variants leave a target uncovered, where only a judge
   can catch a hardcoded answer) has every pass audited, mixed or all-pass, and `adjudicate` admits it only with a
-  review of each. Judges veto, rescore a faked pass as a failure, or lower q, and never pay; with judges off, which only
-  evaluation allows, each audit is `void(judges_off)`.
+  review of each. Judges veto, rescore a faked pass as a failure, or lower q, and never pay; with the run's judges off,
+  which only evaluation allows, a production whose sample holds a review is `void(judges_off)` as a whole. No stage runs
+  a review of a task as a whole (`judge-spec --kind task`), so the fault table names none.
 - **Calibration and deep audits, outside the productions.** A judge canary set with known verdicts runs as an entry,
   evaluated at the start and every `eval.every` steps, whose root takes a role of its own bound to the judge's policy
   (M3: no root takes `judge`); deep audits re-audit a sample of the audited trials with a full budget and a judge of a
   second family, to estimate the online audits' miss rate and the consequential flag's precision (Appendix A.4).
 
-**9.6 The archive, alarms and stops (M12).** `platoon-envgen-archive` is a step hook (RFC 0021, section 9).
-- At each step's end it appends to a journal in the archive the evidence of the draws the step committed
-  (`StepEnd.consumed`), each with its fate (consumed, stale or failed), and builds from it the generator's memory (past
-  tasks of the seed with their outcomes, a failure excerpt, exemplars, a negative) and the duplicate index.
-- **Durable before referenced.** The journal is fsynced when the hook's checkpoint participant captures its offset,
-  not on every append, so a saved offset never points past durable bytes; a resume deletes draw directories and store
-  entries that no kept group or journal row names.
-- **Alarms and stops.** It computes its alarms from the journal and the step's metrics: exploit kinds, deep-audit
-  misses, validity, judge agreement and outages, the held-out generated set, contamination and red-team regressions,
-  infra censoring, ρ_G, masked generator rows and diversity. Each stops the run, flags a setting or asks for an
-  investigation; the thresholds are the hook's options (defaults in Appendix A.3). A stop sets `run.shutdown` with the
-  alarm's name (`platoon/train/trainer/run.py`): a hook that raised would fail the start, which supervise restarts.
+**9.6 The archive, alarms and stops (M12).** `platoon-envgen-archive` is a step hook (RFC 0021, section 9) and one of
+core's names, with the options `into` (the archive's directory: `envgen-archive` by default, and a relative one, in the
+run's directory), `strata` (the seed's columns that make the stratum whose exemplars and negatives the memory quotes,
+`[kind, mode, domain]`), `keep` (the most past tasks, exemplars and negatives it keeps of a seed or a stratum, 8) and
+`alarms`; its metrics and its checkpoint entry are `envgen_archive`.
+- At each step's end, before the step publishes, it appends to a journal in the archive (`envgen.journal/v1`) the
+  evidence of the draws the step committed (`StepEnd.consumed`), each with its fate (consumed, stale or failed), and
+  builds from it the generator's memory and the duplicate index. The memory holds a seed's past tasks with their
+  outcomes and, for a task that was not valid, a failure excerpt, and its stratum's exemplars (admitted tasks) and
+  negatives (invalid ones), of which a production quotes 3, 2 and 1 by default (`program_options.memory`). The excerpt
+  is the stage that ended the production and what `materialize` and the final check found, never what the audits found:
+  those are judges' findings about the solvers' trials, and the generator's only feedback is the toolkit's validity
+  check (section 9.1). The duplicate index holds the valid tasks, so that a repeat of a refused task is refused for what
+  it is. Stepping independently, the hook journals at the leader's step ends, which consume every group, and its alarms
+  read the leader's step's metrics: a generator policy on a clock of its own (section 10.2) has its metrics read by no
+  alarm.
+- **Tasks in flight** are those that passed their final check and that the journal does not hold yet, of the current
+  start or of a group its checkpoint kept, as the productions' directories record them (`final-check.json`); a
+  production hands them to its final check (section 9.7), which reads their files in the store.
+- **No group admission rule.** A group that a rule rejects, or that fails, is committed as it settles and reaches the
+  step without its draw's key, so `StepEnd.consumed` never names it: the hook refuses a config in which any entry's rule
+  (its own, else `train.group_admission`) is other than `all` (exit 78), until a step end names those draws with their
+  fates (section 12).
+- **Durable before referenced, and one run's.** The journal is fsynced when the hook's checkpoint participant captures
+  its length, not on every append, so a saved length never points past durable bytes, and a production syncs its
+  evidence and its final check's answer as it writes them. A resume cuts the journal back to the saved length and
+  rebuilds the memory and the index from it, so the steps that run again journal their productions once, and deletes
+  what nothing names (section 8.3). The archive's manifest names its run, and the start that keeps it holds a lock
+  (`.lock`): a new run whose archive already holds a journal, a resume of another run's archive outside its own
+  directory, a journal shorter than the checkpoint says and a second start are refused (exit 78).
+- **Alarms and stops.** It computes its alarms from the journal and the step's metrics: exploit kinds, contamination,
+  validity, judge outages, infra censoring, ρ_G, the generator's mean advantage, masked generator rows (from
+  `roles/<role>/stale_share`, which the step logs under `credit: roles`, and records before its hooks run), the
+  generator's mean |log r| against the solver's, the top domain's share, and `toolkit_usage`, a production that ended on
+  a usage error of the toolkit's (section 9.7). Each has an action, `stop`, `warn` (logged as it starts to hold) or
+  `off`; the thresholds are the hook's options (defaults in Appendix A.3, which also lists the alarms not built). A stop
+  sets `run.shutdown` with the alarm's name (`platoon/train/trainer/run.py`), so the run stops at the step's boundary
+  with a checkpoint, as on a stop request, which supervise does not restart; a hook that raised would fail the start,
+  which supervise restarts. A resume restores the alarms' counters and clears no signal, so an alarm that stopped the
+  run stops it again once its signal holds after the resume (validity once the refill window has closed, contamination
+  and usage errors on the next such production), until its thresholds or its action change.
+- **The refill window.** The validity and share alarms skip the step ends after each start while batches hold only fast
+  groups (Appendix A.3): by default ⌈p50 / p50⌉ of the latencies of the mixed productions among the journal's last 100
+  (of the measured ones when none mixed), a latency being the stages' running time, and of the last 16 step durations
+  the hook timed, across starts. It is read again at each step end while it is open, so it grows while slower mixed
+  productions land, and once closed it stays closed for the rest of the start (`alarms.refill_steps` sets it instead);
+  whether to fix it at its first value instead is open question 10.
 
 **9.7 The toolkit contract.** Neither side imports the other: the config names the toolkit's command
 (`program_options.toolkit`), and each verb runs as a `ToolkitCommand` (a data spec: an argv, no shell, ulimits and a
 timeout). Exit 0: stdout is one JSON object with `schema` (`envgen.<verb>/v1`) and `ok`, false when the verb refuses
 its input, with `fault` naming whose: `generator` for what the generator wrote, `infra` for trusted input the host
-handed over (attribution rule 1); an abstention names none. Exit 2: a usage error, which stops the run. Other exits: a
-crash (attribution rule 2). The toolkit emits data only, never a launcher, a `tests/test.sh` or a mode that grades on
-its own: platoon's launcher grades every task it exports (section 3.2).
+handed over (attribution rule 1); an abstention names none. Exit 2, or an answer of another schema major: a usage error,
+which ends the production as `void(toolkit_usage)`, with why in the evidence's `stop`, and stops the run through the
+archive's `toolkit_usage` alarm (section 9.6). Other exits, and an answer that breaks the verb's contract (a refusal
+that names no fault, an export without its `export.json`), are a crash (attribution rule 2). The toolkit emits data
+only, never a launcher, a `tests/test.sh` or a mode that grades on its own: platoon's launcher grades every task it
+exports (section 3.2).
 
 | Verb | Where | Returns |
 |---|---|---|
 | `seeds build` | offline | a Harbor dataset of authoring tasks, their strata in its task index, an exclusion manifest applied; for trusted graders, secretly perturbed inputs and the reference's outputs on them, from which `export` makes replay variants |
 | `check <bundle>` | in the authoring sandbox, model-free | `{ok, problems, feedback}`, with repair text |
-| `check --final <dir> --archive <index> --store <dir>` | host; runs nothing generated | `{ok, problems}`: structure, a static audit, leaks and planted secrets, files that would shadow what its grader imports, contamination, duplicates |
-| `export <bundle> --seed <dir> --to harbor --template <toml> --out <dir>` | host, pure | `instruction.md`, `environment/`, `solution/`, `tests/gen/` (the grader, its `grader.json`, the replay checks' data), `controls/` and `export.json` (the artifacts, the grader's owner, the replay and its time, targets, tolerances, variants, forbidden literals, `pass_audit`), and no `tests/test.sh`; `--seed` is the seed's trusted data (its inputs and their perturbations); `--review` writes a review task |
-| `judge-spec --kind failure\|pass\|task\|tractability\|abstention` | data | prompts, rubric, JSON schema, tools, turn cap |
-| `adjudicate --task --trials --reviews` | host, pure | `{admitted, clean, consequential, vetoes, tractable}` for any K, censored trials left out |
+| `check --final <dir> --archive <index> --store <dir> --in-flight <file>` | host; runs nothing generated | `{ok, problems}`: structure, a static audit, leaks and planted secrets, files that would shadow what its grader imports, contamination, duplicates; and `verdict`, `fault`, `checks` (each check's problems by its name), `digest`, `fingerprint` and `duplicate`, which the evidence records: the program reads the verdict and the fault, the archive the checks (`leak` and `contamination` for its alarms), the digest and the fingerprint (section 9.6). `--archive` is the duplicate index, `--in-flight` a JSON list of the digests of the tasks in flight |
+| `export <bundle> --seed <dir> --to harbor --template <toml> --out <dir>` | host, pure | `instruction.md`, `environment/`, `solution/`, `tests/gen/` (the grader, its `grader.json`, the replay checks' data), `controls/` and `export.json` (the artifacts, the grader's owner, the replay and its time, targets, tolerances, variants, forbidden literals, `pass_audit`), and no `tests/test.sh`; `--seed` is the seed's trusted data (its inputs and their perturbations); `--review <kind>` writes a review task of the trials, with the controls' reports (`--controls`) and the solver's harness, step budget and time limit (`--learner-resources`), and `--review abstention` an abstention's |
+| `judge-spec --kind failure\|pass\|tractability\|abstention` | data | prompts, rubric, JSON schema, tools, turn cap; `--kind failure` is also the toolkit's canary and, at load, its schema's check (section 9.8) |
+| `adjudicate --task --trials --reviews --min-valid` | host, pure | `{admitted, clean, consequential, vetoes, tractable}` for any K, censored trials left out, `--min-valid` being the solver entry's `min_successful_group_size`; the first veto's reason, made one word, is the verdict's kind (`invalid(<reason>)`) |
 | `mutants <dir> --secret <hex>` | host, pure | mutants and metamorphic variants of the oracle's artifacts, for generated graders (M16's `platoon-artifacts` runs them) |
 
 **The program maps; generic platoon code never reads `export.json`.** `package` maps `export.json` onto
@@ -924,11 +1100,15 @@ each trial for judges as `trial.json`, `agent/trajectory.json` (its ATIF project
 module until RFC 0007's export lands), `output/` and `verifier/` (the reward file and the launcher's report).
 
 **9.8 Load checks.** Beyond the generic refusals of sections 2.1 and 4.1, `EnvGenProgram.check` refuses, before any
-service opens and through `pt.CheckContext` (section 6.2): a `train.stale_filter` other than `datum` (the message is
-the line to add); a `group_size` other than 1, or `train.num_microbatches` above 1, where a production's generator
-rows would share a token mean with its solver rows; a child entry without `runtime_tasks`; depth weighting or a
-subagent keep probability below 1; an unbound or trainable `judge`, which would sample the trained default or train;
-`running` without `priors`; a deadline below the budgets plus grace; an unknown toolkit schema major.
+service opens and through `pt.CheckContext` (section 6.2): an entry outside a training config, or with anything but one
+child entry; a `train.stale_filter` other than `datum` (the message is the line to add); a `group_size` other than 1, or
+`train.num_microbatches` above 1, where a production's generator rows would share a token mean with its solver rows; a
+child entry without `runtime_tasks`; depth weighting or a subagent keep probability below 1; an unbound or trainable
+`judge`, which would sample the trained default or train; `running` without `priors`; no deadline, or one at or below
+the budgets but the generation's plus a grace (section 9.1); `solve: false` in training, where the generator would learn
+validity alone; a reward that does not resolve or refuses its options; and a toolkit that does not run, exits 2 or
+answers in another schema major, which loading asks of its `judge-spec` once per command: the only check that runs a
+command, where RFC 0016's checks read the config alone.
 
 ### 10. Configuration and new names
 
@@ -946,7 +1126,7 @@ train:
   max_starting_rollouts: 32               # children take start slots too (section 2.3)
   step_stall_factor: 3                    # section 8.2
   workflow_config: {rollout_isolation: process}
-checkpoint: {every: 10, recovery_every: 1, keep_recovery: 11}  # 11 × 1 > envgen's bound (checkpoints/pruning.py)
+checkpoint: {every: 10, recovery_every: 1, keep_recovery: 29}  # 29 × 1 > envgen's bound (checkpoints/pruning.py)
 policies: {judge: {model_name: <another family>, renderer_name: <renderer>, tinker_base_url: <judge service>,
                    trainable: false}}
 agents: {roles: {judge: {policy: judge}}}  # refused if unbound or trainable
@@ -959,7 +1139,7 @@ environments:
       agent_user: ignore
       runtime_tasks:                      # runtime tasks only; curated grading is unchanged
         images: {<image name>: <prebuilt image>}
-        template: <task.toml>             # no network, a separate verifier as root, fixed limits
+        template: <task.toml>             # no network, a separate verifier as root, fixed limits (verifier: 4 min)
         verifier_user: honor
         verifier_provider_options: {rootfs_layout: copy, fakeroot: true}   # on Singularity
     harness: openhands
@@ -974,7 +1154,7 @@ environments:
     program: platoon-envgen               # root role generator; K and the minimum from the child entry
     program_options:
       toolkit: <the toolkit's command>
-      audit: {failures: 2, passes: 1, all_fail_share: 0.25, abstain_share: 0.25, cap_seconds: 600}
+      audit: {failures: 2, passes: 1, all_fail_share: 0.25, abstain_share: 0.25, cap_seconds: 600}  # per judge attempt
       reward: learnability
       memory: {past_tasks: 3, exemplars: 2, negatives: 1}
     child_entries: [curated]
@@ -984,11 +1164,11 @@ environments:
         generator: {credit: running, options: {strata: [kind, mode, domain], priors: <measured priors>},
                     share: 0.10}
         solver: {credit: keyed, options: {key: [role], leave_one_out: true}}
-    max_staleness: 10                     # covers the deadline: ⌈5400 s / p05(T_step)⌉ + 1 (section 9.4)
+    max_staleness: 28                     # covers the deadline: ⌈16,200 s / p05(T_step) of 600 s⌉ + 1 (section 9.4)
     workflow_config:
       group_size: 1                       # one task per seed per draw
       rollout_permits: 8                  # sessions open at once; the label cap defaults to 192 // (1 × 8)
-      rollout_config: {max_steps: 30, timeout: 5400}   # generator turns; the production's deadline
+      rollout_config: {max_steps: 30, timeout: 16200}  # generator turns; the deadline, the how-to's (open question 9)
 trainer_options:
   hooks: [{hook: platoon-envgen-archive, options: {into: <archive directory>, alarms: <thresholds>}}]
 ```
@@ -1027,12 +1207,12 @@ start experimental.
 | Kind | Names (milestone) |
 |---|---|
 | config keys | `environments[].child_entries` (M9), `workflow_config.rollout_permits` (M8), `environments[].agents.root_role` (M3), `environments[].program_options` and `eval_overrides.program_options`, also in named environments (M4), `service_kwargs.runtime_tasks` (M5; `regrade`, M6), `policies.<id>.hosted` (M12b), `train.step_stall_factor` (M15) |
-| component options | `credit: running` (M1: `strata`, `priors` with `mean`, `scale`, `weight` and `strata`, `half_life`, `shrink`, `clip`, `cap_penalties`); `credit: roles` (M2: `by_role.<role>`: `credit`, `options`, `share`, `kl: {to, coef}`); `program: platoon-envgen` (M11: `toolkit`, `solve`, `audit`, `reward`, `reward_options`, `memory`); hook `platoon-envgen-archive` (M12: `into`, `alarms`) |
-| Python | `TrainingSample.version`, `CreditGroup.columns`, `CreditSetup.max_staleness`, `credits_single_members` (M1); `CreditGroup.only` (M2); `@pt.program(root_role=)` (M3); `ep.options`, `@pt.program(options=, check=)`, `pt.CheckContext` and `platoon.testing.run_episode(program_options=)` (M4), and the members of `pt.CheckContext` for entries with children (M9); `HarborEnvironmentService.materialize` (with `replay_address_space_bytes=`), `MaterializedTask`, `RuntimeTasksConfig` (M5); `HarborEnvironmentService.runtime_regrades` (M6); `ReplayChecks`, `ReplayVariant`, `ForbiddenLiterals`, and `materialize(..., replay_checks=, replay_timeout_s=)` (M5b); `BoundDraw.permits` (M8); `ep.rollout`, `ep.inspect`, `ep.drop`, `ep.materialize`, `ChildRollout`, `@pt.program(mints=)`, `@pt.harness(calls_model=)` (M9); `@pt.program(needs_draws=)`, and in `platoon.experimental.envgen` `EnvGenProgram`, `EnvGenOptions`, `ProductionEvidence`, `ProductionReward`, `ProductionScore`, `@production_reward`, `ToolkitCommand`, `check_reward` (M11); `@pt.program(children_with_open_root=)` (M13) |
+| component options | `credit: running` (M1: `strata`, `priors` with `mean`, `scale`, `weight` and `strata`, `half_life`, `shrink`, `clip`, `cap_penalties`); `credit: roles` (M2: `by_role.<role>`: `credit`, `options`, `share`, `kl: {to, coef}`); `program: platoon-envgen` (M11: `toolkit`, `solve`, `audit`, `reward`, `reward_options`, `memory`); hook `platoon-envgen-archive` (M12: `into`, `strata`, `keep`, `alarms`) |
+| Python | `TrainingSample.version`, `CreditGroup.columns`, `CreditSetup.max_staleness`, `credits_single_members` (M1); `CreditGroup.only` (M2); `@pt.program(root_role=)` (M3); `ep.options`, `@pt.program(options=, check=)`, `pt.CheckContext` and `platoon.testing.run_episode(program_options=)` (M4), and the members of `pt.CheckContext` for entries with children (M9); `HarborEnvironmentService.materialize` (with `replay_address_space_bytes=`), `MaterializedTask`, `RuntimeTasksConfig` (M5); `HarborEnvironmentService.runtime_regrades` (M6); `ReplayChecks`, `ReplayVariant`, `ForbiddenLiterals`, and `materialize(..., replay_checks=, replay_timeout_s=)` (M5b); `ep.rollout`, `ep.inspect`, `ep.drop`, `ep.materialize`, `ChildRollout`, `@pt.program(mints=)`, `@pt.harness(calls_model=)` (M9); `HarnessResult` in `platoon.experimental` (M10); `@pt.program(needs_draws=)`, `StepHookBase.needs_draws`, `ep.rescore`, `ep.child_entry`, `ChildEntry`, `ChildRollout.gateway_errors`, `HarborSession.collect_outputs` and `HarborSession.workdir`, and in `platoon.experimental.envgen` `EnvGenProgram`, `EnvGenOptions` with `AuditOptions` and `MemoryOptions`, `ProductionEvidence` and its records, `Verdict`, `ProductionReward`, `ProductionScore`, `@production_reward`, `RegisteredReward`, `resolve_reward`, `registered_rewards`, the rewards' options, `ToolkitCommand`, `ToolkitResult` and its errors, `check_reward`, `evidence_corpus`, `Production`, `StageBudgets`, `stage_budgets`, `Workspace`, `HarborWorkspace`, `materialize_arguments`, `Archive`, `EmptyArchive`, `PastTask`, `memory_files`, `write_trial` and `atif_trajectory`, and in `platoon.testing` `run_production`, `ProductionScenario` and `ProductionRun` (M11); `ArchiveHook`, `ArchiveOptions`, `AlarmOptions`, `ServedArchive`, `served_archive`, `ARCHIVE_SCHEMA`, `JOURNAL_SCHEMA` and `Production.stored` (M12); `@pt.program(children_with_open_root=)` (M13). `BoundDraw.permits` (M8) is internal |
 | components | the estimators `running` and `roles` (M1, M2), core names that a package can no longer register; the program `platoon-envgen` and the rewards `learnability`, `tiers` and `plateau-regret` (M11); the step hook `platoon-envgen-archive` (M12); the hosted frozen-policy runtime (M12b); the control harness `platoon-artifacts` (M16) |
 | checks in `platoon.testing` | `check_runtime_tasks` (M5; its regrade case M6, its replay-check cases M5b), `check_shared_service` (M7), `check_program` (M11) |
-| metrics | `credit/running/*` (M1); `credit/role_mass/<role>`, `credit/role_weight/<role>`, `credit/role_kl/<role>` and `roles/<role>/*`, ρ_G among them (M2); `rollout_client/start_limit/releases/{ready,child}` and the grant latency, with `child_entries` only (M9) |
-| protocols and formats | `agents.root_roles` in `identity.json` (M3); the failure kind `program_options`, and a program's options in `lock.json` (M4); the launcher, `tests/gen/grader.json`, the verdict, the report (`platoon.launcher/v1`), the launch settings, the store, the reasons `solver_output_contract` and `solver_nonreproducible`, and the failure kinds `verifier_generated_*` and `verifier_trusted_*` (M5); `verifier_flaky` and the report's `replayed_sha256` (M6); the reasons `solver_variant_failed` and `solver_hardcoded`, and the scan rule `python-numeric-literals/v1` (M5b); the grant channel (M9); `envgen.evidence/v1` and its verdicts, the toolkit's `envgen.<verb>/v1`, `export.json` (`envgen.task/v1`), review tasks (`envgen.review-task/v1`) and the trial layout (M11); rolling child permits (M13); the drain signal (M14) |
+| metrics | `credit/running/*` (M1); `credit/role_mass/<role>`, `credit/role_weight/<role>`, `credit/role_kl/<role>` and `roles/<role>/*`, ρ_G among them (M2); `rollout_client/start_limit/releases/{ready,child}` and the grant latency (`start_limit/grant_latency_p50` and `_max`), with `child_entries` only (M9); `roles/<role>/stale_share` and the archive's `envgen_archive/*` (M12) |
+| protocols and formats | `agents.root_roles` in `identity.json` (M3); the failure kind `program_options`, and a program's options in `lock.json` (M4); the launcher, `tests/gen/grader.json`, the verdict, the report (`platoon.launcher/v1`), the launch settings, the store, the reasons `solver_output_contract` and `solver_nonreproducible`, and the failure kinds `verifier_generated_*` and `verifier_trusted_*` (M5); `verifier_flaky` and the report's `replayed_sha256` (M6); the reasons `solver_variant_failed` and `solver_hardcoded`, and the scan rule `python-numeric-literals/v1` (M5b); `RolloutLease.size` of a draw of several permits per rollout, and platoon's own key of a rollout config's `extra`, `platoon_rollout_permits` (M8); the grant channel, the key `platoon_child_entries`, the trace's `child_rollout` record of a child's root and the failure kind `child_conversion` (M9); the record's `failed_to_open` (M10); `envgen.evidence/v1` and its verdicts, `void(deadline)` and `void(toolkit_usage)` among them, the record's `rescored`, the toolkit's `envgen.<verb>/v1` and its arguments, `export.json` (`envgen.task/v1`), review tasks (`envgen.review-task/v1`) and the trial layout (M11); the archive's manifest (`envgen.archive/v1`) and journal (`envgen.journal/v1`), a production's `final-check.json` and `stored.json`, the evidence's `task.instruction` and `task.final_check`, and the final check's `checks`, `digest` and `fingerprint` (M12); rolling child permits (M13); the drain signal (M14) |
 
 ### 11. Compatibility, the golden trace and tests
 
@@ -1042,10 +1222,12 @@ start experimental.
   pickled bytes), the worker request's child configs exist only with `child_entries`, and each pull request tests that
   today's requests are unchanged. The defaults are today's: `rollout_permits` 1, root role `policy`, and `single` (the
   default program: one root agent) on today's path.
-- **The golden gains one scenario** (M11): a fake production with K = 3 fake TOML children, `roles` credit,
-  `rollout_permits` 3 and a resume mid-run; M12 adds the archive hook to it and records its golden again. The layer
-  rule holds: the grant channel lives in `workers/`, given the start limit, and credit reads `TrainingSample.version`.
-  Every built milestone keeps the golden trace (`tests/train/parity`) byte-identical.
+- **The golden gains one scenario** (M11): productions, each a generator root with K = 3 children of a TOML spec, faked
+  at the worker-request boundary as the trace fakes every rollout, under `roles` credit with a frozen judge,
+  `rollout_permits` 3, a void production and a resume mid-run; the program itself runs in `run_production`,
+  `check_program` and its tests. M12 adds the archive hook to it and records its golden again. The layer rule holds: the
+  grant channel lives in `workers/`, given the start limit, and credit reads `TrainingSample.version`. Every built
+  milestone keeps the golden trace (`tests/train/parity`) byte-identical.
 - **Behaviour changes without a key,** none of which a documented use relies on (each pull request lists its smaller
   changes of messages and warnings):
   - M0: a sandboxed harness's mint of a `judge` agent gets 403;
@@ -1058,10 +1240,16 @@ start experimental.
     resolve the config's components before a `--prepare`, so that their checks refuse before it prepares anything; and
     `platoon.testing.run_episode` raises for a program that does not resolve, where the episode ended as an `error`
     outcome;
-  - M5: a task directory that holds a runtime task's launch settings is refused, never run as an ordinary task.
+  - M5: a task directory that holds a runtime task's launch settings is refused, never run as an ordinary task;
+  - M8: a decision over the pool that waits for the rest of a drawn group's permits puts the draw back, first in its
+    label's line, when a stop request comes meanwhile, where it started the group; and loading refuses platoon's own
+    keys of a rollout config's `extra` in a config's own, `platoon_rollout_permits` and M9's `platoon_child_entries`,
+    which no earlier release read;
+  - M11: `selfplay` is a reserved trainer name, as `interleaved` is.
 - **What an opting-in config changes on purpose:** the solver entry's root takes the role `solver`; `stale_filter:
-  datum`, which is run-wide, trains the fresh rows of the solver entry's partly stale groups; and with `child_entries`
-  the start limit's metrics gain `releases/{ready,child}`, and workers take their slots over the grant channel.
+  datum`, which is run-wide, trains the fresh rows of the solver entry's partly stale groups; with `child_entries` the
+  start limit's metrics gain `releases/{ready,child}`, and workers take their slots over the grant channel; and under
+  `credit: roles` the step records its metrics by role before its hooks run, and logs each role's `stale_share` (M12).
 - **What does not change:** what the `rl` step trains (it logs per-role metrics under `credit: roles`, M2; `rl.needs()`
   gains the OR of declared draw needs, M11), the checkpoint format, the credit contract (once per group, state only in
   `settle`), and Harbor grading of curated datasets.
@@ -1086,13 +1274,17 @@ start experimental.
 | children of children (depth 2) | depth 1 is what the no-deadlock argument of section 4.2 needs | a user and a new argument |
 | resumable productions | a reissued draw re-runs its production | crash losses above the triggers of the fallback (Alternatives) |
 | rollouts that platoon did not start (sessions of a product's users) | they need a journal and a resolver, not episode trees | a design of their own |
+| the age of child rows, as a step metric (section 2.1) | not built with M9: child rows are young | a bound that child rows approach; the trace's `child_rollout` marks let the conversion flag child rows and the step log their ages |
+| child rollouts under `platoon eval` and `platoon rollout` | they reserve no rollout permits, so their episodes would have no seats; an entry with children is evaluated during training (`eval.every`), and section 2.7's smoke trains at a learning rate of 0 | the dry run under `platoon eval` (Appendix A.6): seats and child settings per entry, its concurrency counted in permits |
+| the archive under a group admission rule | a group that a rule decides as it settles reaches the step without its draw's key, so `StepEnd.consumed` never names it, and the archive refuses such a config (section 9.6) | a step end that names those draws with their fates (RFC 0021's), and an answer for a crash between their settle and the step that takes their markers |
+| the alarms that need a signal from outside the run (Appendix A.3) | neither the journal nor the step's metrics hold judge canary agreement, the deep audits, the held-out generated set, red-team regressions, diversity, or infra censoring correlated with outcomes | evaluations that report them; for diversity, a similarity of tasks, which only the toolkit's fingerprints define |
 
 ### 13. Relation to other RFCs
 
 | RFC | What this RFC does to it |
 |---|---|
 | [0021](0021-trainers-credit-and-policies.md) trainers, credit and policies | **Builds on** its credit API (adds `TrainingSample.version`, `CreditGroup.columns`, `CreditSetup.max_staleness`, `CreditGroup.only` and `credits_single_members`), its estimators (adds `running` and `roles` to core's names), step hooks and draw provenance. **Builds** `check_shared_service` for its section 12's U1-U4 (M7), not the rest of its B4c. **Keeps** its deferral of a framework for producers of online auxiliary data |
-| [0020](0020-rollout-permits.md) rollout permits | **Builds** its section 8's static `weight` as `rollout_permits`, without a unit plan, and a dynamic form for children whose root's session has closed, which needs no lending rule; for such episodes its lease's rule 1 reads "the session"; keeps "do not overload `group_size`" and a horizon that never grows silently. Its section 8 points here |
+| [0020](0020-rollout-permits.md) rollout permits | **Builds** its section 8's static `weight` as `rollout_permits`, without a unit plan (M8: a draw of W permits per rollout holds a lease of `group_size × W` and runs its group size of rollouts, a clause of its lease rule 2), and a dynamic form for children whose root's session has closed, which needs no lending rule (M13); for such episodes its lease's rule 1 reads "the session"; keeps "do not overload `group_size`" and a horizon that never grows silently. Its section 8 points here |
 | [0016](0016-component-configuration.md) component configuration | **Builds** its program options (`program_options` and `eval_overrides.program_options`, `@pt.program(options=, check=)`, `ep.options`, `pt.CheckContext`), stable, ahead of the rest of its M2 (M4), and widens `pt.CheckContext` for entries with children only (M9). Its section 3 points here |
 | [0015](0015-hosted-models-and-judges-in-eval.md) hosted models | **Amends** it: frozen hosted policies may judge in training; their calls never train. Its status and summary point here |
 | [0013](0013-extension-model.md) extension model | **Follows** its discovery rule for envgen's rewards, without a new component kind; programs gain `root_role=`, `mints=`, `children_with_open_root=` and `needs_draws=`, and harnesses `calls_model=` |
@@ -1104,7 +1296,7 @@ start experimental.
 
 | Risk | Likelihood / impact | Mitigation |
 |---|---|---|
-| A child differs from a root of its entry (sampling, budgets, grading), so solver results do not transfer | medium / high | R1; the worker request carries the child entry's own rollout config; the parity test under a scripted model; a GPU smoke with two-sample tests |
+| A child differs from a root of its entry (sampling, budgets, grading), so solver results do not transfer | medium / high | R1; the worker request carries the child entry's own rollout config; the parity test under a scripted model; a GPU smoke with permutation tests |
 | Agents minted under a child escape its grade, its exclusion or its role | medium / high | subtrees graded and excluded as units; reserved roles refused with 403; the minting cases in the red-team suite |
 | The generator hacks a generated grader, or aims at a frozen judge's blind spots | high / high | trusted graders before generated ones; `materialize`'s refusals; the launcher's replay and replay checks; controls; regrades; judges of another family, with canaries and deep audits by a second one; judges never pay; the red-team suite; alarms that stop the run |
 | Generator rows go stale, or the bound masks exactly the positive tail | high / medium | a bound that covers the deadline; `stale_filter: datum`; `cispo`; the masked-row alarm; two adapters as the structural fix |
@@ -1141,11 +1333,12 @@ start experimental.
 Each milestone is one pull request that keeps the golden trace identical, in this order: M0 first; M1, then M2, and M3,
 then M4, with M7 in any order; M5 → M6 → M5b, which the measurement needs; M8 → M9 → M10 → M11 → M12, and M12b if
 open question 1 chooses a hosted judge; then M13-M17. M0 to M7 and M5b are built, in the pull requests the last column
-names. Permits land before children, so no merged pull request runs children outside the permit and start limits.
-Lines are EST, code + tests; the rows of the built milestones also give the lines they added, three to six times their
-estimates, so the remaining estimates are likely low too. Appendix A.6 lists the measurement, the dry run and the
-studies that set envgen's defaults; the routing-replay check of section 9.4 comes before the first study on a
-mixture-of-experts base.
+names. M8 to M12 are built too, each as one commit on the one before, and their pull requests open once those of M0 to
+M7 and M5b have merged. Permits land before children, so no merged pull request runs children outside the permit and
+start limits. Lines are EST, code + tests; the rows of the built milestones also give the lines they added, three to
+nine times their estimates, so the remaining estimates are likely low too. Appendix A.6 lists the measurement, the dry
+run and the studies that set envgen's defaults; the routing-replay check of section 9.4 comes before the first study on
+a mixture-of-experts base.
 
 | Milestone | Scope | Exit check | Pull requests |
 |---|---|---|---|
@@ -1158,11 +1351,11 @@ mixture-of-experts base.
 | M6 regrades | section 3.3 (EST 120 + 150; built 276 + 578) | a flaky fake grader is `verifier_flaky`; an unseeded submission whose replays differ is the solver's 0, never `verifier_flaky`; curated tasks are never regraded | "feat: Add regrades of generated graders", open, on M5's |
 | M5b replay checks | section 3.4 (built 1,575 + 1,830) | the honest submission scores 1, and its regrade replays the variant again; one that ignores its inputs is `solver_variant_failed`, one that states the answer `solver_hardcoded`; unusable check data is the grader owner's; a variant's replay reaches neither the replay's outputs nor the grader's files, on Singularity | "feat: Add replay checks to runtime tasks", open, on M6's |
 | M7 shared-service check | `check_shared_service` for RFC 0021's U1-U4 (EST 150 + 150; built 497 + 529) | passes on a toy service that keeps two adapters apart, and each of its faults fails its own check; run on a live LoRA service before a two-adapter study | "feat: Add a shared-service check for adapters", open |
-| M8 static permits | section 4.1 (200 + 250) | a draw holds `group_size × W` permits until its episode returns; in a randomized fake under a full pool, a child that takes its start slot before its seat deadlocks and seat, then slot does not; the derived label cap | |
-| M9 child rollouts | sections 2.1-2.4, 2.5's second refusal and `ep.materialize`, for function harnesses (450 + 500) | children train in their episode's group; a subagent a solver child mints trains on that child's outcome; inspections and their subtrees never train; a solver child's mints of `judge` and `generator` get 403; a check of an entry with children sees them, and other checks see only their entry; start slots and the grant channel under process isolation; without `child_entries`, no new metric and no channel | |
-| M10 CLI children | section 2.6 (200 + 300) | the datum-parity test of section 2.7, with a harness that mints a subagent; its GPU smoke | |
-| M11 the envgen program | section 9 except the archive, with `needs_draws`, the rewards, `ToolkitCommand` and `selfplay` reserved (600 + 650) | the golden scenario, with a resume; `check_program` and `check_reward` pass; additive evidence; a censored member enters no baseline | |
-| M12 the archive | section 9.6 (350 + 400) | alarms stop a fake run through `run.shutdown`; an offset never points past durable bytes after a kill; the golden scenario with the hook, recorded again | |
+| M8 static permits | section 4.1 (EST 200 + 250; built 691 + 1,870) | a draw holds `group_size × W` permits whole until its group returns; in a randomized fake under a full pool, children that take their seat, then their start slot, never deadlock, while a child that takes its slot first among them can hold the start limit until a slot's timer; the derived label cap | "feat: Reserve rollout permits for episodes with several sessions", one commit, not open yet |
+| M9 child rollouts | sections 2.1-2.4, 2.5's second refusal and `ep.materialize`, for function harnesses (EST 450 + 500; built 2,629 + 2,932) | children train in their episode's group; a subagent a solver child mints trains on that child's outcome; inspections and their subtrees never train; a solver child's mints of `judge` and `generator` get 403; a check of an entry with children sees them, and other checks see only their entry; start slots and the grant channel under process isolation; without `child_entries`, no new metric and no channel | "feat: Run rollouts of other entries from programs", one commit on M8's, not open yet |
+| M10 CLI children | sections 2.6 and 2.7 (EST 200 + 300; built 463 + 2,079) | the datum-parity test of section 2.7, for a CLI harness and for function harnesses that mint a subagent; a CLI child's gateway server takes only its subtree's keys, which end at its grade; its GPU smoke, whose script has not run (it needs a GPU service) | "feat: Run CLI harness children under programs", one commit on M9's, not open yet |
+| M11 the envgen program | section 9 except the archive, with `needs_draws`, the rewards, `ToolkitCommand` and `selfplay` reserved (EST 600 + 650; built 5,394 + 6,384, 3,260 of them its recorded golden trace) | the golden scenario, with a resume; `check_program` and `check_reward` pass; additive evidence; a censored member enters no baseline; a generator that uses its whole budget beside graders that never finish, under the smallest deadline loading admits, is the generator's fault, never the deadline's | "feat: Add the envgen program", one commit on M10's, not open yet |
+| M12 the archive | section 9.6, with the garbage collection of section 8.3 and the alarms of Appendix A.3 (EST 350 + 400; built 2,316 + 2,105) | alarms stop a fake run through `run.shutdown`; a saved journal length never points past durable bytes after a kill; the golden scenario with the hook, recorded again | "feat: Add the envgen archive", one commit on M11's, not open yet |
 | M12b frozen hosted policies | section 7 (200 + 250) | a `platoon-react` judge on a hosted frozen policy inside a Tinker gateway, and a judge canary entry's root on it; a trainable hosted policy, one that `judge` does not sample, and one bound to a role that is neither `judge` nor a root role, refused | |
 | M13 rolling child permits | section 4.2 (250 + 350), after RFC 0020's trace-driven model replays the measured latencies | children first and depth 1; in a randomized fake, seat, then permit, then slot never deadlocks, and a child that takes its slot first does; `ep.rollout` raises while the root's session is open, unless the program keeps static permits | |
 | M14 drains | section 8.1 (150 + 200) | on the signal no new production starts, and those in flight settle | |
@@ -1187,33 +1380,64 @@ mixture-of-experts base.
    amendment covers judging only. Proposed: extend it to any role only if study 2 keeps that arm. Decide before study 2.
 7. **Promotion.** Proposed: `root_role` first, then `running` and `roles`, each after a release in which an outside
    project used it; until then RFC 0017's rule holds (experimental names change only in a minor release).
-8. **Sandboxed mints of `verifier`.** M0 refuses only `judge`, and M9 reserves roles only under a program that declares
-   `mints=`. Proposed: refuse `verifier` from a `policy_only` parent as M0 refuses `judge`, in a fix of its own, since
-   platoon opens its verifiers itself. Decide before M9.
+8. **Sandboxed mints of `verifier`.** M0 refuses only `judge`. M9 reserves roles only under a program that declares
+   `mints=`, and `mints=` refuses `verifier`, the role of the agents platoon opens to verify children, so no program can
+   reserve it either: a sandboxed harness still mints a `verifier`, which samples `agents.roles.verifier`'s policy.
+   Proposed: refuse `verifier` from a `policy_only` parent as M0 refuses `judge`, in a fix of its own, since platoon
+   opens its verifiers itself. Decide before M9's pull request opens.
+9. **The production deadline.** M11's stage budgets are worst cases that count every retry and canary (section 9.1):
+   with section 10.1's shape and a 4-minute verifier they come to 12,360 s after generation, where this RFC first priced
+   69 minutes with generation, so its 90-minute deadline is refused (Appendix A.1). The how-to sets 16,200 s, which
+   leaves a 20-minute generation and about 44 minutes of queueing, with an envgen bound of 28. Of the 12,360 s, the
+   audit's second round, for the failures a review calls infrastructure's, takes 2,040. Options: keep the worst cases,
+   with the how-to's deadline and bound, under which generator rows up to 28 versions old train and a production held up
+   to its deadline keeps its permits for 4.5 hours; or make the second audit round cheaper, which takes up to 2,040 s
+   off the sum, and the deadline and the bound with it. Proposed: run the dry run at the how-to's deadline and bound,
+   which measures how far below the worst case productions land, and choose with its latencies. Decide before study 1.
+10. **The refill window.** M12 reads the window at each step end while it is open, so that it grows while slower mixed
+    productions land after the fast ones, and keeps it closed once it closes, for the rest of the start (section 9.6).
+    The alternative fixes it at its first value, which the first, fastest mixed productions set: the validity alarm, a
+    stop, and the share warning then go live on a known schedule, where M12's window stays open, and those alarms blind,
+    for as long as slower productions keep raising it. Proposed: choose with the dry run's step durations and latencies,
+    which show how far the window grows within a start. Decide before study 1.
 
 ## Appendix A: envgen's estimates and defaults
 
 Every number here is EST unless it says otherwise; options hold the defaults, and the phases of A.6 replace them.
 
-**A.1 Budgets and the deadline.** Short productions' budgets come to 69 min: generation 20, package 2, gate 8, solve
-19, audit 10 and one judge retry 10, so a 90-minute deadline (`timeout: 5400`) leaves about 20 minutes for queueing.
-A valid mixed production takes 30-50 min when short, and 1.5-3.5 h with one or two hours of authoring. The solve's 19
-minutes leave its verifier about 4, which must hold the replay and each variant's at the producer's replay time
-(`replay_timeout_s`), the grading and the launcher's own work: about 37 s a replay with 3 variants. The measurement
-sets the replay time and the verifier's time limit together; a longer verifier raises the gate and solve budgets, and
-the deadline with them. A task whose variants leave a target uncovered audits every pass (section 9.5), up to K pass
-reviews where a mixed task has one and an all-pass task none, which the audit budget above does not price; the
-measurement counts such tasks and what their audits cost.
+**A.1 Budgets and the deadline.** The budgets are worst cases that count every retry and canary attribution may run
+(section 9.1). For section 10.1's short productions, with a 4-minute verifier (the template's `[verifier] timeout_sec`)
+and one regrade, they come to 12,360 s after generation: package 480 s, gate 3,015 s, solve 4,005 s, audit 4,800 s and a
+grace of 60 s. A toolkit verb counts 360 s (its run, its retry and the toolkit's canary, 2 minutes each), a grade and
+its regrade 600 s (a sandbox start of 1 minute and the verifier, twice), a control 885 s (a start, a quarter of the
+solver's 15 minutes and its grades), a solve 1,560 s and a review 1,680 s (its export and two judge attempts of a start
+and 10 minutes). The gate counts the final check, its 6 controls twice, for the retries, and the grading canary, and the
+solve its K solves twice and the canary, each in one wave, since W = 8 holds them; the audit counts K reviews,
+`judge-spec`, `adjudicate`, the judge canary and a second round of 2,040 s for the failures a review calls
+infrastructure's. With a 20-minute generation that is 13,560 s, 226 minutes, where this appendix first priced 69 minutes
+(generation 20, package 2, gate 8, solve 19, audit 10 and one judge retry 10), so loading refuses the 90-minute deadline
+(`timeout: 5400`). The how-to sets 16,200 s, which leaves about 44 minutes for queueing, and an envgen bound of 28,
+which covers it at a step every 10 minutes at the fastest (section 9.4); without its regrade the sum would be 10,560 s,
+and with a template that gives the verifier no time limit, so that it takes 10 minutes, 16,680 s, past the how-to's
+deadline. Open question 9 weighs that deadline against a cheaper second audit round. A valid mixed production still
+takes 30-50 min when short, and 1.5-3.5 h with one or two hours of authoring: the worst case sets the deadline and the
+bound, not the latency. The solve's 19 minutes leave its verifier about 4, which must hold the replay and each variant's
+at the producer's replay time (`replay_timeout_s`), the grading and the launcher's own work: about 37 s a replay with 3
+variants. The measurement sets the replay time and the verifier's time limit together; a longer verifier raises the gate
+and solve budgets, and the deadline with them. A task whose variants leave a target uncovered audits every pass
+(section 9.5), up to K pass reviews where a mixed task has one and an all-pass task none, which the audit's budget
+prices by counting K reviews; the measurement counts such tasks and what their audits cost.
 
 **A.2 Utilization and sizing.** Static permits keep about 55% of the permits they hold busy for half-hour productions,
 and 28-38% with one or two hours of authoring, against 90-95% under rolling child permits. Under rolling permits,
 size the label cap by Little's law, `cap ≈ λ × p50(L)` for a target rate λ of productions, and keep `(k + 1) × B ≥
 cap + B + the other groups in flight and settled`, by raising B rather than k: a larger B also lowers the generator
 rows' age in versions, about `L × λ / B`. Section 10.1's shape (B = 16, P = 192, W = 8) has a cap of 24, a step about
-every 14 min, a 90-minute deadline and an envgen bound of about 10.
+every 14 min, the how-to's 270-minute deadline (open question 9) and an envgen bound of 28.
 
 **A.3 Alarms.** The share and validity alarms skip the first ⌈p50(L_mixed) / T_step⌉ steps after a start, L_mixed
-being a mixed production's latency, while batches hold only the solver entry's curated groups and fast failures.
+being a mixed production's latency, while batches hold only the solver entry's curated groups and fast failures; M12
+reads that window at each step end until it closes (section 9.6, open question 10).
 
 | Signal | Alarm | Action |
 |---|---|---|
@@ -1228,6 +1452,20 @@ being a mixed production's latency, while batches hold only the solver entry's c
 | masked generator rows; the generator's mean \|log r\| | above 1% over 10 steps; above 2 × the solver's | raise the bound; consider two adapters |
 | diversity (Vendi score per task); the top domain's share | below half its value at the start; above 50% | turn on the generator's `kl` |
 
+M12 builds what the journal and the step's metrics hold, each alarm with an action of `stop`, `warn` (the table's other
+actions) or `off`, and adds `toolkit_usage`, which stops the run on a production that ended on a usage error of the
+toolkit's (section 9.7). Its windows: the exploit kinds over the last 200 measured productions, at least 100 (flaky
+`verifier_flaky`, lenient `noop_passed`, brittle `oracle_disagrees`, false negative `false_negative`, hackable
+`task_exploit`, and the final check's `leak` and `contamination`), against a base rate measured before training
+(`exploits.base_rate`); validity over the last 32 measured productions (a void one is not measured), counted at the step
+ends from step 10 that journaled one, and 20 points below its most over full windows; judge outages, productions voided
+by a review that could not be had or a failing judge canary; infra censoring, every void production, over the last 100,
+at least 20; the top domain's share of the last 100 valid productions, at least 20; and masked generator rows from the
+step's `roles/<role>/stale_share`. A production that left no evidence counts as `void(no_evidence)`. Not built, since
+neither the journal nor the step's metrics hold them, each needing a signal from an evaluation or from outside the run
+(section 12): judge canary agreement, the deep audits, the held-out generated set, red-team regressions, diversity, and
+infra censoring correlated with outcomes.
+
 **A.4 Judges.** The judge canary set holds 30 or more items with known verdicts (false negatives, clean
 failures, hacked and clean passes, leaky tasks), and `eval.every` runs it about every 6 h. Deep audits re-audit a
 uniform 5% of the audited samples, drawn by the draw key, with a full budget and a judge of a second family.
@@ -1241,7 +1479,7 @@ with two hours of authoring. Study 1 measures how much larger kept trees make a 
 | Phase | What runs | What it sets or decides |
 |---|---|---|
 | Measure (after M5, M6 and M5b; before M8) | tasks the toolkit exports, materialized with platoon's runtime tasks as the program will (a script maps each `export.json` onto `materialize` of the solver entry's own service, with an explicit `runtime_tasks.store`, after the toolkit's final check passes the task) into that store, then run with `platoon eval` as the entry's tasks (`task_dirs`): controls, 16 solves each, audits as review tasks; no exported task ships a launcher | K's reliability (split-half), latencies and flakes under bursts of K, verifier starts, the replay time and the verifier's time limit, the share of tasks that audit every pass, judge egress, the held-out generated set (300 or more accepted tasks on seeds never trained on) |
-| Dry run (after M12, no training) | `platoon eval` of `platoon-envgen` with the base model as generator | `running`'s priors and the roles' masses, against which the share is set, the alarms' base rates, the unresolved share, the deadline, W and the bound; a supervised cold start if validity is below 0.6 or the informative share below 0.15 |
+| Dry run (after M12, no training) | `platoon-envgen` with the base model as generator, under `platoon eval` once it runs children (section 12), or until then under `platoon train` at a learning rate of 0, as section 2.7's smoke runs | `running`'s priors and the roles' masses, against which the share is set, the alarms' base rates, the unresolved share, the deadline, W and the bound; a supervised cold start if validity is below 0.6 or the informative share below 0.15 |
 | Study 1, one node | a small model, short productions, static permits | first the invariants (parity, ρ_G in band, masked generator rows below 1%, exact resume), then generator RL against none (the generator left out of `by_role`, whose rows then train at 0) on a paired evaluation with a fixed solver |
 | Study 2, at scale, after M13-M15 | the target model and longer productions | keep generator RL only if it is non-inferior on the held-out generated set (a margin of 0.02) and clears study 1's rule on the paired evaluation; otherwise a frozen generator plus curation is the result |
 | Study 3, after M16-M17 | tasks with generated graders, authored by a CLI root | the exploit alarms decide whether it continues |
