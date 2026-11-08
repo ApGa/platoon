@@ -287,6 +287,7 @@ async def test_materialize_keeps_a_checked_copy_under_its_digest_with_the_launch
     assert (stored / "tests" / "platoon" / "launcher.py").read_text() == Path(runtime.launcher.__file__).read_text()
     assert json.loads((stored / "tests" / "platoon" / "launch.json").read_text()) == {
         "schema": "platoon.launcher/v1",
+        "launcher_digest": runtime.launcher_digest(),  # of the launcher it installed, this platoon's
         "fingerprint": runtime.config_fingerprint(service.runtime_tasks, reward_key="score", timeout_multiplier=2),
         "grader_owner": "generated",
         "reward_key": "score",  # the name the reward contract trains first
@@ -749,6 +750,100 @@ async def test_a_runtime_task_checked_against_other_runtime_tasks_is_refused_whe
     rewarded = make_service(tmp_path, rootful, store, runtime_tasks={"template": _wide(TEMPLATE)}, reward="score")
     with pytest.raises(ValueError, match="checked against other runtime_tasks"):
         rewarded.harbor_task(made.task)  # its launcher writes another reward than this entry trains
+
+
+def _upgrade(monkeypatch) -> str:
+    """Make this process's platoon one whose launcher differs from the one it had, as an upgrade's does: the launcher's
+    source with one more line, which ``materialize`` installs from then on.  That source."""
+
+    source = Path(launcher.__file__).read_text() + "# another version's\n"
+    monkeypatch.setattr(runtime, "_launcher_source", lambda: source)
+    return source
+
+
+def _unrecorded(task_dir: Path) -> None:
+    """Leave the launcher's digest out of a stored task's settings, as a platoon that recorded none wrote them."""
+
+    path = task_dir / "tests" / "platoon" / "launch.json"
+    settings = json.loads(path.read_text())
+    del settings["launcher_digest"]
+    path.write_text(json.dumps(settings))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_by", ["upgraded", "unrecorded"])
+async def test_a_runtime_task_set_up_with_another_launcher_is_refused_never_graded_by_it(
+    tmp_path, rootful, store, monkeypatch, stored_by
+):
+    """A stored task keeps the launcher it was given, which would grade it: an environment of the same
+    ``runtime_tasks`` runs only a task its own platoon's launcher was installed in, and refuses one set up by another,
+    by its directory and by its digest, before anything starts: a task the platoon before an upgrade stored
+    (``upgraded``), and one whose settings record no launcher (``unrecorded``)."""
+
+    made = await make_service(tmp_path, rootful, store).materialize(write_task(tmp_path / "sources"))
+    assert made.ok, made.problems
+    if stored_by == "upgraded":
+        _upgrade(monkeypatch)
+    else:
+        _unrecorded(Path(made.task.misc["harbor"]["task_dir"]))
+    service = make_service(tmp_path, rootful, store)
+
+    for refuse in (service.open(made.task, rollout_id="r"), service.get_task(made.digest)):
+        with pytest.raises(EnvSetupError, match="set up with another launcher than this platoon's") as refused:
+            await refuse
+        assert refused.value.failure_kind == "env_config"
+        assert "materialize it again with this platoon" in str(refused.value)
+    with pytest.raises(ValueError, match="set up with another launcher than this platoon's"):
+        service.agent_timeout_s(made.digest)
+    assert service.provider.started == []
+
+
+@pytest.mark.asyncio
+async def test_a_task_refused_for_its_launcher_runs_once_materialized_again_under_a_new_digest(
+    tmp_path, rootful, store, monkeypatch
+):
+    """Materialized again with this platoon, the same directory gets this platoon's launcher, and with it another
+    digest, whose task opens and is graded by that launcher; the task of the old digest stays refused."""
+
+    source = write_task(tmp_path / "sources")
+    old = await make_service(tmp_path, rootful, store).materialize(source)
+    upgraded = _upgrade(monkeypatch)
+    service = make_service(tmp_path, rootful, store)
+
+    again = await service.materialize(source)
+
+    assert again.ok and again.digest != old.digest
+    assert (store / again.digest / "tests" / "platoon" / "launcher.py").read_text() == upgraded
+    outcome = await _graded(service, again.task)  # as this user, the launcher refuses to grade: it ran
+    assert (outcome.status, outcome.failure_kind) == ("invalid", "verifier_trusted_launcher")
+    assert "not root" in outcome.metadata["launcher"]["detail"]
+    with pytest.raises(EnvSetupError, match="set up with another launcher than this platoon's"):
+        await service.open(old.task, rollout_id="r")
+
+
+@pytest.mark.asyncio
+async def test_the_same_platoon_and_runtime_tasks_reuse_a_stored_task_wherever_platoon_is_installed(
+    tmp_path, rootful, store, monkeypatch
+):
+    """Another process of the same platoon, installed elsewhere, with the same ``runtime_tasks`` (a resumed run's, say)
+    gives the same directory the same digest and runs the stored task: the launcher's digest is its files', never where
+    they are."""
+
+    made = await make_service(tmp_path, rootful, store).materialize(write_task(tmp_path / "sources"))
+    elsewhere = tmp_path / "elsewhere" / "launcher.py"
+    elsewhere.parent.mkdir()
+    shutil.copyfile(launcher.__file__, elsewhere)
+    monkeypatch.setattr(launcher, "__file__", str(elsewhere))
+    runtime._launcher_source.cache_clear()  # read again, as another process reads it
+    service = make_service(tmp_path, rootful, store)
+
+    again = await service.materialize(write_task(tmp_path / "written-again"))
+    task = await service.get_task(made.digest)
+    session = await service.open(task, rollout_id="r")
+    await session.close()
+
+    assert again.digest == made.digest and task.misc["harbor"] == made.task.misc["harbor"]
+    assert sorted(path.name for path in store.iterdir()) == [".staging", made.digest]
 
 
 @pytest.mark.asyncio
