@@ -68,6 +68,7 @@ from platoon.envs.harbor.runtime import (
     config_fingerprint,
     in_store,
     launch_settings,
+    launcher_digest,
     materialize_task,
     runtime_image,
     runtime_task,
@@ -198,9 +199,9 @@ class HarborEnvironmentService:
     run the image ``runtime_tasks.images`` binds its ``docker_image`` to, with its ``environment/`` uploaded into the
     working directory, and grade it in a separate verifier that starts with ``runtime_tasks.verifier_provider_options``
     laid over ``verifier_provider_options``; its ``[verifier].user`` gets ``runtime_tasks.verifier_user``, and its
-    grade is the launcher's report.  A runtime task that another store holds, or that was checked against other
-    ``runtime_tasks``, is refused, with or without ``runtime_tasks``, never served as an ordinary task.  The service's
-    other tasks are served as before.
+    grade is the launcher's report.  A runtime task that another store holds, that holds another platoon's launcher
+    (one stored before an upgrade), or that was checked against other ``runtime_tasks``, is refused, with or without
+    ``runtime_tasks``, never served as an ordinary task.  The service's other tasks are served as before.
 
     Grading reads the verifier's reward files under the ``reward`` contract (:mod:`platoon.envs.harbor.grading`;
     default: the ``reward`` key trains), after the opt-in ``verifier_classifiers``.  A task with a separate
@@ -506,9 +507,11 @@ class HarborEnvironmentService:
 
     def _runtime_of(self, task_dir: str | Path) -> bool:
         """Whether ``task_dir`` is one of the service's runtime tasks: a directory of its store whose launcher settings
-        carry the fingerprint of its ``runtime_tasks``.  A ``ValueError`` for a runtime task's directory that is not
-        (another store's, one checked against other ``runtime_tasks``, or any where the service takes no runtime tasks),
-        which never runs as an ordinary task."""
+        carry the digest of this platoon's launcher (:func:`~platoon.envs.harbor.runtime.launcher_digest`) and the
+        fingerprint of its ``runtime_tasks``.  A ``ValueError`` for a runtime task's directory that is not (another
+        store's, one that holds another platoon's launcher, as one stored before an upgrade does, one checked against
+        other ``runtime_tasks``, or any where the service takes no runtime tasks), which never runs as an ordinary
+        task."""
 
         settings = launch_settings(task_dir)
         if settings is None:
@@ -521,6 +524,11 @@ class HarborEnvironmentService:
             )
         if not in_store(task_dir, store):
             raise ValueError(f"{where} of another store than {store}: materialize it with the environment that runs it")
+        if settings.get("launcher_digest") != launcher_digest():  # it would run the launcher it was given
+            raise ValueError(
+                f"{where} set up with another launcher than this platoon's (another version's, as before an "
+                "upgrade): materialize it again with this platoon, which stores it under a new digest"
+            )
         if settings.get("fingerprint") != self._runtime_fingerprint:
             raise ValueError(
                 f"{where} checked against other runtime_tasks than the environment {self.name!r}'s (another entry's, "

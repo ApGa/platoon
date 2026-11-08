@@ -17,8 +17,9 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   and grades in a separate verifier on one of `images`), an artifact that is no path below the working directory, a
   Dockerfile or compose file, and anything in `tests/` but `gen/`, the task's grader, which `tests/gen/grader.json`
   describes. Otherwise it installs platoon's launcher as `tests/test.sh` and keeps the task in the store under its
-  digest, which is its id; an environment runs a runtime task only from its own store and only if the task was checked
-  against its own `runtime_tasks`, and refuses any other, never running one as an ordinary task. A runtime task's
+  digest, which is its id; an environment runs a runtime task only from its own store, only if it holds this platoon's
+  launcher and only if the task was checked against its own `runtime_tasks`, and refuses any other, never running one
+  as an ordinary task. A runtime task's
   sessions run the image `images` binds its `docker_image` to with its `environment/` uploaded, and its verifier starts
   with `runtime_tasks.verifier_provider_options` laid over the entry's; there the launcher seals `/tests`,
   `/logs/verifier` and what the agents published, and fails closed when a seal does not take; checks the artifacts
@@ -68,6 +69,11 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
     `check_runtime_tasks` gains two grading cases: a replay that reads and writes its files by their absolute paths,
     which must score 1, and one that changes its inputs and its code and leaves files beside its output, after which
     the grader must find the inputs as they were and the replayed output alone.
+  - A stored task runs only with this platoon's launcher. A task keeps the launcher `materialize` gave it, so one that
+    another platoon stored, as before an upgrade, was graded by that platoon's launcher, unnoticed. Its launcher
+    settings now record the digest of the launcher installed (`launcher_digest`), and an environment refuses a task
+    that records another, or none, when it opens (`env_config`): materialize it again with this platoon, which stores
+    it under a new digest.
 - **`platoon.testing.check_runtime_tasks`** takes a red-team suite of sabotaged tasks through an environment's runtime
   tasks: what `materialize` must refuse, on CPU, and, on the environment's sandboxes, the grade each sabotaged grader,
   replay or submission must get ([Check an environment's runtime

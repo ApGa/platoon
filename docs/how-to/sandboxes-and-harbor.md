@@ -1821,21 +1821,25 @@ them patched. It copies the directory's regular files and directories, and refus
 - a `tests/gen/grader.json` that is missing or malformed (below), and what `HarborTask.load` refuses, such as a missing
   `instruction.md`.
 
-It then installs the launcher (`tests/test.sh`, and `tests/platoon/`, with the launcher's settings, which include a
-fingerprint of the `runtime_tasks` the task was checked against), and keeps the copy in the store under its digest, a
-SHA-256 of all its files, which is the task's id too: the same directory twice is one task. `grader_owner` says who
+It then installs the launcher (`tests/test.sh`, and `tests/platoon/`, with the launcher's settings, which include the
+launcher's own digest and a fingerprint of the `runtime_tasks` the task was checked against), and keeps the copy in the
+store under its digest, a SHA-256 of all its files, the launcher's included, which is the task's id too: the same
+directory twice is one task, and the same directory with another platoon's launcher another. `grader_owner` says who
 wrote the task's grader, `generated` (the generator, the default) or `trusted` (trusted code, such as a task
 producer's own grader), which names the failure kinds of the grader's non-scores (below). It is the caller's word,
 never the directory's. The copy and the checks run in a thread; a store that cannot be written raises `OSError`.
 
 A runtime task's directory says it is one (the launcher's settings, which only `materialize` writes), and it runs only
-as one: an environment opens it only from its own store and only if the task was checked against its own
-`runtime_tasks`, the same `images`, `template`, `verifier_user`, `verifier_provider_options` and `max_bytes`, reward
-name and `verifier_timeout_multiplier`. Another entry's task in a shared store, a task from before the entry's
-`runtime_tasks` changed (a resumed run's), and any runtime task in an environment without `runtime_tasks` are refused
-when they open
-(`env_config`), never run as ordinary tasks. The store's default follows the run's directory: code that reads tasks
-outside the run's processes, or across runs, sets `store`.
+as one: an environment opens it only from its own store, only if it holds this platoon's launcher (the launcher's
+digest in its settings is this platoon's), and only if the task was checked against its own `runtime_tasks`, the same
+`images`, `template`, `verifier_user`, `verifier_provider_options` and `max_bytes`, reward name and
+`verifier_timeout_multiplier`. Another entry's task in a shared store, a task from before the entry's `runtime_tasks`
+changed (a resumed run's), a task another platoon stored (one from before an upgrade, which keeps that platoon's
+launcher and would be graded by it), and any runtime task in an environment without `runtime_tasks` are refused when
+they open (`env_config`), never run as ordinary tasks. A task refused for its launcher runs once it is materialized
+again with this platoon, under a new digest: code that keeps runtime tasks by their ids across an upgrade materializes
+them again from their directories. The store's default follows the run's directory: code that reads tasks outside the
+run's processes, or across runs, sets `store`.
 
 **The task's grader.** `tests/gen/grader.json` names the grader's command, and the task's replay if it has one:
 
