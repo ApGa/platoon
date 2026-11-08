@@ -26,15 +26,19 @@ them patched:
 
 It then writes the launcher's settings (``tests/platoon/launch.json``: who wrote the grader, the reward's name, the
 verifier's time limit, the artifacts, the grader's command and the replay, the template's variables the replay keeps
-(:func:`replay_variables`), and the fingerprint of the ``runtime_tasks`` it was checked against,
-:func:`config_fingerprint`), computes the task's digest (:func:`task_digest`) and renames the copy into
-``<store>/<digest>``, so that two producers that write the same task share it.  The task it returns
-(:class:`MaterializedTask`) has the digest as its id and the stored directory in ``misc["harbor"]["task_dir"]``.
+(:func:`replay_variables`), the digest of the launcher it installed, :func:`launcher_digest`, and the fingerprint of
+the ``runtime_tasks`` it was checked against, :func:`config_fingerprint`), computes the task's digest
+(:func:`task_digest`) and renames the copy into ``<store>/<digest>``, so that two producers that write the same task
+share it.  The task it returns (:class:`MaterializedTask`) has the digest as its id and the stored directory in
+``misc["harbor"]["task_dir"]``.
 
 A runtime task's directory says it is one: its launcher's settings, which only ``materialize`` writes
-(:func:`launch_settings`).  An environment runs one only from its own store (:func:`in_store`) and only if it was
-checked against the environment's own ``runtime_tasks`` (the same fingerprint); any other is refused, and never runs as
-an ordinary task.  Its sessions run the image ``images`` binds its ``docker_image`` to and upload its ``environment/``
+(:func:`launch_settings`).  An environment runs one only from its own store (:func:`in_store`), only if it holds this
+platoon's launcher (the same launcher digest: a stored task keeps the launcher it was given, so one that another
+platoon stored, as one did before an upgrade, would be graded by that platoon's launcher) and only if it was checked
+against the environment's own ``runtime_tasks`` (the same fingerprint); any other is refused, and never runs as an
+ordinary task.  Materialized again with this platoon, a task refused for its launcher gets this platoon's, and with it
+a new digest.  Its sessions run the image ``images`` binds its ``docker_image`` to and upload its ``environment/``
 into the working directory, as Harbor does for a prebuilt image (:func:`runtime_image`: the plan a fetched dataset's
 lock would hold); its separate verifier starts with ``runtime_tasks.verifier_provider_options`` laid over the entry's;
 and its grade is what the launcher's report says (:func:`launcher_outcome`): once the grader runs, a non-score is named
@@ -52,6 +56,7 @@ grading a regrade would change.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import itertools
 import json
@@ -130,6 +135,7 @@ LAUNCHER_FILE = "launcher.py"
 TEST_SCRIPT = "test.sh"
 DIGEST_RULE = "platoon-runtime-task-v1"
 FINGERPRINT_RULE = "platoon-runtime-tasks-config-v1"
+LAUNCHER_RULE = "platoon-runtime-launcher-v1"
 #: The largest launcher's settings a task's directory may hold, for :func:`launch_settings` to read.
 MAX_SETTINGS_BYTES = 1 << 20
 #: ``misc["harbor"]`` of a runtime task marks it so: the service refuses such a task whose directory is none.
@@ -372,6 +378,7 @@ def materialize_task(
             return _refused([_without(str(exc), staging)])
         settings = {
             "schema": launcher.SCHEMA,
+            "launcher_digest": launcher_digest(),  # the launcher _install_launcher put in it
             "fingerprint": config_fingerprint(config, reward_key=reward_key, timeout_multiplier=timeout_multiplier),
             "grader_owner": grader_owner,
             "reward_key": reward_key,
@@ -605,7 +612,9 @@ def config_fingerprint(config: RuntimeTasksConfig, *, reward_key: str, timeout_m
     """A SHA-256 of what a runtime task was checked and set up against: the config but for its store and ``regrade``,
     the name of the reward the launcher writes and the verifier's time multiplier.  ``materialize`` writes it into the
     task's launcher settings, and an environment runs only the runtime tasks that carry its own (another entry's
-    ``runtime_tasks``, or this one's before they changed, never checked them)."""
+    ``runtime_tasks``, or this one's before they changed, never checked them).  The launcher the task was given is not
+    part of it: the settings name that by its own digest (:func:`launcher_digest`), which an environment checks beside
+    the fingerprint, so that a refusal says which of the two differs."""
 
     fields = {key: getattr(config, key) for key in _CONFIG_KEYS if key not in _UNFINGERPRINTED}
     text = json.dumps(
@@ -615,6 +624,20 @@ def config_fingerprint(config: RuntimeTasksConfig, *, reward_key: str, timeout_m
         default=str,
     )
     return hashlib.sha256(f"{FINGERPRINT_RULE}\n{text}".encode()).hexdigest()
+
+
+def launcher_digest() -> str:
+    """A SHA-256 of platoon's launcher as ``materialize`` installs it in a runtime task's ``tests/``
+    (:func:`_install_launcher`): of each file's path there and SHA-256, ``test.sh`` and ``platoon/launcher.py``, the
+    source of :mod:`platoon.envs.harbor.launcher` as this process read it, with :data:`LAUNCHER_RULE` first.
+    ``materialize`` writes it into the task's launcher settings, and an environment runs only the runtime tasks that
+    carry its own: a stored task keeps the launcher it was given, so one that another platoon stored, as one did before
+    an upgrade, would be graded by that platoon's launcher.  The same platoon gives the same digest wherever it is
+    installed."""
+
+    files = {TEST_SCRIPT: TEST_SH, f"{LAUNCHER_DIR}/{LAUNCHER_FILE}": _launcher_source()}
+    lines = "".join(f"{path}\0{hashlib.sha256(text.encode()).hexdigest()}\n" for path, text in sorted(files.items()))
+    return hashlib.sha256(f"{LAUNCHER_RULE}\n{lines}".encode()).hexdigest()
 
 
 def replay_variables(harbor_task: HarborTask) -> list[str]:
@@ -985,11 +1008,19 @@ def _task_toml(task_dir: Path, problems: list[str]) -> dict[str, Any] | None:
 
 def _install_launcher(task_dir: Path) -> None:
     """Put platoon's launcher in the task's ``tests/``: ``test.sh``, and ``platoon/launcher.py`` (its settings come
-    once the task loads)."""
+    once the task loads), the files :func:`launcher_digest` names."""
 
     _directory(task_dir / TESTS_DIR / LAUNCHER_DIR)
     _write(task_dir / TESTS_DIR / TEST_SCRIPT, TEST_SH, mode=0o755)
-    _write(task_dir / TESTS_DIR / LAUNCHER_DIR / LAUNCHER_FILE, Path(launcher.__file__).read_text())
+    _write(task_dir / TESTS_DIR / LAUNCHER_DIR / LAUNCHER_FILE, _launcher_source())
+
+
+@functools.cache
+def _launcher_source() -> str:
+    """The source of :mod:`platoon.envs.harbor.launcher`, read once a process: what ``materialize`` installs is then
+    always what the digest it records names (:func:`launcher_digest`)."""
+
+    return Path(launcher.__file__).read_text()
 
 
 def _compare(actual: Mapping[str, Any], expected: Mapping[str, Any], path: tuple[str, ...], found: list[str]) -> None:
