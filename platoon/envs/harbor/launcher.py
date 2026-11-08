@@ -15,31 +15,34 @@ verifier's sandbox, with a umask that keeps what it writes root's alone.  In ord
    contract**: each is a regular file or a directory of regular files and directories, every file at most
    ``max_output_bytes``, a ``.json`` file JSON, and nothing but directories above an output of the replay.  For a task
    with a **replay**, which runs in the working directory itself, at its own path, so that a submission that names its
-   files by their absolute paths finds them there, it checks (failing closed) that the replay's user may write in no
-   directory of the working directory, that no directory above it lets that user replace what it holds
-   (:func:`_replaceable`) and that the launcher's own directory is not inside it, then makes the working directory
-   root's with the group and other write bits stripped, so nothing there is the replay's user's to write
-   (:meth:`Ops.harden`).  It moves the replay's outputs out of it (into ``$PLATOON_SUBMITTED``, where the grader may
-   compare them), copies what is left into a **pristine copy**, root's alone (:func:`_snapshot`: never following a
-   link, and refusing a mount point below the working directory), lends the working directory to the replay's user
-   (:data:`REPLAY_UID`, never root: :meth:`Ops.lend`), and runs the replay's command there as that user alone (no
+   files by their absolute paths finds them there, it checks, failing closed before it changes anything
+   (:func:`_in_place_fault`), that nothing is mounted below the working directory, that the replay's user may write in
+   no directory of it, that it holds no socket or device, that no directory above it lets that user replace what it
+   holds (:func:`_replaceable`, mode bits and access ACL alike) and that the launcher's own directory is not inside it;
+   then it makes the working directory root's with the group and other write bits stripped, so nothing there is the
+   replay's user's to write (:meth:`Ops.harden`).  It moves the replay's outputs out of it (into
+   ``$PLATOON_SUBMITTED``, where the grader may compare them), copies what is left into a **pristine copy**, root's
+   alone, that keeps it as it is (:func:`_snapshot`, :func:`_clone_tree`), lends the working directory to the replay's
+   user (:data:`REPLAY_UID`, never root: :meth:`Ops.lend`), and runs the replay's command there as that user alone (no
    supplementary groups, no new privileges), with a thin environment (:data:`REPLAY_VARIABLES`, and the template's own
    variables that ``replay_env`` names, its ``PATH`` cut to absolute entries alone so nothing in the working directory
    stands in for a program, and its home and temporary directory one of its own in the launcher's), no core files, no
    file larger than an output may be, at most :data:`MAX_REPLAY_PROCESSES` processes of its user (threads count) and
    :data:`MAX_REPLAY_OPEN_FILES` open files, the most killable to the OOM killer (:data:`OOM_SCORE_ADJ`) and, where the
-   settings give one, that much address space a process, for at most half the time left, less as long as the copy
-   took, which putting the working directory back takes too.  It then kills what the replay left, below the launcher
-   or of the replay's user (one of that user's it cannot signal is a survivor, not foreign), checks the outputs it
-   wrote, removes what that user left where every user may write (:data:`TEMPORARY`), its own directory and all it left
-   in the working directory but its outputs, which then wait as root's (:func:`_hold`, :func:`remove_tree`, within
+   settings give one, that much address space a process, for at most half the time left, less
+   :data:`PUT_BACK_COPIES` times as long as the copy took, which putting the working directory back takes.  It then
+   kills what the replay left, below the launcher or of the replay's user (one of that user's it cannot signal is a
+   survivor, not foreign), checks the outputs it wrote, removes what that user left where every user may write
+   (:data:`TEMPORARY`) and its System V IPC objects (:func:`remove_ipc`), its own directory and all it left in the
+   working directory but its outputs, which then wait as root's (:func:`_hold`, :func:`remove_tree`, within
    :data:`CLEAR_WINDOW_S` past its time), and **puts the working directory back** from the pristine copy
    (:func:`_restore`), with each output the replay wrote in its place: whatever the replay did there, the grader finds
    the working directory as the pristine copy holds it, and the replayed outputs.  A violation, a submission too large
    to copy or too slow to check, copy or put back, a replay that fails, outlives its time, leaves processes that cannot
    be killed, leaves more than the launcher removes in its time or fills a filesystem, lacks its own program, and an
    output it does not write again score 0, the solver's fault (reason ``solver_output_contract`` or
-   ``solver_nonreproducible``);
+   ``solver_nonreproducible``); nothing reads the working directory after a replay that ends the grade so, and the
+   launcher leaves it as that replay left it;
 3. runs the grader's command as root in ``/tests/gen``, with the verifier's own umask, for the rest of the verifier's
    time limit.  The grader judges the outputs in ``$PLATOON_WORKDIR``, the working directory, and writes its verdict
    to ``$PLATOON_VERDICT``: ``{"passed": true|false, "checks": [{"id": "...", "passed": true|false, "margin": 0.5}]}``,
@@ -82,6 +85,7 @@ import resource
 import shutil
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -110,6 +114,10 @@ REPLAY_UID = 65533
 #: The share of the time left that the replay may take, copying the working directory aside and putting it back
 #: included; the grader has the rest.
 REPLAY_SHARE = 0.5
+#: How long putting the working directory back after the replay may take, in copies of it as long each as copying it
+#: into its pristine copy took (:func:`_snapshot`): one copy back, and the walks that remove what was lent there and
+#: make it root's again, about as long as another.  The replay ends that long before its time is over.
+PUT_BACK_COPIES = 2
 #: The most processes the replay's user may have, its threads counted (``RLIMIT_NPROC``), and the most files a process
 #: of the replay may hold open (``RLIMIT_NOFILE``): room for threaded numerics, never enough to starve the launcher and
 #: the grader.
@@ -161,8 +169,8 @@ MAX_SUBMISSION_BYTES = 4 << 30
 #: How long the launcher keeps killing what is left before it gives up.
 KILL_WINDOW_S = 10.0
 #: How long past the replay's time the launcher may take to remove what the replay left, in the working directory, in
-#: its own directory and of its user's where every user may write, and to put the working directory back: a replay that
-#: left more than that removes is the solver's 0.
+#: its own directory, of its user's where every user may write and its System V IPC objects, and to put the working
+#: directory back: a replay that left more than that removes, or that takes longer to put back, is the solver's 0.
 CLEAR_WINDOW_S = 10.0
 #: How deeply a tree the launcher removes may nest (:func:`remove_tree`, which holds two descriptors a level): a replay
 #: that leaves one deeper scores 0, whatever the launcher's limit on open files.
@@ -177,6 +185,22 @@ _OOM_SCORE_ADJ = "/proc/self/oom_score_adj"
 # The errors of a write that found its filesystem full.
 _NO_ROOM = (errno.ENOSPC, errno.EDQUOT)
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# How much of a file the launcher copies at once.
+_COPY_CHUNK = 1 << 20
+# The launcher's mounts, one a line, the fifth field of each its mount point, where the kernel writes a space, a tab, a
+# newline and a backslash as an octal escape.
+_MOUNTINFO = "/proc/self/mountinfo"
+_OCTAL_ESCAPE = re.compile(rb"\\([0-7]{3})")
+# The System V IPC objects of the launcher's IPC namespace: each kind's file in /proc/sysvipc and the column of its ids;
+# and the command that removes one.
+_SYSVIPC = (("shm", "shmid"), ("sem", "semid"), ("msg", "msqid"))
+_IPC_RMID = 0
+# A POSIX access ACL as Linux keeps it, in an extended attribute: a version, then entries of a tag, permissions and an
+# id (little-endian); the tags of a named user, a named group and the mask, and the permission to write.
+_ACL_ACCESS = "system.posix_acl_access"
+_ACL_VERSION = 2
+_ACL_USER, _ACL_GROUP, _ACL_MASK = 0x02, 0x08, 0x10
+_ACL_WRITE = 0x02
 OWNERS = ("generated", "trusted")
 GRADER_KINDS = {"generated": "verifier_generated", "trusted": "verifier_trusted"}
 #: The faults of a grader, each a failure kind ``<grader>_<fault>``; ``unfinished`` is also the Harbor service's, for a
@@ -266,9 +290,10 @@ class Ops:
 
     def lend(self, workdir):
         """Lend the working directory ``workdir`` to the replay's user, for a replay in place: its directories and
-        files below it become that user's (and the group of that number's), never following a link, and the directory
-        itself stays root's, of that user's group, which may write there (mode 770), so that user may add, change and
-        remove what it holds, but can neither rename the directory nor change its mode (:func:`_lend_tree`)."""
+        files below it become that user's (and the group of that number's), readable and writable by it, never
+        following a link, a file of several links first copied into a file of its own, and the directory itself stays
+        root's, of that user's group, which may write there (mode 770), so that user may add, change and remove what it
+        holds, but can neither rename the directory nor change its mode (:func:`_lend_tree`)."""
 
         _lend_tree(workdir)
 
@@ -303,6 +328,12 @@ class Ops:
         tree (:func:`user_processes`)."""
 
         return user_processes(uid)
+
+    def ipc_of(self, uid):
+        """The System V IPC objects of ``uid`` (the replay's user), its own or ones it made, that ``/proc/sysvipc``
+        shows in the launcher's IPC namespace, as ``(kind, id)`` pairs (:func:`user_ipc`)."""
+
+        return user_ipc(uid)
 
     def replays_own(self, info):
         """Whether a file (its ``os.lstat`` result) is the replay's user's: what a replay left where every user may
@@ -516,43 +547,110 @@ def _seal(path, ops, required=True):
     try:
         ops.seal(path)
         info = os.lstat(path)
-        holder = os.stat(os.path.dirname(os.path.abspath(path)))
+        above = os.path.dirname(os.path.abspath(path))
+        holder = os.stat(above)
     except OSError as exc:
         raise LauncherFault(f"it cannot seal {path}: {exc}") from exc
     mode = stat.S_IMODE(info.st_mode)
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or mode & 0o077:
         raise LauncherFault(f"{path} is still open to other users once sealed (owner {info.st_uid}, mode {mode:o})")
-    if _replaceable(holder):
+    if _replaceable(holder, above):
         raise LauncherFault(
             f"the directory that holds {path} lets the replay's user replace it (owner {holder.st_uid}, group "
             f"{holder.st_gid}, mode {stat.S_IMODE(holder.st_mode):o})"
         )
 
 
-def _replaceable(info):
-    """Whether the replay's user could rename or remove what a directory (its ``os.stat`` result) holds: it owns the
-    directory, or may write there and the sticky bit is not set."""
+def _replaceable(info, path=None):
+    """Whether the replay's user could rename or remove what a directory (its ``os.stat`` result, and its ``path``
+    where given) holds: it owns the directory, or may write there (:func:`_writable_by_replay`) and the sticky bit is
+    not set."""
 
-    return info.st_uid == REPLAY_UID or (_writable_by_replay(info) and not info.st_mode & stat.S_ISVTX)
+    return info.st_uid == REPLAY_UID or (_writable_by_replay(info, path) and not info.st_mode & stat.S_ISVTX)
 
 
-def _writable_by_replay(info):
+def _writable_by_replay(info, path=None):
     """Whether the replay's user may add, rename or remove entries of a directory (its ``os.stat`` result): it owns
-    it, or may write there as one of the other users or as its group."""
+    it, or may write there as one of the other users or as its group, or, given the directory's ``path``, as its access
+    ACL lets it (:func:`_acl_lets_replay_write`)."""
 
     if info.st_uid == REPLAY_UID or info.st_mode & stat.S_IWOTH:
         return True
-    return info.st_gid == REPLAY_UID and bool(info.st_mode & stat.S_IWGRP)
+    if info.st_gid == REPLAY_UID and info.st_mode & stat.S_IWGRP:
+        return True
+    return path is not None and _acl_lets_replay_write(path)
 
 
-def _exposed_directory(workdir):
-    """The first directory of ``workdir``, itself or one below it (never through a link), that the replay's user may
-    write in, where it could put what the launcher puts back the replay's outputs through or the grader reads; None
-    when there is none."""
+def _acl_lets_replay_write(path):
+    """Whether the POSIX access ACL of ``path`` (never read through a link) lets the replay's user write there: an
+    entry of that user, or of its group, that grants writing, which the ACL's mask lets through.  Not for a path without
+    an ACL beyond its mode bits, on a filesystem without ACLs, or gone; an ACL the launcher cannot read lets it, so that
+    a check that asks fails closed."""
 
-    for directory, _, _ in os.walk(workdir):
-        if _writable_by_replay(os.lstat(directory)):
-            return directory
+    try:
+        acl = os.getxattr(path, _ACL_ACCESS, follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOENT):
+            return False
+        raise
+    if len(acl) < 4 or (len(acl) - 4) % 8 or struct.unpack_from("<I", acl)[0] != _ACL_VERSION:
+        return True
+    entries = [struct.unpack_from("<HHI", acl, offset) for offset in range(4, len(acl), 8)]
+    mask = next((permissions for tag, permissions, _ in entries if tag == _ACL_MASK), _ACL_WRITE)
+    return any(
+        tag in (_ACL_USER, _ACL_GROUP) and number == REPLAY_UID and permissions & mask & _ACL_WRITE
+        for tag, permissions, number in entries
+    )
+
+
+def _unfit_entry(workdir):
+    """The first entry of ``workdir`` (never reached through a link), the directory itself first, that a replay in
+    place must not find there, and why: ``"writable"`` for a directory that the replay's user may write in
+    (:func:`_writable_by_replay`), where it could put what the launcher puts back the replay's outputs through or the
+    grader reads, and ``"special"`` for a socket or a device, which the replay could reach and the launcher could not
+    copy and put back; None when there is none.  Only an image puts either there: a submission's files and directories,
+    and a task's, reach the verifier as files and directories of their own."""
+
+    pending = [workdir]
+    while pending:
+        directory = pending.pop()
+        if _writable_by_replay(os.lstat(directory), directory):
+            return directory, "writable"
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(entry.path)
+                elif not (entry.is_file(follow_symlinks=False) or entry.is_symlink()):
+                    if not stat.S_ISFIFO(entry.stat(follow_symlinks=False).st_mode):
+                        return entry.path, "special"
+    return None
+
+
+def mount_points(text):
+    """The mount points that the text of ``/proc/self/mountinfo`` (bytes) names, each the fifth field of its line with
+    the kernel's octal escapes (of a space, a tab, a newline and a backslash) read back."""
+
+    points = []
+    for line in text.splitlines():
+        fields = line.split(b" ")
+        if len(fields) > 4:
+            points.append(os.fsdecode(_OCTAL_ESCAPE.sub(lambda found: bytes([int(found.group(1), 8)]), fields[4])))
+    return points
+
+
+def _mounted_below(workdir, mountinfo=_MOUNTINFO):
+    """The first mount point strictly below ``workdir`` (a path without links) among the launcher's mounts
+    (:func:`mount_points`), a directory or a file, whatever filesystem it mounts; None when there is none.  A
+    :class:`LauncherFault` when it cannot read its mounts."""
+
+    try:
+        with open(mountinfo, "rb") as stream:
+            text = stream.read()
+    except OSError as exc:
+        raise LauncherFault(f"it cannot read its mounts in {mountinfo}: {exc}") from exc
+    for point in mount_points(text):
+        if point != workdir and _within(point, workdir):
+            return point
     return None
 
 
@@ -565,7 +663,7 @@ def _replaceable_above(workdir):
     below, directory = workdir, os.path.dirname(workdir)
     while directory != below:
         info = os.lstat(directory)
-        if _replaceable(info):
+        if _replaceable(info, directory):
             return directory, info
         below, directory = directory, os.path.dirname(directory)
     return None
@@ -671,11 +769,12 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
     when it wrote every output again.  Before the replay the working directory is checked (:func:`_in_place_fault`) and
     made the replay user's to write nothing in (:meth:`Ops.harden`), its outputs move aside and what is left is copied
     into a pristine copy, root's alone (:func:`_snapshot`); then it is lent to the replay's user (:meth:`Ops.lend`).
-    After the replay, what that user left where every user may write and in its own directory is removed, the outputs
-    wait as root's (:func:`_hold`), and the working directory is put back from the pristine copy (:func:`_restore`),
-    with the outputs in their places, before the grader reads it: whatever the replay did there, the grader finds the
-    pristine copy and the replayed outputs.  A :class:`SolverFault` for a working directory too large to copy, or one
-    that takes past ``deadline`` to copy or to put back."""
+    After the replay, what that user left where every user may write, its System V IPC objects and its own directory
+    are removed, the outputs wait as root's (:func:`_hold`), and the working directory is put back from the pristine
+    copy (:func:`_restore`), with the outputs in their places, before the grader reads it: whatever the replay did
+    there, the grader finds the pristine copy and the replayed outputs.  A replay that ends the grade (one that fails,
+    or a fault) leaves the working directory as it left it, since nothing reads it then.  A :class:`SolverFault` for a
+    working directory too large to copy, or one that takes past ``deadline`` to copy or to put back."""
 
     replay, owner, cap = config["replay"], config["grader_owner"], int(config["max_output_bytes"])
     limits = {"skip": scratch, "deadline": deadline, "limit": int(config["max_copy_bytes"])}
@@ -685,7 +784,6 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
     if fault is not None:  # the image's, or the template's: no file of a submission makes a directory so
         raise LauncherFault(fault)
     ops.harden(workdir)  # nothing left there is the replay user's to write (files and directories, any depth)
-    mode = stat.S_IMODE(os.lstat(workdir).st_mode)
     os.mkdir(submitted, 0o700)
     for output in outputs:
         here = os.path.join(workdir, output)
@@ -695,9 +793,9 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
             _move(here, target, **limits)
     pristine, home = os.path.join(scratch, "pristine"), os.path.join(scratch, "home")
     copying = time.monotonic()
-    _snapshot(workdir, pristine, ops, deadline, limits["limit"])
-    # The replay ends as long before its time is over as the copy took, which putting the directory back takes too.
-    ends = deadline - (time.monotonic() - copying)
+    kept = _snapshot(workdir, pristine, ops, deadline, limits["limit"])
+    # The replay ends as long before its time is over as putting the directory back takes: PUT_BACK_COPIES copies.
+    ends = deadline - PUT_BACK_COPIES * (time.monotonic() - copying)
     if ends <= time.monotonic():
         raise SolverFault(NONREPRODUCIBLE, "copying the working directory for the replay, and back, leaves it no time")
     try:
@@ -731,24 +829,33 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
         problem = _output_problem(workdir, output, cap)
         if problem is not None:
             return Result.solver(NONREPRODUCIBLE, f"after the replay, {problem}")
-    # What the replay left where every user may write and in its own directory is removed, and in the working directory
-    # all but its outputs, which then wait as root's while the directory is put back: a replay that left more than the
-    # launcher removes in its time, or that filled a filesystem, is the solver's 0, never a launcher fault that would
-    # censor the measurement.  A filesystem found full from here on, as the outputs are held, the directory is put back
-    # or the outputs are copied back, is judged one way: the solver's once the replay left files of its user where
-    # every user may write, else the trusted side's, as it is before any replay ran, since by then what the replay
-    # left in the working directory and its own is gone too.
+    # What the replay left where every user may write, its System V IPC objects and its own directory are removed, and
+    # in the working directory all but its outputs, which then wait as root's while the directory is put back: a replay
+    # that left more than the launcher removes in its time, or that filled a filesystem, is the solver's 0, never a
+    # launcher fault that would censor the measurement.  A filesystem found full from here on, as the outputs are held,
+    # the directory is put back or the outputs are copied back, is judged one way: the solver's once the replay left
+    # files of its user where every user may write or IPC objects, else the trusted side's, as it is before any replay
+    # ran, since by then what the replay left in the working directory and its own is gone too.  Before it judges one
+    # found putting the directory back so, the launcher has the filesystem write out what it holds and tries once more:
+    # one that frees what was removed only after a while (XFS, btrfs) may lack the room the prune gave back until then.
     held = os.path.join(scratch, "replayed")
     until = max(deadline, time.monotonic()) + CLEAR_WINDOW_S
     cleared, no_room = 0, "the replay's outputs find no room where the launcher holds them"
     try:
         cleared = clear_left(paths.temporary, ops.replays_own, _writable_by_replay, (scratch, workdir), until)
+        cleared += _clear_ipc(ops)
         if cleared:
             ran["cleared"] = cleared
         remove_tree(home, until)
         _hold(workdir, held, outputs, ops, until)
         no_room = "the working directory finds no room as the launcher puts it back"
-        _restore(workdir, pristine, ops, mode, until)
+        try:
+            _restore(workdir, pristine, ops, kept, until)
+        except OSError as exc:
+            if exc.errno not in _NO_ROOM or cleared:
+                raise
+            _sync(workdir)
+            _restore(workdir, pristine, ops, kept, until)
         no_room = "the replay's outputs find no room in the working directory"
         for output in outputs:  # moved aside above, below nothing but directories (layout_violation); nothing else runs
             target = os.path.join(workdir, output)
@@ -760,8 +867,11 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
         if exc.errno not in _NO_ROOM or not cleared:
             raise  # a full filesystem with nothing of the replay's left is the trusted side's, as before any replay ran
         return Result.solver(
-            NONREPRODUCIBLE, f"{no_room}, once the replay left files of its user where every user may write: {exc}"
+            NONREPRODUCIBLE,
+            f"{no_room}, once the replay left files of its user where every user may write, or IPC objects: {exc}",
         )
+    if _past(until):  # what it put back is as it should be, but the replay's time, and the window past it, are over
+        raise SolverFault(NONREPRODUCIBLE, "putting the working directory back outlived the replay's time")
     ran["outputs"] = list(outputs)
     for copy in (held, pristine):  # root's copies of what the grader finds in the working directory anyway
         try:
@@ -773,17 +883,31 @@ def _replay(config, paths, ops, report, scratch, submitted, deadline):
 
 def _in_place_fault(workdir, scratch):
     """Why the working directory ``workdir`` (a path without links) cannot be lent to the replay's user for a replay in
-    place, a fault on the trusted side (the image's or the template's: no file of a submission makes it so), or None:
-    a directory of it that the replay's user may write in, where it could put what the launcher puts the replay's
-    outputs back through or the grader reads (:func:`_exposed_directory`); a directory above it in which that user
-    could replace what it holds, and so move the working directory away while it replays there
-    (:func:`_replaceable_above`); or the launcher's own directory ``scratch`` inside it."""
+    place, a fault on the trusted side (the image's or the template's: no file of a submission makes it so), or None,
+    found before anything changes there: something mounted below it (:func:`_mounted_below`), whose filesystem a
+    replay there would change and which the launcher could not put back; a directory of it that the replay's user may
+    write in, where it could put what the launcher puts the replay's outputs back through or the grader reads, or a
+    socket or a device in it (:func:`_unfit_entry`); a directory above it in which that user could replace what it
+    holds, and so move the working directory away while it replays there (:func:`_replaceable_above`); or the
+    launcher's own directory ``scratch`` inside it."""
 
-    exposed = _exposed_directory(workdir)
-    if exposed is not None:
+    mounted = _mounted_below(workdir)
+    if mounted is not None:
         return (
-            f"{exposed}, in the verifier's working directory, lets the replay's user write in it, where it could put "
+            f"{mounted}, in the verifier's working directory, is a mount point, which a replay there would change and "
+            "the launcher could not put back: give the template's image a working directory of one filesystem, with "
+            "nothing mounted below it"
+        )
+    unfit = _unfit_entry(workdir)
+    if unfit is not None and unfit[1] == "writable":
+        return (
+            f"{unfit[0]}, in the verifier's working directory, lets the replay's user write in it, where it could put "
             "what is graded: give the template's image a working directory that only root writes in"
+        )
+    if unfit is not None:
+        return (
+            f"{unfit[0]}, in the verifier's working directory, is a socket or a device, which a replay there could "
+            "reach and the launcher could not put back: give the template's image a working directory without them"
         )
     above = _replaceable_above(workdir)
     if above is not None:
@@ -802,56 +926,104 @@ def _in_place_fault(workdir, scratch):
     return None
 
 
+class _Directory:
+    """What the launcher keeps of the working directory itself, the one entry of it that it puts back without making it
+    anew (:func:`_restore`): its mode, its access and modification times (in nanoseconds) and its user extended
+    attributes (:func:`_user_attributes`)."""
+
+    def __init__(self, path):
+        info = os.lstat(path)
+        self.mode = stat.S_IMODE(info.st_mode)
+        self.times = (info.st_atime_ns, info.st_mtime_ns)
+        self.attributes = _user_attributes(path)
+
+
 def _snapshot(workdir, pristine, ops, deadline, limit):
-    """Copy the working directory ``workdir`` into ``pristine``, the pristine copy that the launcher puts it back from
-    after the replay (:func:`_restore`), and seal it, root's alone (:func:`_seal`): its directories and regular files,
-    and its links as links, never following one; not its FIFOs, sockets or devices.  A :class:`SolverFault` for files
-    of more than ``limit`` bytes, or for a copy that takes past ``deadline`` (:func:`_copy_tree`); a
-    :class:`LauncherFault` for a directory below ``workdir`` on another filesystem (a mount point), which the launcher
-    could not put back."""
+    """Copy what the working directory ``workdir`` holds into ``pristine``, the pristine copy that the launcher puts it
+    back from after the replay (:func:`_restore`), as it is (:func:`_clone_tree`), and seal it, root's alone
+    (:func:`_seal`); what the launcher keeps of the directory itself (:class:`_Directory`).  A :class:`SolverFault` for
+    files of more than ``limit`` bytes, or for a copy that takes past ``deadline``; a :class:`LauncherFault` for an
+    entry on a filesystem other than the directory's, or a socket or a device, which :func:`_in_place_fault` refuses
+    before."""
 
+    kept = _Directory(workdir)
     os.mkdir(pristine, 0o700)
-    _copy_tree(workdir, pristine, deadline=deadline, limit=limit, links=True, device=os.lstat(workdir).st_dev)
+    _clone_tree(workdir, pristine, deadline=deadline, limit=limit, device=os.lstat(workdir).st_dev)
     _seal(pristine, ops)
+    return kept
 
 
-def _restore(workdir, pristine, ops, mode, until):
+def _restore(workdir, pristine, ops, kept, until):
     """Put the working directory ``workdir`` back as ``pristine``, its pristine copy, holds it: remove all it holds,
-    never following a link (:func:`_prune`), copy the pristine copy back (:func:`_copy_tree`, a link as a link), make
-    all of it root's with the group and other write bits stripped (:meth:`Ops.harden`), as before the replay, and give
-    the directory its ``mode`` from then, without the user extended attributes the replay's user could give it
-    (:func:`_clear_user_attributes`).  :class:`Leftover` for what cannot be removed, or not before ``until``; a
-    :class:`SolverFault` for a copy that takes past it; an ``OSError`` that found its filesystem full (:data:`_NO_ROOM`)
-    as it is, for the caller to attribute (:func:`_replay`); a :class:`LauncherFault` for any other."""
+    never following a link (:func:`_prune`), copy the pristine copy back as it is (:func:`_clone_tree`), make all of it
+    root's with the group and other write bits stripped (:meth:`Ops.harden`), as before the replay, and give the
+    directory itself what ``kept`` keeps of it (:class:`_Directory`): its mode, its times and exactly its user extended
+    attributes, which the replay's user, who may write in it, could change.  :class:`Leftover` for what cannot be
+    removed, or not before ``until``; a :class:`SolverFault` for a copy that takes past it, or for all of this ending
+    past it; an ``OSError`` that found its filesystem full (:data:`_NO_ROOM`) as it is, for the caller to attribute
+    (:func:`_replay`); a :class:`LauncherFault` for any other."""
 
     _prune(workdir, (), _Clock(until))
     try:
-        _copy_tree(pristine, workdir, deadline=until, links=True)
+        _clone_tree(pristine, workdir, deadline=until)
         ops.harden(workdir)
-        os.chmod(workdir, mode)
-        _clear_user_attributes(workdir)
+        os.chmod(workdir, kept.mode)
+        _put_user_attributes(workdir, kept.attributes)
+        os.utime(workdir, ns=kept.times, follow_symlinks=False)
     except SolverFault as exc:
         raise SolverFault(NONREPRODUCIBLE, "putting the working directory back outlived the replay's time") from exc
     except OSError as exc:
         if exc.errno in _NO_ROOM:
             raise
         raise LauncherFault(f"it cannot put the working directory back: {exc}") from exc
+    if _past(until):
+        raise SolverFault(NONREPRODUCIBLE, "putting the working directory back outlived the replay's time")
 
 
-def _clear_user_attributes(path):
-    """Remove the user extended attributes (``user.*``) of ``path``, never following a link: any user that may write in
-    a directory may give it some, so the replay's user may give them to the working directory, the one entry of it that
-    the launcher puts back without making it anew.  Nothing on a filesystem without extended attributes."""
+def _sync(path):
+    """Have the filesystem of ``path`` write out what it holds (``syncfs``), so that one that frees the room of what was
+    removed only after a while (XFS, btrfs) has freed it; every filesystem (``sync``) with a C library without
+    ``syncfs``.  Nothing where it cannot."""
+
+    try:
+        descriptor = os.open(path, _DIRECTORY_FLAGS)
+    except OSError:
+        return
+    try:
+        syncfs = getattr(_libc(), "syncfs", None)
+        if syncfs is None:
+            os.sync()
+        else:
+            syncfs(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _user_attributes(path):
+    """The user extended attributes (``user.*``) of ``path``, never read through a link, as ``(name, value)`` pairs;
+    none on a filesystem without extended attributes."""
 
     try:
         names = os.listxattr(path, follow_symlinks=False)
     except OSError as exc:
         if exc.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
-            return
+            return []
         raise
-    for name in names:
-        if name.startswith("user."):
+    names = sorted(name for name in names if name.startswith("user."))
+    return [(name, os.getxattr(path, name, follow_symlinks=False)) for name in names]
+
+
+def _put_user_attributes(path, attributes):
+    """Give ``path`` exactly the user extended attributes ``attributes`` (:func:`_user_attributes`), never following a
+    link: any user that may write in a directory may give it some, and change or remove those it has, so the replay's
+    user may the working directory's, the one entry of it that the launcher puts back without making it anew."""
+
+    names = dict(attributes)
+    for name, _ in _user_attributes(path):
+        if name not in names:
             os.removexattr(path, name, follow_symlinks=False)
+    for name, value in attributes:
+        os.setxattr(path, name, value, follow_symlinks=False)
 
 
 def _submitted_program(argv):
@@ -1135,6 +1307,62 @@ def user_processes(uid, proc="/proc"):
     return found
 
 
+def user_ipc(uid, proc="/proc"):
+    """The System V IPC objects that ``proc``'s ``sysvipc`` lists with ``uid`` as their owner or their creator, each
+    ``(kind, id)``, ``kind`` one of ``shm``, ``sem`` and ``msg``: what of the launcher's IPC namespace a process of that
+    user may have left, which outlives the process.  A kind the kernel does not list is none."""
+
+    found = []
+    for kind, column in _SYSVIPC:
+        try:
+            with open(os.path.join(proc, "sysvipc", kind)) as stream:
+                lines = stream.read().splitlines()
+        except FileNotFoundError:
+            continue
+        if not lines:
+            continue
+        header = lines[0].split()
+        ident, owner, creator = header.index(column), header.index("uid"), header.index("cuid")
+        for line in lines[1:]:
+            fields = line.split()
+            if len(fields) == len(header) and uid in (int(fields[owner]), int(fields[creator])):
+                found.append((kind, int(fields[ident])))
+    return found
+
+
+def remove_ipc(objects):
+    """Remove each System V IPC object of ``objects`` (``(kind, id)`` pairs, :func:`user_ipc`): how many it removed.
+    One already gone, or one it may not remove, it leaves for its caller to find (:func:`_clear_ipc`)."""
+
+    libc = _libc()
+    removed = 0
+    for kind, ident in objects:
+        if kind == "shm":
+            done = libc.shmctl(ident, _IPC_RMID, None)
+        elif kind == "sem":
+            done = libc.semctl(ident, 0, _IPC_RMID)
+        else:
+            done = libc.msgctl(ident, _IPC_RMID, None)
+        if done == 0:
+            removed += 1
+    return removed
+
+
+def _clear_ipc(ops):
+    """Remove the System V IPC objects of the replay's user (:meth:`Ops.ipc_of`, :func:`remove_ipc`): shared memory, a
+    semaphore set or a message queue outlives the process that made it, and memory it holds, the grader would go
+    without.  How many it removed; :class:`Leftover` for one that is still there after it."""
+
+    found = ops.ipc_of(REPLAY_UID)
+    if not found:
+        return 0
+    removed = remove_ipc(found)
+    left = ops.ipc_of(REPLAY_UID)
+    if left:
+        raise Leftover(f"{len(left)} System V IPC object(s) of its user cannot be removed")
+    return removed
+
+
 def _reap():
     while True:
         try:
@@ -1306,15 +1534,13 @@ def _tail(path):
         return ""
 
 
-def _copy_tree(source, target, skip=None, deadline=None, limit=None, links=False, device=None):
+def _copy_tree(source, target, skip=None, deadline=None, limit=None):
     """Copy the regular files and directories below ``source`` into ``target``, each file 755 or 644 as it is
-    executable or not and each directory 755, never following a link: a link is copied as a link (its own text) where
-    ``links`` says so and left out otherwise, as everything else is (a FIFO, a socket, a device), and so is ``skip``
-    (the launcher's own directory, should ``source`` hold it).  A :class:`SolverFault` for files of more than ``limit``
-    bytes, which only a submission brings past the task's own files (``max_copy_bytes``), and for a copy that takes
-    past ``deadline``, the replay's; a :class:`LauncherFault` for a directory below ``source`` on a filesystem other
-    than ``device`` (a mount point), where ``device`` is given; an ``OSError`` for a directory it cannot list, which it
-    never skips."""
+    executable or not and each directory 755, never following a link, and leaving out ``skip`` (the launcher's own
+    directory, should ``source`` hold it) and everything else (a link, a FIFO, a socket, a device).  A
+    :class:`SolverFault` for files of more than ``limit`` bytes, which only a submission brings past the task's own
+    files (``max_copy_bytes``), and for a copy that takes past ``deadline``, the replay's, which it looks at before each
+    directory and each file; an ``OSError`` for a directory it cannot list, which it never skips."""
 
     total = 0
     skipped = os.path.realpath(skip) if skip is not None else None
@@ -1322,29 +1548,17 @@ def _copy_tree(source, target, skip=None, deadline=None, limit=None, links=False
         relative = os.path.relpath(directory, source)
         into = target if relative == "." else os.path.join(target, relative)
         for name in list(directories):
+            _in_time(deadline)
             path = os.path.join(directory, name)
-            info = os.lstat(path)
-            if stat.S_ISLNK(info.st_mode) or (skipped is not None and os.path.realpath(path) == skipped):
+            if os.path.islink(path) or (skipped is not None and os.path.realpath(path) == skipped):
                 directories.remove(name)
-                if links and stat.S_ISLNK(info.st_mode):
-                    os.symlink(os.readlink(path), os.path.join(into, name))
                 continue
-            if device is not None and info.st_dev != device:
-                raise LauncherFault(
-                    f"{path}, in the verifier's working directory, is a mount point, which a replay there would change "
-                    "and the launcher could not put back: give the template's image a working directory of one "
-                    "filesystem"
-                )
             os.mkdir(os.path.join(into, name), 0o700)
             os.chmod(os.path.join(into, name), 0o755)
         for name in files:
-            if _past(deadline):
-                raise SolverFault(NONREPRODUCIBLE, "copying the working directory for the replay outlived its time")
+            _in_time(deadline)
             path = os.path.join(directory, name)
             info = os.lstat(path)
-            if links and stat.S_ISLNK(info.st_mode):
-                os.symlink(os.readlink(path), os.path.join(into, name))
-                continue
             if not stat.S_ISREG(info.st_mode):
                 continue
             total += info.st_size
@@ -1353,6 +1567,77 @@ def _copy_tree(source, target, skip=None, deadline=None, limit=None, links=False
                     OUTPUT_CONTRACT, f"the working directory holds more than {limit} bytes for a replay to copy"
                 )
             _copy_file(path, os.path.join(into, name), 0o755 if info.st_mode & stat.S_IXUSR else 0o644)
+
+
+def _clone_tree(source, target, deadline=None, limit=None, device=None):
+    """Copy what the directory ``source`` holds into the empty directory ``target`` as it is, never following a link:
+    its directories, its regular files with their holes (:func:`_copy_file`), its links (their own text) and its FIFOs,
+    each with its mode, but for the group and other write bits, which nothing in the working directory has once it is
+    hardened, and its access and modification times, and the names of one file there as names of one file again; not
+    their owners (each copy is the launcher's), the extended attributes and ACLs of what it holds, nor its other links
+    beyond it.  A :class:`SolverFault` for files of more than ``limit`` bytes (each file once, whatever its names), and
+    for a copy that takes past ``deadline``, which it looks at before each entry; a :class:`LauncherFault` for an entry
+    on a filesystem other than ``device``, where it is given (a mount point), and for a socket or a device, which only
+    an image puts there, as :func:`_in_place_fault` finds before; an ``OSError`` for a directory it cannot list."""
+
+    total, files, directories = 0, {}, []
+    pending = [""]
+    while pending:
+        relative = pending.pop()
+        with os.scandir(os.path.join(source, relative) if relative else source) as entries:
+            for entry in entries:
+                _in_time(deadline)
+                info = entry.stat(follow_symlinks=False)
+                name = os.path.join(relative, entry.name) if relative else entry.name
+                path = os.path.join(target, name)
+                if device is not None and info.st_dev != device:
+                    raise LauncherFault(
+                        f"{entry.path}, in the verifier's working directory, is a mount point, which a replay there "
+                        "would change and the launcher could not put back: give the template's image a working "
+                        "directory of one filesystem, with nothing mounted below it"
+                    )
+                mode = stat.S_IMODE(info.st_mode) & ~(stat.S_IWGRP | stat.S_IWOTH)
+                times = (info.st_atime_ns, info.st_mtime_ns)
+                if stat.S_ISDIR(info.st_mode):
+                    os.mkdir(path, 0o700)
+                    directories.append((path, mode, times))  # its mode and times once it holds all it does
+                    pending.append(name)
+                elif stat.S_ISREG(info.st_mode):
+                    first = files.get((info.st_dev, info.st_ino))
+                    if first is not None:  # another name of a file it copied
+                        os.link(first, path, follow_symlinks=False)
+                        continue
+                    total += info.st_size
+                    if limit is not None and total > limit:
+                        raise SolverFault(
+                            OUTPUT_CONTRACT, f"the working directory holds more than {limit} bytes for a replay to copy"
+                        )
+                    _copy_file(entry.path, path, mode, times)
+                    if info.st_nlink > 1:
+                        files[(info.st_dev, info.st_ino)] = path
+                elif stat.S_ISLNK(info.st_mode):
+                    os.symlink(os.readlink(entry.path), path)
+                    os.utime(path, ns=times, follow_symlinks=False)
+                elif stat.S_ISFIFO(info.st_mode):
+                    os.mkfifo(path, 0o600)
+                    os.chmod(path, mode)
+                    os.utime(path, ns=times, follow_symlinks=False)
+                else:
+                    raise LauncherFault(
+                        f"{entry.path}, in the verifier's working directory, is a socket or a device, which the "
+                        "launcher could not put back: give the template's image a working directory without them"
+                    )
+    for path, mode, times in reversed(directories):  # each after the directories it holds
+        os.chmod(path, mode)
+        os.utime(path, ns=times, follow_symlinks=False)
+
+
+def _in_time(deadline):
+    """A :class:`SolverFault` once ``deadline`` (a ``time.monotonic()``, or None) has passed, for a copy of the working
+    directory that outlived the replay's time."""
+
+    if _past(deadline):
+        raise SolverFault(NONREPRODUCIBLE, "copying the working directory for the replay outlived its time")
 
 
 def _move(source, target, skip, deadline=None, limit=None):
@@ -1376,16 +1661,55 @@ def _move(source, target, skip, deadline=None, limit=None):
     os.unlink(source)
 
 
-def _copy_file(source, target, mode):
-    """Copy the regular file ``source`` to a new file ``target`` of ``mode``, never following a link."""
+def _copy_file(source, target, mode, times=None):
+    """Copy the regular file ``source`` to a new file ``target`` of ``mode``, never following a link, its holes kept
+    (:func:`_copy_data`), and with ``times`` (its access and modification times, in nanoseconds) where given."""
 
-    with os.fdopen(os.open(source, _READ_FLAGS), "rb") as source_file:
-        if not stat.S_ISREG(os.fstat(source_file.fileno()).st_mode):
+    reading = os.open(source, _READ_FLAGS)
+    try:
+        info = os.fstat(reading)
+        if not stat.S_ISREG(info.st_mode):
             raise OSError(f"{source} is not a regular file")
-        writing = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
-        with os.fdopen(writing, "wb") as target_file:
-            shutil.copyfileobj(source_file, target_file)
-            os.fchmod(target_file.fileno(), mode)
+        writing = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            _copy_data(reading, writing, info.st_size)
+            os.fchmod(writing, mode)
+            if times is not None:
+                os.utime(writing, ns=times)
+        finally:
+            os.close(writing)
+    finally:
+        os.close(reading)
+
+
+def _copy_data(reading, writing, size):
+    """Copy the first ``size`` bytes of the file open as ``reading`` into the empty file open as ``writing``, each at
+    its own offset, and leave its holes holes (``SEEK_DATA``, ``SEEK_HOLE``), so that a sparse file takes no more room
+    as a copy than it does; a filesystem that cannot tell where its holes are has all of it copied.  The copy has its
+    size before anything is written to it, so that no write extends it, which a filesystem may meet by reserving room
+    past its end (XFS) that a later extension would keep."""
+
+    os.ftruncate(writing, size)
+    offset = 0
+    while offset < size:
+        try:
+            start = os.lseek(reading, offset, os.SEEK_DATA)
+            end = min(os.lseek(reading, start, os.SEEK_HOLE), size)
+        except OSError as exc:
+            if exc.errno == errno.ENXIO:  # holes alone from offset to its end
+                break
+            if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise
+            start, end = offset, size
+        while start < end:
+            data = os.pread(reading, min(_COPY_CHUNK, end - start), start)
+            if not data:  # it is shorter than it was
+                break
+            view = memoryview(data)
+            while view:
+                written = os.pwrite(writing, view, start)
+                view, start = view[written:], start + written
+        offset = max(end, offset + 1)
 
 
 def _chown_tree(path, uid, gid):
@@ -1395,22 +1719,44 @@ def _chown_tree(path, uid, gid):
             os.lchown(os.path.join(directory, name), uid, gid)
 
 
-def _lend_tree(workdir):
-    """Make the directories below ``workdir`` and its regular files of one link the replay's user's, never following a
-    link, and ``workdir`` itself root's, of that user's group, mode 770 (:meth:`Ops.lend`).  A file with other links,
-    which may be names outside the working directory, a link and a special file (a device among them) stay root's, so
-    that nothing the working directory reaches beyond what it holds becomes that user's; only an image puts them there
-    (a submission's files and directories reach the verifier as files and directories of their own), and the replay
-    may still remove them, which the launcher undoes (:func:`_restore`)."""
+def _lend_tree(workdir, give=True):
+    """Make the directories below ``workdir`` and its regular files the replay's user's (``give``: a test without root
+    leaves the owners as they are), with read and write permission for their owner, and search permission for a
+    directory, never following a link, and ``workdir`` itself root's, of that user's group, mode 770
+    (:meth:`Ops.lend`).  A file of several links, of which some may be names outside the working directory, is first
+    copied as root into a file of its own in its place (:func:`_break_link`), so that nothing the working directory
+    reaches beyond what it holds becomes that user's; a link and a FIFO stay root's, which only an image puts there (a
+    submission's files and directories reach the verifier as files and directories of their own), and the replay may
+    still remove them, which the launcher undoes (:func:`_restore`)."""
 
     for directory, directories, files in os.walk(workdir, onerror=_raise):
         for name in directories + files:
             path = os.path.join(directory, name)
             info = os.lstat(path)
-            if stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_nlink == 1):
+            if stat.S_ISREG(info.st_mode) and info.st_nlink > 1:
+                _break_link(path, info)
+                info = os.lstat(path)
+            if stat.S_ISDIR(info.st_mode):
+                mode = stat.S_IMODE(info.st_mode) | stat.S_IRWXU
+            elif stat.S_ISREG(info.st_mode):
+                mode = (stat.S_IMODE(info.st_mode) & ~(stat.S_ISUID | stat.S_ISGID)) | stat.S_IRUSR | stat.S_IWUSR
+            else:
+                continue
+            if give:
                 os.lchown(path, REPLAY_UID, REPLAY_UID)
-    os.lchown(workdir, 0, REPLAY_UID)
+            os.chmod(path, mode)
+    if give:
+        os.lchown(workdir, 0, REPLAY_UID)
     os.chmod(workdir, 0o770)
+
+
+def _break_link(path, info):
+    """Put a file of its own in the place of ``path``, a name of a regular file of several links (``info``, its
+    ``os.lstat`` result): a copy with its contents, its mode and its times, beside it, renamed over it."""
+
+    copy = os.path.join(os.path.dirname(path), f".platoon-lend-{os.urandom(8).hex()}")
+    _copy_file(path, copy, stat.S_IMODE(info.st_mode), (info.st_atime_ns, info.st_mtime_ns))
+    os.replace(copy, path)
 
 
 def _raise(error):
@@ -1491,10 +1837,11 @@ def _prune(directory, keep, clock):
 def clear_left(directories, owned, writable, skip, until=None):
     """Remove what the replay's user left in ``directories`` (:data:`TEMPORARY`, where every user may write): each
     entry that ``owned`` says is that user's (by its ``os.lstat`` result), with all below it, in them or below them
-    through directories that ``writable`` says that user may write in, but for ``skip`` (a path, or several: the
-    launcher's own directory, and the working directory, which the launcher puts back itself), never following a link
-    (:func:`remove_tree`).  How many entries it removed; :class:`Leftover` for one it cannot remove, or not before
-    ``until`` (a ``time.monotonic()``).  A directory the sandbox lacks is none."""
+    through directories that ``writable`` says that user may write in (by their ``os.lstat`` result and their path),
+    but for ``skip`` (a path, or several: the launcher's own directory, and the working directory, which the launcher
+    puts back itself), never following a link (:func:`remove_tree`).  How many entries it removed; :class:`Leftover`
+    for one it cannot remove, or not before ``until`` (a ``time.monotonic()``).  A directory the sandbox lacks is
+    none."""
 
     clock = _Clock(until)
     skipped = {os.path.realpath(path) for path in ((skip,) if isinstance(skip, str) else skip)}
@@ -1523,7 +1870,7 @@ def clear_left(directories, owned, writable, skip, until=None):
                     if owned(info):
                         _remove(entry.path, clock)
                         removed += 1
-                    elif stat.S_ISDIR(info.st_mode) and writable(info):
+                    elif stat.S_ISDIR(info.st_mode) and writable(info, entry.path):
                         pending.append(entry.path)
     return removed
 
