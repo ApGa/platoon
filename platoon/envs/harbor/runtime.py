@@ -463,9 +463,9 @@ def artifact_problems(config: Mapping[str, Any] | None) -> list[str]:
 
 def read_grader_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
     """``tests/gen/grader.json``: ``{"command": [...], "replay": {"command": [...], "outputs": [...]}}``, the grader's
-    argv, run in ``/tests/gen``, and the replay's, run in a copy of the working directory, with the outputs it writes
-    there (relative paths); ``replay`` may be left out, and nothing else may be there.  The manifest and None, or None
-    and why it breaks that."""
+    argv, run in ``/tests/gen``, and the replay's, run in the working directory, with the outputs it writes there
+    (relative paths); ``replay`` may be left out, and nothing else may be there.  The manifest and None, or None and
+    why it breaks that."""
 
     where = f"{TESTS_DIR}/{GEN_DIR}/{GRADER_MANIFEST}"
     try:

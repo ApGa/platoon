@@ -31,10 +31,10 @@ from platoon.envs.harbor import launcher
 
 LAUNCHER = Path(launcher.__file__)
 # Runs the launcher with the root-only operations replaced (unless ``ops`` names the launcher's own): the seal only
-# takes the other users' permissions, hardening only strips the write bits it can without being root, the replay runs
-# as this user with the launcher's limits on files, its sweep kills what is below the launcher, never this user's other
-# processes, and what the replay's user left where every user may write is this user's, in the verifier's own
-# temporary directories.
+# takes the other users' permissions, hardening only strips the write bits it can without being root, the working
+# directory, already this user's, is lent as it is, the replay runs as this user with the launcher's limits on files,
+# its sweep kills what is below the launcher, never this user's other processes, and what the replay's user left where
+# every user may write is this user's, in the verifier's own temporary directories.
 WRAPPER = """
 import os, sys
 sys.path.insert(0, {directory!r})
@@ -52,6 +52,9 @@ class WithoutRoot(launcher.Ops):
 
     def harden(self, path):
         launcher._strip_foreign_write(path)
+
+    def lend(self, workdir):
+        pass
 
     def demote(self, max_file_bytes, max_address_space_bytes=None):
         return lambda: launcher._limit_files(max_file_bytes)
@@ -773,7 +776,7 @@ def test_the_replay_keeps_the_variables_it_lists_and_the_templates_and_no_others
 
     assert reward == {"reward": 0} and report["reason"] is None  # the grader graded what the replay saw
     seen = json.loads((verifier.workdir / "answer.json").read_text())
-    assert seen.pop("HOME").endswith("/replay")
+    assert seen.pop("HOME").endswith("/home")  # a directory of the replay's own
     assert seen == {"OMP_NUM_THREADS": "3", "SITE_DATA": "/data", "GRADER_THREADS": None}
 
 
@@ -882,6 +885,117 @@ def test_a_replay_program_the_submission_lacks_or_cannot_run_scores_zero_as_the_
 
     assert reward == {"reward": 0}
     assert report["reason"] == "solver_nonreproducible" and report["detail"].startswith("the replay's command cannot")
+
+
+def test_a_replay_that_names_its_files_by_their_absolute_paths_reproduces_its_outputs(verifier):
+    """The replay runs in the working directory itself, at its own path: a submission that reads its inputs and writes
+    its outputs by their absolute paths, as a solver that ran there would, replays as it ran, and the grader grades
+    what it wrote (42), not what was submitted (41)."""
+
+    here = str(verifier.workdir)
+    absolute = f"""
+        import json
+        with open({here + "/data.txt"!r}) as stream:
+            value = 2 * int(stream.read())
+        with open({here + "/answer.json"!r}, "w") as stream:
+            json.dump({{"answer": value}}, stream)
+    """
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    verifier.submit(41, **{"solve.py": absolute, "data.txt": "21"})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert json.loads((verifier.workdir / "answer.json").read_text()) == {"answer": 42}
+
+
+def test_the_replay_runs_at_the_working_directorys_path_with_a_home_of_its_own_that_goes_after_it(verifier):
+    """Its working directory is the verifier's, by its own path; its home and temporary directory are one directory of
+    its own, apart from the working directory and removed after it, with what it wrote there."""
+
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    probe = """
+        import json, os
+        seen = {"cwd": os.getcwd(), **{name: os.environ.get(name) for name in ("PWD", "HOME", "TMPDIR")}}
+        for name in ("HOME", "TMPDIR"):
+            with open(os.path.join(os.environ[name], name + ".left"), "w") as stream:
+                stream.write("x")
+        with open("answer.json", "w") as stream:
+            json.dump({"answer": 42, "seen": seen}, stream)
+    """
+    verifier.submit(42, **{"solve.py": probe})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 0} and report["reason"] is None, report  # the grader graded what the replay wrote
+    seen = json.loads((verifier.workdir / "answer.json").read_text())["seen"]
+    assert seen["cwd"] == seen["PWD"] == str(verifier.workdir)
+    home = Path(seen["HOME"])
+    assert seen["TMPDIR"] == str(home) and home.name == "home"
+    assert home.parent.parent == verifier.scratch and home.parent.name.startswith("platoon-launcher-")
+    assert not home.exists()
+    assert sorted(path.name for path in verifier.workdir.iterdir()) == ["answer.json", "solve.py"]
+
+
+def test_the_replay_ends_early_enough_to_put_the_working_directory_back_in_its_time(verifier):
+    """The replay's share of the time covers copying the working directory aside and putting it back: the replay ends
+    as long before its share is over as the copy took (here 0.5 s of a share of 2 s, so at most 1 s is left), and a
+    copy that leaves it no time is the solver's 0."""
+
+    verifier.replay()
+    verifier.config.update(artifacts=["solve.py"], timeout_s=9.0)  # 4 s for the launcher's steps: 2 s for the replay
+    verifier.submit(None, **{"solve.py": "import time\ntime.sleep(60)\n"})
+    slow_copy = """
+        import time
+        _snapshot = launcher._snapshot
+
+        def slow(*args, **kwargs):
+            time.sleep({seconds})
+            return _snapshot(*args, **kwargs)
+
+        launcher._snapshot = slow
+    """
+
+    report = verifier.run(extra=slow_copy.format(seconds=0.5))[2]
+
+    assert report["reason"] == "solver_nonreproducible" and report["replay"]["timed_out"], report
+    assert report["replay"]["timeout_s"] <= 1.1
+
+    report = verifier.run(extra=slow_copy.format(seconds=1.5))[2]
+
+    assert (report["reward"], report["reason"]) == (0, "solver_nonreproducible"), report
+    assert report["detail"] == "copying the working directory for the replay, and back, leaves it no time"
+    assert "replay" not in report
+
+
+def test_putting_the_working_directory_back_past_the_replays_time_scores_zero(verifier):
+    """The copy of the working directory back from its pristine copy has the replay's time and the window for removing
+    what it left: one that takes longer, as a working directory too large to copy in time does, is the solver's 0."""
+
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    verifier.submit(42, **{"solve.py": SOLVE, "data.txt": "21"})
+    late = """
+        _copy_tree = launcher._copy_tree
+
+        def late(source, target, *args, **kwargs):
+            if os.path.realpath(target) == os.path.realpath(paths.workdir):
+                kwargs["deadline"] = 0.0  # long past
+            return _copy_tree(source, target, *args, **kwargs)
+
+        launcher._copy_tree = late
+    """
+
+    _, reward, report = verifier.run(extra=late)
+
+    assert reward == {"reward": 0}
+    assert (report["reason"], report["detail"]) == (
+        "solver_nonreproducible",
+        "putting the working directory back outlived the replay's time",
+    )
+    assert "grader" not in report
 
 
 # --------------------------------------------------------------------------------------- faults on the trusted side
@@ -1272,11 +1386,12 @@ def test_the_sweep_ends_a_daemon_of_the_replays_user_wherever_it_is():
     assert done.stdout.split() == ["True", "1", "0", "[]"]
 
 
-# ------------------------------------------------------------------------ hardening invariants (I1-I4)
+# ------------------------------------------------------------------------ hardening invariants (I1-I5)
 
 # I1 has its sweep regression above (test_kill_left_never_excludes_a_replay_user_process_it_cannot_signal); the rest
-# cover disk, inode and memory exhaustion by a replay (I2), the working directory before the replay (I3) and the
-# replay's PATH (I4).
+# cover disk, inode and memory exhaustion by a replay (I2), the working directory before the replay (I3), the
+# replay's PATH (I4), and the working directory after it (I5): whatever a replay did there, the grader finds the
+# pristine copy taken before it and the replayed outputs.
 
 
 def test_clear_left_removes_what_the_replays_user_left_and_nothing_else(tmp_path):
@@ -1419,56 +1534,68 @@ def test_a_replay_that_leaves_a_tree_too_deep_to_remove_scores_zero(verifier):
     assert f"d nests more than {launcher.MAX_TREE_DEPTH} levels deep" in report["detail"]
 
 
+# A filesystem found full as the launcher copies into the working directory after the replay: as it puts the
+# working directory back from its pristine copy, or as it puts the replay's outputs back.
 _NO_ROOM_BACK = """
 import errno
 _copy_file = launcher._copy_file
 
 def full(source, target, mode):
-    if target.startswith({workdir!r}):
+    if target.startswith({workdir!r}) and target.endswith("answer.json") == {outputs!r}:
         raise OSError(errno.ENOSPC, "No space left on device")
     return _copy_file(source, target, mode)
 
 launcher._copy_file = full
 """
+_NO_ROOM_STEPS = {
+    "restore": (False, "the working directory finds no room as the launcher puts it back"),
+    "outputs": (True, "the replay's outputs find no room in the working directory"),
+}
 
 
 @pytest.mark.parametrize("left", [True, False], ids=["the-replay-left-files", "nothing-left"])
-def test_a_full_filesystem_putting_the_outputs_back_is_the_solvers_zero_only_once_the_replay_left_files(verifier, left):
-    """I2: the replay's outputs put back where the filesystem is full is the solver's 0 once the replay left files of
-    its user where every user may write (the room it lacks is what the replay took); with nothing left, it is the
-    trusted side's fault, as a full filesystem is before any replay ran, never a blame the solver can move."""
+@pytest.mark.parametrize("step", _NO_ROOM_STEPS)
+def test_a_full_filesystem_putting_the_working_directory_back_is_the_solvers_zero_only_once_the_replay_left_files(
+    verifier, left, step
+):
+    """I2, I5: a filesystem found full as the working directory is put back from its pristine copy, or as the replay's
+    outputs go back into it, is the solver's 0 once the replay left files of its user where every user may write (the
+    room it lacks is what the replay took); with nothing left, it is the trusted side's fault, as a full filesystem is
+    before any replay ran, never a blame the solver can move."""
 
     shm = verifier.temporary[2]
     solve = SOLVE + (f"\nopen({str(shm / 'left')!r}, 'w').write('x')\n" if left else "")
     verifier.replay()
     verifier.config["artifacts"] = ["answer.json", "solve.py"]
     verifier.submit(42, **{"solve.py": solve, "data.txt": "21"})
+    outputs, detail = _NO_ROOM_STEPS[step]
 
-    _, reward, report = verifier.run(extra=_NO_ROOM_BACK.format(workdir=str(verifier.workdir)))
+    _, reward, report = verifier.run(extra=_NO_ROOM_BACK.format(workdir=str(verifier.workdir), outputs=outputs))
 
     if left:
         assert (reward, report["reason"]) == ({"reward": 0}, "solver_nonreproducible"), report
-        assert report["detail"].startswith("the replay's outputs find no room in the working directory")
+        assert report["detail"].startswith(detail)
         assert report["replay"]["cleared"] >= 1
     else:
         assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}, report
         assert "No space left on device" in report["detail"]
+    assert "grader" not in report
 
 
-# A filesystem found full while the launcher holds what the replay wrote: its rename, or its change of owner (a
-# filesystem that copies on write may need room for either).
+# A filesystem found full while the launcher holds what the replay wrote: its copy of an output, or its change of
+# owner (a filesystem that copies on write may need room for either).
 _NO_ROOM_HELD = {
-    "rename": (
+    "copy": (
         """
         import errno
-        _rename = os.rename
+        _copy_file = launcher._copy_file
 
-        def full(source, target):
-            if target.endswith("replayed"):
+        def full(source, target, mode):
+            if "/replayed/" in target:
                 raise OSError({number}, os.strerror({number}))
-            return _rename(source, target)
+            return _copy_file(source, target, mode)
 
-        os.rename = full
+        launcher._copy_file = full
         """,
         "WithoutRoot()",
     ),
@@ -1488,7 +1615,7 @@ _NO_ROOM_HELD = {
 
 
 @pytest.mark.parametrize("left", [True, False], ids=["the-replay-left-files", "nothing-left"])
-@pytest.mark.parametrize(("step", "number"), [("rename", errno.ENOSPC), ("seal", errno.EDQUOT)])
+@pytest.mark.parametrize(("step", "number"), [("copy", errno.ENOSPC), ("seal", errno.EDQUOT)])
 def test_a_full_filesystem_holding_the_outputs_is_judged_as_one_putting_them_back_is(verifier, left, step, number):
     """I2: a filesystem found full while the launcher holds what the replay wrote is judged as one found full putting
     the outputs back: the solver's 0 once the replay left files of its user where every user may write, else the
@@ -1513,7 +1640,7 @@ def test_a_full_filesystem_holding_the_outputs_is_judged_as_one_putting_them_bac
     assert "grader" not in report
 
 
-@pytest.mark.parametrize("step", ["rename", "seal"])
+@pytest.mark.parametrize("step", ["copy", "seal"])
 def test_holding_the_outputs_failing_otherwise_is_the_trusted_sides_fault_whatever_the_replay_left(verifier, step):
     """I2's line: only a full filesystem is judged by what the replay left; any other failure to hold what it wrote is
     the launcher's own, before the grader runs."""
@@ -1530,33 +1657,64 @@ def test_holding_the_outputs_failing_otherwise_is_the_trusted_sides_fault_whatev
     assert report["detail"].startswith("it cannot hold what the replay wrote as root's"), report["detail"]
 
 
-def test_the_launcher_frees_the_replays_copy_before_it_holds_the_outputs(tmp_path, monkeypatch):
-    """I2: everything of the replay's copy but its outputs is gone before the hold's first step that may need room
-    (the rename), so the room the replay took there never decides whose fault a full filesystem is."""
+def test_putting_the_working_directory_back_failing_otherwise_is_the_trusted_sides_fault(verifier):
+    """I2's line, as the working directory is put back: a failure other than a full filesystem is the launcher's own,
+    whatever the replay left."""
 
-    stage, held = tmp_path / "replay", tmp_path / "replayed"
-    (stage / "out" / "junk").mkdir(parents=True)
-    (stage / "out" / "answer.json").write_text("{}")
-    (stage / "out" / "junk" / "big").write_text("x" * 4096)
-    (stage / "data.txt").write_text("21")
+    shm = verifier.temporary[2]
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    verifier.submit(42, **{"solve.py": SOLVE + f"\nopen({str(shm / 'left')!r}, 'w').write('x')\n", "data.txt": "21"})
+    extra = """
+        import errno
+
+        class BrokenHarden(WithoutRoot):
+            hardened = 0
+
+            def harden(self, path):
+                BrokenHarden.hardened += 1
+                if BrokenHarden.hardened > 1:  # the first is before the replay, the second as it is put back
+                    raise OSError(errno.EIO, os.strerror(errno.EIO))
+                return super().harden(path)
+    """
+
+    _, reward, report = verifier.run(extra=extra, ops="BrokenHarden()")
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}, report
+    assert report["detail"].startswith("it cannot put the working directory back"), report["detail"]
+
+
+def test_the_launcher_frees_what_the_replay_left_in_the_working_directory_before_it_holds_the_outputs(
+    tmp_path, monkeypatch
+):
+    """I2: everything the replay left in the working directory but its outputs is gone before the hold's first step
+    that may need room (its copy of an output), so the room the replay took there never decides whose fault a full
+    filesystem is; what it holds is root's alone."""
+
+    workdir, held = tmp_path / "app", tmp_path / "replayed"
+    (workdir / "out" / "junk").mkdir(parents=True)
+    (workdir / "out" / "answer.json").write_text("{}")
+    (workdir / "out" / "junk" / "big").write_text("x" * 4096)
+    (workdir / "data.txt").write_text("21")
     seen = []
-    rename = os.rename
+    copy_file = launcher._copy_file
 
-    def recording(source, target):
-        seen.append(sorted(str(path.relative_to(source)) for path in Path(source).rglob("*")))
-        rename(source, target)
+    def recording(source, target, mode):
+        seen.append(sorted(str(path.relative_to(workdir)) for path in workdir.rglob("*")))
+        copy_file(source, target, mode)
 
     class Seal:
         def seal(self, path):
             os.chmod(path, 0o700)
 
-    monkeypatch.setattr(os, "rename", recording)
+    monkeypatch.setattr(launcher, "_copy_file", recording)
 
-    launcher._hold(str(stage), str(held), ["out/answer.json"], Seal(), None)
+    launcher._hold(str(workdir), str(held), ["out/answer.json"], Seal(), None)
 
     assert seen == [["out", "out/answer.json"]]
     assert sorted(str(path.relative_to(held)) for path in held.rglob("*")) == ["out", "out/answer.json"]
     assert stat.S_IMODE((held / "out" / "answer.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((held / "out").stat().st_mode) == 0o700
 
 
 def test_the_launcher_clears_every_place_the_sandbox_lets_every_user_write(monkeypatch):
@@ -1704,3 +1862,245 @@ def test_the_replay_runs_with_a_path_of_absolute_entries_alone(verifier):
 
     assert reward == {"reward": 1}, report
     assert json.loads((verifier.workdir / "answer.json").read_text())["path"] == "/usr/bin:/bin"
+
+
+def _tree(root: Path) -> dict[str, Any]:
+    """What a directory holds, by relative path: a directory, a file's bytes, or a link's text."""
+
+    found: dict[str, Any] = {}
+    for path in sorted(root.rglob("*")):
+        name = str(path.relative_to(root))
+        if path.is_symlink():
+            found[name] = ("link", os.readlink(path))
+        elif path.is_dir():
+            found[name] = ("directory",)
+        elif path.is_file():
+            found[name] = ("file", path.read_bytes())
+        else:
+            found[name] = ("special",)
+    return found
+
+
+def test_whatever_the_replay_does_in_the_working_directory_the_grader_finds_it_pristine_with_the_outputs(verifier):
+    """I5: the replay, in place, changes an input, removes another, moves the submission's code, leaves files, a
+    directory tree, a link and a FIFO, and changes the modes of a file and of the working directory: once it is over,
+    the working directory holds what it held before the replay but the submitted output, and the replayed output, each
+    file root's to write alone, the directory with its mode from before, and that is what the grader grades."""
+
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py", "inputs"]
+    (verifier.workdir / "inputs").mkdir()
+    (verifier.workdir / "inputs" / "table.csv").write_text("a,b\n1,2\n")
+    (verifier.workdir / "run.sh").write_text("#!/bin/sh\n")
+    (verifier.workdir / "run.sh").chmod(0o755)
+    seen = verifier.root / "seen.txt"
+    vandal = SOLVE + textwrap.dedent(
+        f"""
+        import os
+        with open({str(seen)!r}, "w") as stream:
+            stream.write(os.getcwd())
+        with open("data.txt", "w") as stream:
+            stream.write("20")
+        os.remove("inputs/table.csv")
+        os.rename("solve.py", "moved.py")
+        os.makedirs("left/deep")
+        with open("left/deep/junk", "w") as stream:
+            stream.write("x")
+        os.symlink("/", "root")
+        os.mkfifo("pipe")
+        os.chmod("run.sh", 0o600)
+        os.chmod(".", 0o700)
+        """
+    )
+    verifier.submit(41, **{"solve.py": vandal, "data.txt": "21"})
+    before = _tree(verifier.workdir)
+    del before["answer.json"]  # the submitted output, which moves aside
+    mode = stat.S_IMODE(verifier.workdir.stat().st_mode)
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report  # the grader graded the replayed 42
+    assert seen.read_text() == str(verifier.workdir)  # it ran in place
+    after = _tree(verifier.workdir)
+    assert after.pop("answer.json") == ("file", b'{"answer": 42}')
+    assert after == before
+    assert stat.S_IMODE(verifier.workdir.stat().st_mode) == mode & ~0o022  # as hardened before the replay
+    assert stat.S_IMODE((verifier.workdir / "run.sh").stat().st_mode) == 0o755
+    for path in verifier.workdir.rglob("*"):
+        assert not path.lstat().st_mode & (stat.S_IWGRP | stat.S_IWOTH), path
+
+
+def test_the_working_directory_loses_the_user_attributes_the_replay_gave_it(verifier):
+    """I5: a user that may write in a directory may give it user extended attributes, as the replay's user may the
+    working directory, the one entry of it that the launcher puts back without making it anew: it removes them."""
+
+    try:
+        os.setxattr(verifier.workdir, "user.platoon-probe", b"x")
+        os.removexattr(verifier.workdir, "user.platoon-probe")
+    except OSError as exc:
+        pytest.skip(f"no user extended attributes here: {exc}")
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    marking = SOLVE + "\nimport os\nos.setxattr('.', 'user.left-by-the-replay', b'x')\n"
+    verifier.submit(42, **{"solve.py": marking, "data.txt": "21"})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert os.listxattr(verifier.workdir) == []
+
+
+def test_a_link_in_the_working_directory_stays_a_link_that_the_replay_reads_through(verifier):
+    """I5: a link the image's working directory holds (a submission brings none: the artifacts are files and
+    directories) is in place for the replay, which reads through it, and is put back as a link, never what it names."""
+
+    dataset = verifier.root / "dataset"
+    dataset.mkdir()
+    (dataset / "value.txt").write_text("21")
+    (verifier.workdir / "data").symlink_to(dataset)
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    verifier.submit(42, **{"solve.py": SOLVE.replace('"data.txt"', '"data/value.txt"')})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert os.readlink(verifier.workdir / "data") == str(dataset)
+    assert _tree(dataset) == {"value.txt": ("file", b"21")}
+
+
+@pytest.mark.parametrize(
+    ("above", "mode", "refused"),
+    [(1, 0o777, True), (2, 0o777, True), (1, 0o1777, False), (1, 0o775, False)],
+    ids=["parent", "above-the-parent", "sticky", "a-groups"],
+)
+def test_a_directory_above_the_working_directory_the_replays_user_could_replace_fails_closed(
+    verifier, above, mode, refused
+):
+    """I5: the replay's user writes in the working directory, which stays root's; a directory above it in which that
+    user may rename or remove what it holds, the parent or one above it, would let it move the working directory away as
+    it replays there and leave another in its place: a fault on the trusted side, found before anything replays.  With
+    the sticky bit set, that user may move nothing of root's, as the working directory is; a group's write permission
+    is not the replay's."""
+
+    outer = verifier.root / "outer"
+    workdir = outer / "inner" / "app" if above == 2 else outer / "app"
+    workdir.mkdir(parents=True)
+    for name, text in {"answer.json": json.dumps({"answer": 42}), "solve.py": SOLVE, "data.txt": "21"}.items():
+        (workdir / name).write_text(text)
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    original = stat.S_IMODE(outer.stat().st_mode)
+    outer.chmod(mode)
+    try:
+        _, reward, report = verifier.run(workdir=workdir)
+    finally:
+        outer.chmod(original)
+
+    if not refused:
+        assert reward == {"reward": 1}, report
+        return
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}, report
+    info = outer.stat()
+    assert report["detail"].startswith(
+        f"the directory {outer}, above the verifier's working directory {workdir}, lets the replay's user replace what "
+        f"it holds (owner {info.st_uid}, group {info.st_gid}, mode {mode:o})"
+    ), report["detail"]
+    assert "replay" not in report and "grader" not in report
+
+
+def test_the_launchers_own_directory_inside_the_working_directory_fails_closed(tmp_path):
+    """I5: the replay's user writes in the working directory, so the launcher's own directory (its pristine copy, the
+    submitted outputs) must not be in it: a fault on the trusted side, found before anything replays."""
+
+    verifier = Verifier(tmp_path, scratch=tmp_path / "app")  # the verifier's /tmp is the working directory's tmp/
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    verifier.submit(42, **{"solve.py": SOLVE, "data.txt": "21"})
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}, report
+    assert report["detail"].startswith(f"the launcher's own directory {verifier.scratch}/platoon-launcher-")
+    assert f"is inside the verifier's working directory {verifier.workdir}" in report["detail"]
+    assert "replay" not in report and "grader" not in report
+
+
+def test_a_working_directory_where_every_user_may_write_is_put_back_never_cleared(verifier):
+    """I2, I5: a working directory in one of the places where every user may write (a template's /tmp/work) is left
+    out when the launcher clears those places of what the replay's user left: it puts the working directory back
+    itself, with the replayed outputs."""
+
+    place = verifier.temporary[1]
+    workdir = place / "work"
+    workdir.mkdir()
+    leaving = SOLVE + f"\nopen({str(place / 'left')!r}, 'w').write('x')\n"
+    for name, text in {"answer.json": json.dumps({"answer": 41}), "solve.py": leaving, "data.txt": "21"}.items():
+        (workdir / name).write_text(text)
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+
+    _, reward, report = verifier.run(workdir=workdir)
+
+    assert reward == {"reward": 1}, report
+    assert report["replay"]["cleared"] == 1  # what it left beside the working directory
+    assert sorted(path.name for path in place.iterdir()) == ["work"]
+    assert sorted(path.name for path in workdir.iterdir()) == ["answer.json", "data.txt", "solve.py"]
+
+
+def _mounts_work() -> bool:
+    if shutil.which("unshare") is None:
+        return False
+    with tempfile.TemporaryDirectory() as directory:
+        probe = ["unshare", "-r", "-m", "sh", "-c", 'mount -t tmpfs -o mode=755 tmpfs "$0"', directory]
+        return subprocess.run(probe, capture_output=True, timeout=60).returncode == 0
+
+
+@pytest.mark.skipif(not _mounts_work(), reason="unprivileged mount namespaces are unavailable")
+def test_a_mount_point_in_the_working_directory_fails_closed(verifier):
+    """I5: a filesystem mounted below the working directory, which no submission can make: the replay would change what
+    is on it in place, and the launcher could not remove the mount point to put the directory back, so it refuses
+    before anything replays, a fault on the trusted side."""
+
+    verifier.replay()
+    verifier.config["artifacts"] = ["answer.json", "solve.py"]
+    verifier.submit(42, **{"solve.py": SOLVE, "data.txt": "21"})
+    mounted = verifier.workdir / "mounted"
+    mounted.mkdir()
+    mount = ("unshare", "-r", "-m", "sh", "-c", 'mount -t tmpfs -o mode=755 tmpfs "$0" && exec "$@"', str(mounted))
+
+    _, reward, report = verifier.run(prefix=mount)
+
+    assert reward == {"invalid": 1, "failure_kind": "verifier_trusted_launcher"}, report
+    assert report["detail"].startswith(f"{mounted}, in the verifier's working directory, is a mount point")
+    assert "replay" not in report and "grader" not in report
+
+
+def test_lend_gives_the_replays_user_what_the_working_directory_holds_and_keeps_the_directory_roots(
+    tmp_path, monkeypatch
+):
+    """I5: :meth:`Ops.lend` makes the directories and the files of one link below the working directory the replay's
+    user's, and leaves the directory itself root's, of that user's group, mode 770: that user may add and remove
+    entries there, but can neither rename the directory nor change its mode.  A link, a file with another link (here
+    one outside the working directory) and a special file, which only an image puts there, stay root's: lending them
+    would lend what they reach beyond the working directory."""
+
+    workdir, outside = tmp_path / "app", tmp_path / "outside"
+    (workdir / "sub").mkdir(parents=True)
+    (workdir / "sub" / "file").write_text("x")
+    outside.mkdir()
+    (outside / "tool").write_text("x")
+    (workdir / "link").symlink_to(outside)
+    os.link(outside / "tool", workdir / "tool")
+    os.mkfifo(workdir / "pipe")
+    owners: list[tuple[str, int, int]] = []
+    modes: list[tuple[str, int]] = []
+    monkeypatch.setattr(os, "lchown", lambda path, uid, gid: owners.append((os.path.relpath(path, tmp_path), uid, gid)))
+    monkeypatch.setattr(os, "chown", lambda *args, **kwargs: pytest.fail("chown follows links"))
+    monkeypatch.setattr(os, "chmod", lambda path, mode: modes.append((os.path.relpath(path, tmp_path), mode)))
+
+    launcher.Ops().lend(str(workdir))
+
+    user = launcher.REPLAY_UID
+    assert sorted(owners) == [("app", 0, user), ("app/sub", user, user), ("app/sub/file", user, user)]
+    assert modes == [("app", 0o770)]

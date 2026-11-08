@@ -417,17 +417,19 @@ digest. With `grade=True`, the default, each grading case is taken in, opened, s
 graded, on the environment's own sandboxes, which must start its template's image (with `python3` and `sh`) and give its
 verifiers root, as a run's would: a right answer scores 1 and a wrong one 0; a missing artifact and a replay that fails
 score 0, the solver's fault; a replay can read neither the grader's files nor the copy of the answer the agents
-published, and cannot write a reward, and a module of the submission's never shadows one the grader imports; a grader
-that declares its measurement invalid, crashes after a verdict of 0, or kills the launcher is a non-score of the
-generated grader's; and one that writes a reward file of its own, leaves a process that keeps writing one, or writes
-what a verifier classifier would match into the verifier's log gets the launcher's score, as a trusted grader that
-crashes gets its own kind. Run it there before a run that generates tasks, and on CPU with `grade=False` in your
-package's tests. It is the generic half of a red-team suite: a task producer's own toolkit holds the domain's half, in
-the checks it runs on a task before the task is taken in (leaks, planted secrets, a module the task's own grader
-directory shadows), and a program that runs runtime tasks catches graders that score by anything but the answer with
-its controls. The tasks it takes in stay in the environment's store (outside a run, the Harbor cache's unless
-`runtime_tasks` names a `store`). Call it outside a running event loop. `check_runtime_tasks` checks the experimental
-runtime-task API (`platoon.experimental`), and changes with it.
+published, and cannot write a reward; a replay that names its files by their absolute paths in the working directory
+reproduces its output, and the grader finds the task's inputs and the submission as they were before the replay, with
+the replayed output, however the replay changed them or what it left beside its output; a module of the submission's
+never shadows one the grader imports; a grader that declares its measurement invalid, crashes after a verdict of 0, or
+kills the launcher is a non-score of the generated grader's; and one that writes a reward file of its own, leaves a
+process that keeps writing one, or writes what a verifier classifier would match into the verifier's log gets the
+launcher's score, as a trusted grader that crashes gets its own kind. Run it there before a run that generates tasks,
+and on CPU with `grade=False` in your package's tests. It is the generic half of a red-team suite: a task producer's own
+toolkit holds the domain's half, in the checks it runs on a task before the task is taken in (leaks, planted secrets, a
+module the task's own grader directory shadows), and a program that runs runtime tasks catches graders that score by
+anything but the answer with its controls. The tasks it takes in stay in the environment's store (outside a run, the
+Harbor cache's unless `runtime_tasks` names a `store`). Call it outside a running event loop. `check_runtime_tasks`
+checks the experimental runtime-task API (`platoon.experimental`), and changes with it.
 
 ## Reference
 

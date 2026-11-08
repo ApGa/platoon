@@ -29,8 +29,8 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   `materialize(..., replay_address_space_bytes=N)` gives one, address space, the replay disfavoured for the OOM killer
   so memory it runs the sandbox out of ends the replay; and kills what the replay left (one of the replay user's
   processes it cannot signal is a survivor, the solver's 0, never excluded as foreign), removes what that user left
-  where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and `/dev/mqueue`) and all of its copy but the
-  outputs (which wait as root's) before the grader runs, and puts each output back. It then runs the grader, kills what
+  where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and `/dev/mqueue`), and puts the working
+  directory back as it was, with the replayed outputs, before the grader runs. It then runs the grader, kills what
   it left and writes the only reward file, with a report that is the task's whole grade (the entry's classifiers and
   reward check apply to its curated tasks only). A broken contract, a replay that leaves more than the launcher removes
   in its time, and disk, inode or memory exhaustion a replay causes score 0, the solver's fault (reason
@@ -46,6 +46,21 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   - A `task.toml` that nests tables and arrays more than 64 levels deep, its own table included, is refused, before it
     is parsed where its text shows that, the same way on every Python; so is a template that deep, when the service is
     built.
+  - A replay runs in place, in the working directory at its own path, so a submission that names its files by their
+    absolute paths (`/app/answer.json`), as a solver that ran there may, reproduces its outputs; before, it ran in a
+    copy of the working directory elsewhere, where such a submission could not write. The launcher first copies the
+    working directory, without the outputs, into a pristine copy only root reads, then lends it to the replay's user
+    (its directories and files, while the directory itself stays root's), and once the replay is over puts it back from
+    that copy, root's again with the group and other write bits stripped, with the replayed outputs in their places:
+    whatever the replay changed, added or removed there, the grader finds the working directory as it was, and the
+    outputs the replay wrote. The replay's home and temporary directory are a directory of its own, removed after it,
+    and its time leaves room for putting the directory back. A working directory below a directory in which the replay's
+    user could replace it (the parent, and each directory above it, must be one only root writes in or one with the
+    sticky bit set), one that holds the launcher's own directory and one that holds a mount point are faults on the
+    trusted side (`verifier_trusted_launcher`); a full filesystem as the directory is put back is judged as one as the
+    outputs are put back. `check_runtime_tasks` gains two grading cases: a replay that reads and writes its files by
+    their absolute paths, which must score 1, and one that changes its inputs and its code and leaves files beside its
+    output, after which the grader must find the inputs as they were and the replayed output alone.
 - **`platoon.testing.check_runtime_tasks`** takes a red-team suite of sabotaged tasks through an environment's runtime
   tasks: what `materialize` must refuse, on CPU, and, on the environment's sandboxes, the grade each sabotaged grader,
   replay or submission must get ([Check an environment's runtime

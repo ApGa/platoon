@@ -25,15 +25,18 @@ starts its template's image, which has ``python3`` and ``sh``, with no network, 
 root.  An honest grader scores the right answer 1 (``honest_pass``) and a wrong one 0 (``honest_fail``); a missing
 artifact (``missing_artifact``) and a replay that fails (``replay_fails``) score 0, the solver's fault (reason
 ``solver_output_contract``, ``solver_nonreproducible``); a replay can read neither the grader's files nor the copy of
-the answer the agents published in ``/logs/artifacts``, and cannot write a reward (``replay_sealed``); a module of the
-submission's never shadows one the grader imports (``module_shadow``); a grader that declares its measurement invalid
-is ``verifier_generated_protocol`` (``invalid_grader``), one that crashes after a verdict of 0 is
-``verifier_generated_exit`` (``crash_after_zero``), and one that kills the launcher and writes a reward of its own is
-``verifier_generated_unfinished`` (``kills_launcher``); one that writes a reward file of its own (``own_reward_file``),
-leaves a process that keeps writing one (``lingering_writer``) or writes what a verifier classifier would match into
-the verifier's log (``log_censor``) gets the launcher's reward; and a trusted grader that crashes is
-``verifier_trusted_exit`` (``trusted_grader_crash``).  The solution reads ``data.txt``, which only the task's uploaded
-``environment/`` holds.
+the answer the agents published in ``/logs/artifacts``, and cannot write a reward (``replay_sealed``); a replay runs in
+the working directory at its own path, so one that reads and writes its files by their absolute paths reproduces its
+output, which the grader grades in place of the submitted one (``absolute_paths``), and the grader finds the working
+directory as it was before the replay, with the replayed output, however the replay changed its inputs and its code or
+left files beside its output (``restored_inputs``); a module of the submission's never shadows one the grader imports
+(``module_shadow``); a grader that declares its measurement invalid is ``verifier_generated_protocol``
+(``invalid_grader``), one that crashes after a verdict of 0 is ``verifier_generated_exit`` (``crash_after_zero``), and
+one that kills the launcher and writes a reward of its own is ``verifier_generated_unfinished`` (``kills_launcher``);
+one that writes a reward file of its own (``own_reward_file``), leaves a process that keeps writing one
+(``lingering_writer``) or writes what a verifier classifier would match into the verifier's log (``log_censor``) gets
+the launcher's reward; and a trusted grader that crashes is ``verifier_trusted_exit`` (``trusted_grader_crash``).  The
+solution reads ``data.txt``, which only the task's uploaded ``environment/`` holds.
 
 The tasks it takes in stay in the environment's store.  The experimental runtime-task API (``platoon.experimental``)
 can change in a minor release, and this check changes with it.
@@ -77,6 +80,8 @@ GRADES = (
     "missing_artifact",
     "replay_fails",
     "replay_sealed",
+    "absolute_paths",
+    "restored_inputs",
     "module_shadow",
     "invalid_grader",
     "crash_after_zero",
@@ -130,6 +135,64 @@ for name in ("reward.json", "reward.txt"):
         pass
 with open("answer.json", "w") as stream:
     json.dump({"answer": answer}, stream)
+"""
+# The lines of a solution that leave, as the submission, a solve.py that reads data.txt and writes answer.json by
+# their absolute paths in the working directory, where the solution runs (as the verifier's replay does), and then a
+# wrong answer.json, 41, which the replayed one replaces.
+_ABSOLUTE_SOLVE = """here=$(pwd)
+cat > solve.py <<PLATOON_SOLVE
+import json
+
+with open("$here/data.txt") as stream:
+    answer = 2 * int(stream.read())
+with open("$here/answer.json", "w") as stream:
+    json.dump({"answer": answer}, stream)
+PLATOON_SOLVE
+python3 solve.py
+echo '{"answer": 41}' > answer.json
+"""
+# A submission whose replay writes the right answer, then changes its input and its own code and leaves files and a
+# directory beside its output, none of which the grader may find (_RESTORED_GRADER).
+_TAMPERING_SOLVE = """import json
+import os
+
+with open("data.txt") as stream:
+    answer = 2 * int(stream.read())
+with open("answer.json", "w") as stream:
+    json.dump({"answer": answer}, stream)
+with open("data.txt", "w") as stream:
+    stream.write("20\\n")
+with open("solve.py", "w") as stream:
+    stream.write("pass\\n")
+with open("extra.txt", "w") as stream:
+    stream.write("left by the replay\\n")
+os.makedirs(os.path.join("left", "inner"))
+with open(os.path.join("left", "inner", "junk"), "w") as stream:
+    stream.write("x")
+"""
+# Passes only on the right answer, the task's data.txt, the submitted solve.py, and nothing that the replay left.
+_RESTORED_GRADER = """import json
+import os
+
+workdir = os.environ["PLATOON_WORKDIR"]
+
+
+def read(name):
+    with open(os.path.join(workdir, name)) as stream:
+        return stream.read()
+
+
+try:
+    passed = (
+        json.loads(read("answer.json")) == {"answer": 42}
+        and read("data.txt").strip() == "21"
+        and read("solve.py").startswith("import json")
+        and not any(os.path.lexists(os.path.join(workdir, name)) for name in ("extra.txt", "left"))
+    )
+except (OSError, ValueError):
+    passed = False
+with open(os.environ["PLATOON_VERDICT"], "w") as stream:
+    json.dump({"passed": passed, "checks": [{"id": "restored", "passed": passed}]}, stream)
 """
 _GRADERS = {
     "invalid": """import json, os
@@ -451,6 +514,12 @@ _GRADE_CASES: dict[str, tuple[dict[str, Any], str, tuple[str, float | None, str 
         ("scored", 0.0, None, "solver_nonreproducible"),
     ),
     "replay_sealed": ({"solve": _PUBLISH + _solve_line(_PRYING_SOLVE)}, "generated", ("scored", 0.0, None, None)),
+    "absolute_paths": ({"solve": _ABSOLUTE_SOLVE}, "generated", ("scored", 1.0, None, None)),
+    "restored_inputs": (
+        {"solve": _solve_line(_TAMPERING_SOLVE), "grader": _RESTORED_GRADER},
+        "generated",
+        ("scored", 1.0, None, None),
+    ),
     "module_shadow": (
         {
             "data": "20",
