@@ -245,6 +245,28 @@ HARDCODED = "solver_hardcoded"
 #: (:func:`outputs_sha256`); a task without a replay leaves it out.
 REPLAYED_SHA256 = "replayed_sha256"
 OUTPUTS_RULE = "platoon-replayed-outputs-v1"
+#: The reason of the solver's 0 that a task's hidden evaluation conditions give (``replay.conditions``): a condition's
+#: replay that fails, outlives its time, leaves what the launcher cannot remove, or does not write every output again.
+CONDITION_FAILED = "solver_condition_failed"
+#: A variant's name, and a condition's id, each its own among the task's (two namespaces): a condition's id names its
+#: directory in what the grader receives, so the pattern takes no ``/`` and no leading dot.
+VARIANT_NAME = CONDITION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+#: The most conditions a task has, and the most bytes the outputs of all its conditions' replays hold together (each
+#: output is held to ``max_output_bytes`` besides).
+MAX_CONDITIONS = 32
+MAX_CONDITION_BYTES = 256 << 20
+#: Where the grader finds what the conditions' replays wrote: ``$PLATOON_CONDITIONS``, the directory ``conditions`` of
+#: the launcher's own, with ``manifest.json`` (:data:`CONDITIONS_SCHEMA`) and ``outputs/<id>/<output>``, root's alone.
+CONDITIONS = "conditions"
+CONDITIONS_MANIFEST = "manifest.json"
+CONDITIONS_OUTPUTS = "outputs"
+CONDITIONS_SCHEMA = "platoon.conditions/v1"
+#: The key of the report that holds the SHA-256 of the outputs the conditions' replays wrote (:func:`outputs_sha256` of
+#: ``<id>/<output>`` by :data:`CONDITION_OUTPUTS_RULE`), which a regrade compares with :data:`REPLAYED_SHA256`; a task
+#: without conditions leaves it out.
+CONDITIONS_SHA256 = "conditions_sha256"
+CONDITION_OUTPUTS_RULE = "platoon-condition-outputs-v1"
+_CONDITION_KEYS = ("id", "inputs")
 #: Where the data of a task's replay checks lies, relative to the task's directory: in ``tests/gen``, beside its grader,
 #: sealed with ``/tests`` and never in the agents' sandbox.
 CHECK_DATA = "tests/gen/"
@@ -276,8 +298,7 @@ _VERDICT_KEYS = ("passed", "checks")
 _CHECK_KEYS = ("id", "passed", "margin")
 _VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-#: A variant's name, and what its settings and a forbidden literal hold.
-VARIANT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+#: What a variant's settings and a forbidden literal hold (a variant's name: :data:`VARIANT_NAME`).
 _VARIANT_KEYS = ("name", "inputs", "expected", "tolerance", "meta")
 _FORBIDDEN_KEYS = ("path", "sources", "scan")
 _LITERAL_KEYS = ("value", "tolerance")
@@ -380,9 +401,12 @@ class Ops:
     def demote(self, max_file_bytes, max_address_space_bytes=None):
         """What runs in the replay's process before its command: no supplementary groups, the replay's group and user,
         checked to be all of its ids, the replay's limits (:func:`_limit_replay`), its disfavor for the OOM killer
-        (:func:`_oom_disfavor`), and no new privileges (a setuid program gives none)."""
+        (:func:`_oom_disfavor`), a session keyring of its own, which goes with its processes, rather than the
+        launcher's, which every replay would share (:func:`_join_new_session_keyring`), and no new privileges (a setuid
+        program gives none)."""
 
         libc = _libc()  # loaded before the fork, which the child then only calls
+        calls = _key_calls()
 
         def demote():
             _oom_disfavor()  # while still root: dropping to the replay's user makes /proc/self root's; the value lasts
@@ -392,6 +416,7 @@ class Ops:
             if os.getresuid() != (REPLAY_UID,) * 3 or os.getresgid() != (REPLAY_UID,) * 3 or os.getgroups():
                 raise OSError(errno.EPERM, "the replay's process is not the replay's user alone")
             _limit_replay(max_file_bytes, max_address_space_bytes)
+            _join_new_session_keyring(libc, calls)
             _prctl(_PR_SET_NO_NEW_PRIVS, 1, libc)
 
         return demote
@@ -413,6 +438,13 @@ class Ops:
         write (:func:`clear_left`)."""
 
         return info.st_uid == REPLAY_UID
+
+    def clear_keys(self):
+        """Clear the kernel keyrings of the replay's user that outlive its processes, its user keyring, its user
+        session keyring and its persistent keyring, as that user (:func:`clear_keys_as`): :class:`Leftover` where one
+        that it may use cannot be cleared."""
+
+        clear_keys_as(REPLAY_UID)
 
 
 class Paths:
@@ -514,6 +546,8 @@ def read_config(path):
         isinstance(replay, dict) and _strings(replay.get("command")) and _paths(replay.get("outputs"))
     ):
         problems.append("replay")
+    elif replay is not None and (why := conditions_problem(replay)) is not None:
+        problems.append(f"replay.conditions ({why})")
     keep = config.get("replay_env", [])
     if not (_strings(keep, empty=True) and all(_VARIABLE.fullmatch(name) for name in keep)):
         problems.append("replay_env")
@@ -532,16 +566,18 @@ def read_config(path):
 
 
 def replay_time_problem(config):
-    """Why the settings' ``replay_timeout_s``, the time each replay of the task takes at most (the replay's and each of
-    its variants'), is none the launcher can give, or None: a finite number above 0, for a task with a replay, whose
-    replays together leave the grader some of the time the launcher's steps have (:func:`_budget`)."""
+    """Why the settings' ``replay_timeout_s``, the time each replay of the task takes at most (the replay's, each of
+    its variants' and each of its conditions'), is none the launcher can give, or None: a finite number above 0, for a
+    task with a replay, whose replays together leave the grader some of the time the launcher's steps have
+    (:func:`_budget`)."""
 
     each = config.get("replay_timeout_s")
     if config.get("replay") is None:
         return "the task has no replay"
     if not number(each) or each <= 0:
         return f"{each!r} is no finite number of seconds above 0"
-    count = 1 + len((config.get("replay_checks") or {}).get("variants", []))
+    variants = len((config.get("replay_checks") or {}).get("variants", []))
+    count = 1 + variants + len(config["replay"].get("conditions") or ())
     budget = _budget(float(config["timeout_s"]))
     if count * each >= budget:
         return f"{count} replays of {each:g} s leave the grader none of the {budget:g} s the launcher's steps have"
@@ -593,6 +629,35 @@ def checks_problem(checks):
             return f"their forbidden literals lie outside {CHECK_DATA}"
         if forbidden["scan"] != LITERAL_SCAN:
             return f"their forbidden literals are scanned by {forbidden['scan']!r}, not {LITERAL_SCAN}"
+    return None
+
+
+def conditions_problem(replay):
+    """Why the hidden evaluation conditions of a task's replay (``replay["conditions"]``, as ``materialize`` writes
+    them: ``[{"id", "inputs"}]``, or left out) are none the launcher can run, or None: a list of 1 to
+    :data:`MAX_CONDITIONS` objects of an id of its own (:data:`CONDITION_ID`) and inputs below :data:`CHECK_DATA`, no
+    condition's inputs at or below another's."""
+
+    if "conditions" not in replay:
+        return None
+    conditions = replay["conditions"]
+    if not isinstance(conditions, list) or not 0 < len(conditions) <= MAX_CONDITIONS:
+        return f"they are not a list of 1 to {MAX_CONDITIONS}"
+    ids, inputs = set(), []
+    for index, condition in enumerate(conditions):
+        if not isinstance(condition, dict) or sorted(condition) != sorted(_CONDITION_KEYS):
+            return f"condition {index} is not an object of {', '.join(_CONDITION_KEYS)}"
+        name = condition["id"]
+        if not isinstance(name, str) or not CONDITION_ID.fullmatch(name) or name in ids:
+            return f"condition {index} has no id of its own"
+        ids.add(name)
+        if not check_data_path(condition["inputs"]):
+            return f"condition {name} names its inputs outside {CHECK_DATA}"
+        inputs.append(condition["inputs"])
+    for index, path in enumerate(inputs):
+        for other in inputs[index + 1 :]:
+            if _within(path, other) or _within(other, path):
+                return f"the inputs of two conditions, {path} and {other}, lie one in the other"
     return None
 
 
@@ -702,7 +767,9 @@ def _launch(config, paths, ops, report, started, umask):
     if violation is not None:
         return Result.solver(OUTPUT_CONTRACT, violation)
     checks, problem = load_checks(config.get("replay_checks"), replay, paths.tests)
-    if problem is not None:  # the data of the task's replay checks, which the grader's owner wrote
+    if problem is None:
+        conditions, problem = load_conditions(replay, paths.tests)
+    if problem is not None:  # the data of the task's replay checks or conditions, which the grader's owner wrote
         return Result.invalid(GRADER_KINDS[owner] + "_protocol", problem)
     if checks.forbidden is not None:
         found = _scan(checks, paths.workdir, report, deadline)
@@ -712,14 +779,16 @@ def _launch(config, paths, ops, report, started, umask):
     env.update(PLATOON_WORKDIR=paths.workdir, PLATOON_VERDICT=os.path.join(gen, VERDICT))
     if replay is not None:
         submitted = os.path.join(scratch, "submitted")
-        replays = Replays.of(config, started, deadline, len(checks.variants))
+        replays = Replays.of(config, started, deadline, len(checks.variants), len(conditions))
         try:
-            found = _replay(config, paths, ops, report, scratch, submitted, replays, checks.variants)
+            found = _replay(config, paths, ops, report, scratch, submitted, replays, checks.variants, conditions)
         except SolverFault as exc:
             return Result.solver(exc.reason, str(exc))
         if found is not None:
             return found
         env["PLATOON_SUBMITTED"] = submitted
+        if conditions:  # only the grader's: no replay's environment holds it (_replay_env)
+            env["PLATOON_CONDITIONS"] = os.path.join(scratch, CONDITIONS)
     return _grade(config["grader"]["command"], paths, env, report, deadline, owner, gen, umask)
 
 
@@ -957,12 +1026,14 @@ def _within(path, directory):
     return path == directory or path.startswith(directory.rstrip("/") + "/")
 
 
-def _replay(config, paths, ops, report, scratch, submitted, replays, variants=()):
+def _replay(config, paths, ops, report, scratch, submitted, replays, variants=(), conditions=()):
     """Run the task's replay in place, in the working directory at its own path without its outputs, then the replay
-    of each of ``variants`` (:attr:`Checks.variants`) there too, and put the directory back as it was, with what the
-    replay wrote: the solver's 0 when one fails, leaves what the launcher cannot remove in its time or fills a
-    filesystem, a protocol fault when its command (the image's) cannot start, None when the replay wrote every output
-    again and every variant's replay gave what the variant expects.  Before the replay the working directory is checked
+    of each of ``variants`` (:attr:`Checks.variants`) there too, then that of each of ``conditions`` (the task's hidden
+    evaluation conditions, :func:`_replay_conditions`), and put the directory back as it was, with what the replay
+    wrote: the solver's 0 when one fails, leaves what the launcher cannot remove in its time or fills a filesystem, a
+    protocol fault when its command (the image's) cannot start, None when the replay wrote every output again, every
+    variant's replay gave what the variant expects and every condition's replay wrote every output again, which the
+    launcher then holds for the grader (:func:`_seal_conditions`).  Before the replay the working directory is checked
     (:func:`_in_place_fault`) and made the replay user's to write nothing in (:meth:`Ops.harden`), its outputs move
     aside and what is left is copied into a pristine copy, root's alone (:func:`_snapshot`).  Each replay runs as
     :func:`_run_replay` runs it, in the working directory lent to the replay's user, and takes the time ``replays``
@@ -982,6 +1053,9 @@ def _replay(config, paths, ops, report, scratch, submitted, replays, variants=()
         raise LauncherFault(fault)
     ops.harden(workdir)  # nothing left there is the replay user's to write (files and directories, any depth)
     os.mkdir(submitted, 0o700)
+    if conditions:  # root's alone before any replay runs, as the launcher's directory holds nothing the replay may make
+        os.mkdir(os.path.join(scratch, CONDITIONS), 0o700)
+        os.mkdir(os.path.join(scratch, CONDITIONS, CONDITIONS_OUTPUTS), 0o700)
     for output in outputs:
         here = os.path.join(workdir, output)
         if os.path.lexists(here):
@@ -1017,6 +1091,10 @@ def _replay(config, paths, ops, report, scratch, submitted, replays, variants=()
         found = _replay_variants(config, paths, ops, report, scratch, place, replays, variants)
         if found is not None:
             return found
+    if conditions:
+        found = _replay_conditions(config, paths, ops, report, scratch, place, replays, conditions)
+        if found is not None:
+            return found
     try:
         for output in outputs:  # moved aside above, below nothing but directories (layout_violation); nothing else runs
             target = os.path.join(workdir, output)
@@ -1039,6 +1117,8 @@ def _replay(config, paths, ops, report, scratch, submitted, replays, variants=()
             remove_tree(copy)
         except Leftover:
             pass
+    if conditions:  # what the conditions' replays wrote, root's alone, for the grader: its manifest and its SHA-256
+        return _seal_conditions(ops, report, scratch, replays, conditions, outputs)
     return None
 
 
@@ -1059,7 +1139,8 @@ class _Place:
 
 
 class Replays:
-    """The replays of one grade, the replay's own and then its variants', one after the other: the time each takes
+    """The replays of one grade, the replay's own, then its variants' and its conditions', one after the other: the time
+    each takes
     (:meth:`deadline`); how many entries their user left where every user may write, and System V IPC objects it left,
     that the launcher removed (``cleared``), by which it tells a full filesystem their doing (:func:`_replay`); and when
     the time to put the working directory back after the last of them ends (``until``, :func:`_clear`)."""
@@ -1072,14 +1153,14 @@ class Replays:
         self.until = None
 
     @classmethod
-    def of(cls, config, started, deadline, variants):
-        """The replays of a task with ``variants`` variants whose launcher started at ``started`` and must be done by
-        ``deadline`` (``time.monotonic()`` values): they share :data:`REPLAY_SHARE` of the time left, each an equal
-        part of what is left of it; with the settings' ``replay_timeout_s``, each takes at most that long, and all end
-        by ``1 + variants`` times it after the launcher started, which :func:`replay_time_problem` checked leaves the
-        grader the rest."""
+    def of(cls, config, started, deadline, variants=0, conditions=0):
+        """The replays of a task with ``variants`` variants and ``conditions`` conditions whose launcher started at
+        ``started`` and must be done by ``deadline`` (``time.monotonic()`` values): they share :data:`REPLAY_SHARE` of
+        the time left, each an equal part of what is left of it; with the settings' ``replay_timeout_s``, each takes at
+        most that long, and all end by ``1 + variants + conditions`` times it after the launcher started, which
+        :func:`replay_time_problem` checked leaves the grader the rest."""
 
-        count = 1 + variants
+        count = 1 + variants + conditions
         each = config.get("replay_timeout_s")
         if each is None:
             now = time.monotonic()
@@ -1096,39 +1177,61 @@ class Replays:
         return min(now + share, max(now, self.end))
 
 
-def _run_replay(config, paths, ops, place, log, deadline, replays, variant=None):
-    """Lay a ``variant``'s inputs over the working directory (``place``, :class:`_Place`), lend it to the replay's
-    user with a home of its own (:meth:`Ops.lend`), run the replay's command there as that user, its output into
-    ``log``, until ``place.put_back`` before ``deadline``, and kill what it left: a record of the run, and the solver's
-    0 (``solver_nonreproducible``, for a variant ``solver_variant_failed``) where it fails, outlives its time, leaves
-    what cannot be killed or does not write every output again, a protocol fault where its command (the image's)
-    cannot start or a variant's inputs cannot be laid over the working directory, or None.  Every replay, the replay's
-    and each variant's, runs this one way, in place, in the working directory as its pristine copy holds it: with the
-    thin environment and its absolute ``PATH`` (:func:`_replay_env`), demoted with the replay's limits, address space
-    and disfavor for the OOM killer (:meth:`Ops.demote`), and swept of every process of its user, none excluded as
-    foreign (:func:`kill_left`).  A :class:`SolverFault` where the replay's time, less putting the directory back,
-    leaves it none.  A variant's inputs, the file of its output, its home and its lending (a change of owner, or a file
-    of several names copied into one of its own) that find their filesystem full once the replays' user left files
-    where every user may write or IPC objects (``replays.cleared``) are the solver's 0 too: the room they lack is what
-    those replays took."""
+class _Case:
+    """A replay of the task's on inputs of its own, laid over the working directory as its pristine copy holds it
+    (:func:`_run_replay`): a variant of the replay checks (``kind`` ``"variant"``), whose outputs the launcher judges
+    and discards, or a hidden evaluation condition (``"condition"``), whose outputs it holds for the grader; its name
+    (a variant's name, a condition's id), its ``inputs`` (a path below :data:`CHECK_DATA`) and the reason of the
+    solver's 0 it gives (``reason``)."""
+
+    def __init__(self, kind, name, inputs, reason):
+        self.kind = kind
+        self.name = name
+        self.inputs = inputs
+        self.reason = reason
+
+    @classmethod
+    def variant(cls, variant):
+        return cls("variant", variant["name"], variant["inputs"], VARIANT_FAILED)
+
+    @classmethod
+    def condition(cls, condition):
+        return cls("condition", condition["id"], condition["inputs"], CONDITION_FAILED)
+
+    @property
+    def who(self):
+        return f"the replay of {self.kind} {self.name}"
+
+
+def _run_replay(config, paths, ops, place, log, deadline, replays, case=None):
+    """Lay a ``case``'s inputs (:class:`_Case`: a variant's or a condition's) over the working directory (``place``,
+    :class:`_Place`), lend it to the replay's user with a home of its own (:meth:`Ops.lend`), run the replay's command
+    there as that user, its output into ``log``, until ``place.put_back`` before ``deadline``, and kill what it left: a
+    record of the run, and the solver's 0 (``solver_nonreproducible``, for a case its own reason:
+    ``solver_variant_failed``, ``solver_condition_failed``) where it fails, outlives its time, leaves what cannot be
+    killed or does not write every output again, a protocol fault where its command (the image's) cannot start or a
+    case's inputs cannot be laid over the working directory, or None.  Every replay, the replay's and each case's, runs
+    this one way, in place, in the working directory as its pristine copy holds it: with the thin environment and its
+    absolute ``PATH`` (:func:`_replay_env`), demoted with the replay's limits, address space and disfavor for the OOM
+    killer (:meth:`Ops.demote`), and swept of every process of its user, none excluded as foreign (:func:`kill_left`).
+    A :class:`SolverFault` where the replay's time, less putting the directory back, leaves it none.  A case's inputs,
+    the file of its output, its home and its lending (a change of owner, or a file of several names copied into one of
+    its own) that find their filesystem full once the replays' user left files where every user may write or IPC
+    objects (``replays.cleared``) are the solver's 0 too: the room they lack is what those replays took."""
 
     replay, owner, cap = config["replay"], config["grader_owner"], int(config["max_output_bytes"])
-    if variant is None:
+    if case is None:
         who, where, reason = "the replay", "", NONREPRODUCIBLE
     else:
-        who, where, reason = (
-            f"the replay of variant {variant['name']}",
-            f" for variant {variant['name']}",
-            VARIANT_FAILED,
-        )
+        who, where, reason = case.who, f" for {case.kind} {case.name}", case.reason
     workdir = place.workdir
     no_room = (
         f"{who} finds no room in the working directory, once the replays left files of their user where every user "
         "may write, or IPC objects"
     )
-    if variant is not None:
+    if case is not None:
         try:
-            problem = _lay_over(_check_file(paths.tests, variant["inputs"]), workdir, config)
+            problem = _lay_over(_check_file(paths.tests, case.inputs), workdir, config, case.kind)
             if problem is None:
                 open(log, "wb").close()  # its output's file, made now: no room for it is judged as for its inputs
         except OSError as exc:
@@ -1136,11 +1239,11 @@ def _run_replay(config, paths, ops, place, log, deadline, replays, variant=None)
                 raise
             return {"error": str(exc)}, Result.solver(reason, f"{no_room}: {exc}")
         if problem is not None:
-            detail = f"variant {variant['name']}'s inputs cannot be laid over the working inputs: {problem}"
+            detail = f"{case.kind} {case.name}'s inputs cannot be laid over the working inputs: {problem}"
             return {}, Result.invalid(GRADER_KINDS[owner] + "_protocol", detail)
     ends = deadline - place.put_back
     if ends <= time.monotonic():
-        if variant is None:
+        if case is None:
             raise SolverFault(reason, "copying the working directory for the replay, and back, leaves it no time")
         raise SolverFault(reason, f"putting the working directory back after {who} leaves it no time")
     try:
@@ -1148,7 +1251,7 @@ def _run_replay(config, paths, ops, place, log, deadline, replays, variant=None)
         ops.give(place.home, REPLAY_UID)
         ops.lend(workdir)
     except OSError as exc:
-        if variant is not None and exc.errno in _NO_ROOM and replays.cleared:  # a change of owner may need room too
+        if case is not None and exc.errno in _NO_ROOM and replays.cleared:  # a change of owner may need room too
             return {"error": str(exc)}, Result.solver(reason, f"{no_room}: {exc}")
         raise LauncherFault(f"it cannot hand the working directory to the replay's user: {exc}") from exc
     env = _replay_env(workdir, place.home, config.get("replay_env", ()))
@@ -1190,11 +1293,12 @@ def _replay_variants(config, paths, ops, report, scratch, place, replays, varian
     cap = int(config["max_output_bytes"])
     for number, (variant, expected) in enumerate(variants):
         deadline = replays.deadline()
-        who = f"the replay of variant {variant['name']}"
+        case = _Case.variant(variant)
+        who = case.who
         log = os.path.join(scratch, f"variant-{number}.log")
         ran, missed = {}, []
         try:
-            ran, found = _run_replay(config, paths, ops, place, log, deadline, replays, variant=variant)
+            ran, found = _run_replay(config, paths, ops, place, log, deadline, replays, case)
             if found is None:  # nothing of its replay runs by now (the sweep), so nothing changes what it wrote
                 missed = missed_keys(place.workdir, expected, cap)
                 if missed:
@@ -1207,11 +1311,7 @@ def _replay_variants(config, paths, ops, report, scratch, place, replays, varian
         except SolverFault as exc:  # no time for it, or to put the directory back after it: the variant's, as its own
             found = Result.solver(VARIANT_FAILED if exc.reason == NONREPRODUCIBLE else exc.reason, str(exc))
         entry = {"name": variant["name"], "passed": found is None}
-        entry.update(
-            (key, ran[key])
-            for key in ("exit_code", "timed_out", "seconds", "timeout_s", "swept", "cleared")
-            if key in ran
-        )
+        entry.update((key, ran[key]) for key in _RAN_KEYS if key in ran)
         ran_variants.append(entry)
         if found is not None:
             entry.update(meta=variant["meta"], missed=missed[:REPORTED_MISSES], output_tail=ran.get("output_tail", ""))
@@ -1220,11 +1320,107 @@ def _replay_variants(config, paths, ops, report, scratch, place, replays, varian
     return None
 
 
+# What the report keeps of each case's replay, a variant's or a condition's (:func:`_run_replay`'s record).
+_RAN_KEYS = ("exit_code", "timed_out", "seconds", "timeout_s", "swept", "cleared")
+
+
+def _replay_conditions(config, paths, ops, report, scratch, place, replays, conditions):
+    """Replay each of the task's hidden evaluation ``conditions`` (:func:`_run_replay`), one after the other, each in
+    the working directory as its pristine copy holds it with the condition's inputs laid over it, then hold every
+    output it wrote as root's, in ``<scratch>/conditions/outputs/<id>`` (:func:`_hold`), remove what it left and put the
+    directory back (:func:`_clear`): the solver's 0 (``solver_condition_failed``) for the first that fails, outlives
+    its time, leaves what cannot be removed, does not write every output again, writes more than
+    :data:`MAX_CONDITION_BYTES` with the conditions before it, or takes too long to put back; else None.  What a
+    condition's replay wrote is never judged here: the grader judges it, against hidden targets of its own.  The report
+    lists each condition that replayed (``conditions.ran``); the one that failed keeps the tail of its output."""
+
+    ran_conditions = report.setdefault("conditions", {}).setdefault("ran", [])
+    outputs = config["replay"]["outputs"]
+    held_in = os.path.join(scratch, CONDITIONS, CONDITIONS_OUTPUTS)
+    total = 0
+    for number, condition in enumerate(conditions):
+        deadline = replays.deadline()
+        case = _Case.condition(condition)
+        log = os.path.join(scratch, f"condition-{number}.log")
+        ran, size = {}, None
+        try:
+            ran, found = _run_replay(config, paths, ops, place, log, deadline, replays, case)
+            if found is None:  # every output a regular file of one link, and nothing of its replay runs (the sweep)
+                size = sum(os.lstat(os.path.join(place.workdir, output)).st_size for output in outputs)
+                if total + size > MAX_CONDITION_BYTES:
+                    found = Result.solver(
+                        CONDITION_FAILED,
+                        f"{case.who} wrote {size} bytes of outputs, which with the {total} of the conditions before it "
+                        f"are more than the launcher holds for the grader ({MAX_CONDITION_BYTES})",
+                    )
+            if found is None:
+                held, fault = os.path.join(held_in, condition["id"]), (CONDITION_FAILED, case.who)
+                found = _clear(paths, ops, scratch, place, replays, ran, deadline, fault, held, outputs)
+        except SolverFault as exc:  # no time for it, or to put the directory back after it: the condition's own
+            found = Result.solver(CONDITION_FAILED if exc.reason == NONREPRODUCIBLE else exc.reason, str(exc))
+        entry = {"id": condition["id"], "passed": found is None}
+        entry.update((key, ran[key]) for key in _RAN_KEYS if key in ran)
+        if size is not None:
+            entry["bytes"] = size
+        ran_conditions.append(entry)
+        if found is not None:
+            entry.update(output_tail=ran.get("output_tail", ""), problem=found.detail)
+            entry.update((key, ran[key]) for key in ("survivors", "error") if key in ran)
+            return found
+        total += size
+    return None
+
+
+def _seal_conditions(ops, report, scratch, replays, conditions, outputs):
+    """Write the manifest of what the conditions' replays wrote, held in ``<scratch>/conditions/outputs``
+    (:func:`_replay_conditions`), as ``<scratch>/conditions/manifest.json`` (:data:`CONDITIONS_SCHEMA`: each condition
+    in its order, with its inputs, its replay's time and each output's size and SHA-256, read from the copy the grader
+    gets), note their SHA-256 in the report (:data:`CONDITIONS_SHA256`, before the grader, root, could change them) and
+    seal the directory, root's alone: None, or the solver's 0 for a filesystem found full once the replays left files
+    of their user where every user may write or IPC objects (raised with nothing of theirs left, the trusted side's)."""
+
+    collected = os.path.join(scratch, CONDITIONS)
+    held_in = os.path.join(collected, CONDITIONS_OUTPUTS)
+    ran = {entry["id"]: entry for entry in report["conditions"]["ran"]}
+    names = [f"{condition['id']}/{output}" for condition in conditions for output in outputs]
+    digest = outputs_sha256(held_in, names, rule=CONDITION_OUTPUTS_RULE)
+    manifest = {"schema": CONDITIONS_SCHEMA, "sha256": digest, "conditions": []}
+    for condition in conditions:
+        entry = ran[condition["id"]]
+        files = []
+        for output in outputs:
+            path = os.path.join(held_in, condition["id"], output)
+            files.append({"path": output, "bytes": os.lstat(path).st_size, "sha256": _file_sha256(path)})
+        manifest["conditions"].append(
+            {
+                "id": condition["id"],
+                "inputs": condition["inputs"],
+                "seconds": entry.get("seconds"),
+                "timeout_s": entry.get("timeout_s"),
+                "outputs": files,
+            }
+        )
+    try:
+        _write(os.path.join(collected, CONDITIONS_MANIFEST), _dumps(manifest))
+        ops.seal(collected)
+    except OSError as exc:
+        if exc.errno not in _NO_ROOM or not replays.cleared:
+            raise  # a full filesystem with nothing of the replays' left is the trusted side's, as before any replay ran
+        return Result.solver(
+            CONDITION_FAILED,
+            "what the conditions' replays wrote finds no room where the launcher holds it for the grader, once the "
+            f"replays left files of their user where every user may write, or IPC objects: {exc}",
+        )
+    report[CONDITIONS_SHA256] = digest
+    return None
+
+
 def _clear(paths, ops, scratch, place, replays, ran, deadline, fault, held=None, outputs=()):
     """Remove what a replay that ran in the working directory until ``deadline`` left, and put the directory back from
     its pristine copy, for at most :data:`CLEAR_WINDOW_S` past that (``replays.until``): what its user left where every
     user may write and its System V IPC objects (:func:`clear_left`, :func:`_clear_ipc`, counted in ``ran["cleared"]``
-    and ``replays.cleared``), its home, and all it left in the working directory, with ``held`` all but ``outputs``,
+    and ``replays.cleared``), the keys of its user's kernel keyrings (:meth:`Ops.clear_keys`), its home, and all it
+    left in the working directory, with ``held`` all but ``outputs``,
     which then wait in ``held`` as root's (:func:`_hold`), before the directory is put back (:func:`_restore`).  The
     solver's 0 (``fault``: its reason and who left it) where it cannot remove them, or not in that time, and where
     holding the outputs or putting the directory back finds the filesystem full once the replays left files of their
@@ -1244,6 +1440,7 @@ def _clear(paths, ops, scratch, place, replays, ran, deadline, fault, held=None,
         if cleared:
             ran["cleared"] = cleared
             replays.cleared += cleared
+        ops.clear_keys()  # the kernel keyrings of its user, which outlive its processes and take no filesystem's room
         remove_tree(place.home, until)
         if held is not None:
             _hold(workdir, held, outputs, ops, until)
@@ -1280,6 +1477,25 @@ class Checks:
         self.variants = list(variants)
         self.forbidden = forbidden
         self.sources = list(sources)
+
+
+def load_conditions(replay, tests):
+    """The hidden evaluation conditions of a task's ``replay`` (its ``conditions``, which :func:`read_config` checked;
+    none for a task without a replay or without conditions), each ``{"id", "inputs"}``, and None; or none and why their
+    data, which the grader's owner wrote, cannot be used: inputs that are no directory (a link among them), in
+    ``tests``, the task's ``/tests``.  What the inputs hold :func:`_lay_over` checks as it lays them over the working
+    directory."""
+
+    conditions = list((replay or {}).get("conditions") or ())
+    for condition in conditions:
+        where = f"condition {condition['id']}'s inputs, {condition['inputs']},"
+        try:
+            info = os.lstat(_check_file(tests, condition["inputs"]))
+        except OSError as exc:
+            return [], f"{where} cannot be read: {exc}"
+        if not stat.S_ISDIR(info.st_mode):
+            return [], f"{where} are {_kind(info)}, not a directory"
+    return conditions, None
 
 
 def load_checks(settings, replay, tests):
@@ -1486,8 +1702,9 @@ def overlay_conflict(path, directory, protected):
     return None
 
 
-def _lay_over(source, target, config):
-    """Copy the regular files and directories below ``source``, a variant's inputs, over ``target``, the working
+def _lay_over(source, target, config, kind="variant"):
+    """Copy the regular files and directories below ``source``, a ``kind``'s inputs (a variant's or a condition's),
+    over ``target``, the working
     directory as its pristine copy holds it, as root, never following a link: each file in place of the one at its
     path, executable where the input is.  Why it cannot, or None: an input that is a link or a special file, a
     directory where the working directory holds anything else (a link among it) or the reverse, or one that would change
@@ -1514,11 +1731,11 @@ def _lay_over(source, target, config):
                 if present is None:
                     os.mkdir(there, 0o755)
                 elif not stat.S_ISDIR(present.st_mode):
-                    return f"{shown} is a directory of the variant's and a file of the working directory's"
+                    return f"{shown} is a directory of the {kind}'s and a file of the working directory's"
                 continue
             if present is not None:
                 if stat.S_ISDIR(present.st_mode):
-                    return f"{shown} is a file of the variant's and a directory of the working directory's"
+                    return f"{shown} is a file of the {kind}'s and a directory of the working directory's"
                 os.unlink(there)
             _copy_file(path, there, 0o755 if info.st_mode & stat.S_IXUSR else 0o644)
     return None
@@ -1714,11 +1931,13 @@ def _shown(value):
     return text if len(text) <= 80 else text[:77] + "..."
 
 
-def outputs_sha256(directory, outputs):
+def outputs_sha256(directory, outputs, rule=OUTPUTS_RULE):
     """The SHA-256 of the files ``outputs`` (paths relative to ``directory``): of each one's path and the SHA-256 of its
-    bytes, sorted, with :data:`OUTPUTS_RULE` first.  Replays that wrote the same bytes give the same one."""
+    bytes, sorted, with ``rule`` first (:data:`OUTPUTS_RULE` for the replay's outputs,
+    :data:`CONDITION_OUTPUTS_RULE` for the conditions', each ``<id>/<output>``).  Replays that wrote the same bytes give
+    the same one."""
 
-    digest = hashlib.sha256(OUTPUTS_RULE.encode("ascii"))
+    digest = hashlib.sha256(rule.encode("ascii"))
     for output in sorted(outputs):  # no path holds a NUL (relative_path)
         content = _file_sha256(os.path.join(directory, output))
         digest.update(b"\0" + os.fsencode(output) + b"\0" + content.encode("ascii"))
@@ -2253,8 +2472,9 @@ def _say(text):
 def bounded_report(report, limit=MAX_REPORT_BYTES):
     """``report`` as JSON (ASCII) of at most ``limit`` bytes, so that grading always reads it whole: as it is where it
     fits, else without the verdict's checks, then without the artifacts' names, the replay's outputs, the variants'
-    replays and the scan's record, then with only what the outcome needs (the SHA-256 of the replayed outputs among
-    it, which a regrade compares); ``truncated`` names what was left out."""
+    replays, the conditions' replays and the scan's record, then with only what the outcome needs (the SHA-256 of the
+    replayed outputs and of the conditions' among it, which a regrade compares); ``truncated`` names what was left
+    out."""
 
     text = _dumps(report)
     if len(text) <= limit:
@@ -2266,6 +2486,7 @@ def bounded_report(report, limit=MAX_REPORT_BYTES):
         ("contract", "artifacts"),
         ("replay", "outputs"),
         ("replay_checks", "variants"),
+        ("conditions", "ran"),
         ("replay_checks", "forbidden_literals"),
     )
     for part, key in parts:
@@ -2278,8 +2499,9 @@ def bounded_report(report, limit=MAX_REPORT_BYTES):
             if len(text) <= limit:
                 return text
     kept = {key: report.get(key) for key in ("schema", "grader_owner", "reward", "failure_kind", "reason", "seconds")}
-    if REPLAYED_SHA256 in report:
-        kept[REPLAYED_SHA256] = report[REPLAYED_SHA256]
+    for key in (REPLAYED_SHA256, CONDITIONS_SHA256):  # what a regrade compares
+        if key in report:
+            kept[key] = report[key]
     detail = report.get("detail")
     kept.update(detail=detail[:TAIL_CHARS] if isinstance(detail, str) else None, truncated="all but the outcome")
     return _dumps(kept)
@@ -2862,6 +3084,166 @@ def _limit(limit, value):
     if hard != resource.RLIM_INFINITY:
         value = min(value, hard)
     resource.setrlimit(limit, (value, value))
+
+
+# The kernel's key management: the numbers of add_key and keyctl by machine (as uname names it), the keyrings and
+# commands the launcher uses, and the errors of a kernel or sandbox (a seccomp profile, such as Docker's default) that
+# keeps a process from keys altogether.
+_KEY_SYSCALLS = {
+    "x86_64": (248, 250),
+    "amd64": (248, 250),
+    "aarch64": (217, 219),
+    "arm64": (217, 219),
+    "riscv64": (217, 219),
+    "loongarch64": (217, 219),
+    "i386": (286, 288),
+    "i686": (286, 288),
+    "armv7l": (309, 311),
+    "armv6l": (309, 311),
+    "ppc64le": (269, 271),
+    "ppc64": (269, 271),
+    "s390x": (278, 280),
+}
+_KEY_SPEC_PROCESS_KEYRING = -2
+_KEY_SPEC_USER_KEYRING = -4
+_KEY_SPEC_USER_SESSION_KEYRING = -5
+_KEYCTL_JOIN_SESSION_KEYRING = 1
+_KEYCTL_CLEAR = 7
+_KEYCTL_GET_PERSISTENT = 22
+_NO_KEYS = (errno.ENOSYS, errno.EPERM, errno.EOPNOTSUPP, errno.EINVAL)
+# The errors of a keyring that the replay's user made one it cannot clear itself (KEYCTL_SETPERM), or revoked.
+_KEYS_SPOILT = (errno.EACCES, errno.EKEYREVOKED, errno.EKEYEXPIRED)
+
+
+def _key_calls(machine=None):
+    """The kernel's add_key and keyctl as ``(add_key, keyctl)``, functions of their arguments that return what the
+    system call returns and the ``errno`` it set, for this machine (or ``machine``); a :class:`LauncherFault` for a
+    machine whose numbers the launcher does not know, which keeps it from clearing what a replay left in a keyring."""
+
+    import ctypes
+
+    machine = machine or os.uname().machine
+    if machine == "x86_64" and struct.calcsize("P") == 4:
+        machine = "i686"  # a 32-bit Python on a 64-bit kernel calls the 32-bit system calls
+    if machine not in _KEY_SYSCALLS:
+        raise LauncherFault(f"it knows no system call numbers of the kernel's keys on {machine}")
+    numbers = _KEY_SYSCALLS[machine]
+    libc = ctypes.CDLL(None, use_errno=True)
+
+    def call(number, *args):
+        values = [ctypes.c_char_p(arg) if isinstance(arg, bytes) else ctypes.c_long(arg) for arg in args]
+        ctypes.set_errno(0)
+        result = libc.syscall(ctypes.c_long(number), *values)
+        return result, ctypes.get_errno()
+
+    return (lambda *args: call(numbers[0], *args)), (lambda *args: call(numbers[1], *args))
+
+
+def _join_new_session_keyring(libc, calls):
+    """Give the process (the replay's, as its user) a new session keyring of its own, which its processes alone hold
+    and which goes with them: else it keeps the launcher's, which every later replay would hold too.  Nothing where the
+    process may use no keys (:data:`_NO_KEYS`), where it could put nothing in the launcher's either; an ``OSError``
+    for any other failure, which keeps the replay from starting."""
+
+    result, number = calls[1](_KEYCTL_JOIN_SESSION_KEYRING, 0)
+    if result < 0 and number not in _NO_KEYS:
+        raise OSError(number, f"the replay cannot join a session keyring of its own: {os.strerror(number)}")
+
+
+def cleared_keys(add_key, keyctl):
+    """Clear the keyrings of this process's user that outlive its processes, as that user: its user keyring, its user
+    session keyring and its persistent keyring (``add_key`` and ``keyctl``, :func:`_key_calls`).  What it found, as a
+    line of text: ``ok``; ``absent`` where the user may make no keys at all (a kernel without them, or a sandbox whose
+    seccomp profile keeps it from them), so a replay could leave none either; ``left <step> <errno>`` where a keyring
+    the user made one it cannot clear (a change of its permissions, or a revocation: the replay's doing), or that keys
+    fill (``EDQUOT``); ``fault <step> <errno>`` where clearing failed otherwise, though the user may make keys."""
+
+    steps = [("user", lambda: keyctl(_KEYCTL_CLEAR, _KEY_SPEC_USER_KEYRING))]
+    steps.append(("user-session", lambda: keyctl(_KEYCTL_CLEAR, _KEY_SPEC_USER_SESSION_KEYRING)))
+    for name, step in steps + [("persistent", None)]:
+        if step is None:
+            serial, number = keyctl(_KEYCTL_GET_PERSISTENT, -1, _KEY_SPEC_PROCESS_KEYRING)
+            if serial < 0 and number in (errno.EOPNOTSUPP, errno.ENOSYS):  # a kernel without persistent keyrings
+                continue
+            result = serial
+            if serial >= 0:
+                result, number = keyctl(_KEYCTL_CLEAR, serial)
+        else:
+            result, number = step()
+        if result >= 0:
+            continue
+        # One the user may still make keys in, if it can make any, is its replay's doing (a keyring it closed to itself)
+        # or the sandbox's (one it cannot clear): which, the probe tells.
+        made, probed = add_key(b"user", b"platoon-launcher-probe", b"x", 1, _KEY_SPEC_PROCESS_KEYRING)
+        if made < 0 and probed in _NO_KEYS:
+            return "absent"
+        if made < 0 or number in _KEYS_SPOILT or number == errno.EDQUOT:
+            return f"left {name} {number}"
+        return f"fault {name} {number}"
+    return "ok"
+
+
+def clear_keys_as(uid, calls=None):
+    """Clear the keyrings of ``uid`` (the replay's user) that outlive its processes (:func:`cleared_keys`), in a child
+    of the launcher that is that user alone, as a replay's process is: since Linux 5.3, a user's user keyring lives in
+    its user namespace, not in its processes, and its persistent keyring is made to outlive them, so one replay could
+    leave data there that the next replay of the same user reads.  :class:`Leftover` where a keyring is left that it
+    cannot clear, the replay's doing; a :class:`LauncherFault` where the child cannot be that user, or the sandbox lets
+    the user make keys it cannot clear."""
+
+    add_key, keyctl = calls or _key_calls()
+    reading, writing = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the child: it runs nothing but the system calls below, and exits
+        try:
+            os.close(reading)
+            try:
+                os.setgroups([])
+                os.setgid(uid)
+                os.setuid(uid)
+                if os.getresuid() != (uid,) * 3:
+                    raise OSError(errno.EPERM, "not the replay's user alone")
+                found = cleared_keys(add_key, keyctl)
+            except OSError as exc:
+                found = f"user {exc.errno}"
+            os.write(writing, found.encode("ascii"))
+        finally:
+            os._exit(0)
+    os.close(writing)
+    try:
+        found = b""
+        while True:
+            chunk = os.read(reading, 256)
+            if not chunk:
+                break
+            found += chunk
+    finally:
+        os.close(reading)
+        os.waitpid(pid, 0)
+    keys_verdict(found.decode("ascii", "replace"))
+
+
+def keys_verdict(found):
+    """What clearing the replay user's keyrings found (:func:`cleared_keys`'s line) means: nothing for ``ok`` and
+    ``absent``, :class:`Leftover` for ``left``, and a :class:`LauncherFault` for anything else."""
+
+    parts = found.split()
+    if parts in (["ok"], ["absent"]):
+        return
+    if len(parts) == 3 and parts[0] == "left":
+        raise Leftover(f"its {parts[1]} keyring cannot be cleared: {_strerror(parts[2])}")
+    if len(parts) == 3 and parts[0] == "fault":
+        raise LauncherFault(
+            f"it cannot clear the replay's user's {parts[1]} keyring, though that user may make keys: "
+            f"{_strerror(parts[2])}"
+        )
+    if len(parts) == 2 and parts[0] == "user":
+        raise LauncherFault(f"it cannot switch to the replay's user to clear its keyrings: {_strerror(parts[1])}")
+    raise LauncherFault(f"clearing the replay's user's keyrings ended without a word ({found!r})")
+
+
+def _strerror(text):
+    return os.strerror(int(text)) if text.lstrip("-").isdigit() else text
 
 
 def _libc():
