@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0021](0021-trainers-credit-and-policies.md) (credit estimators, policies and roles, step hooks, draw provenance; its rules hold here), [RFC 0020](0020-rollout-permits.md) (rollout permits and the start limit; its section 8's `weight`, built here), [RFC 0016](0016-component-configuration.md) (program options, built here), [RFC 0015](0015-hosted-models-and-judges-in-eval.md) (hosted models, amended here), [RFC 0013](0013-extension-model.md) (components by name), [RFC 0017](0017-public-surface-and-conformance.md) (`platoon.experimental`, conformance kits), [RFC 0019](0019-training-mixtures.md) (per-entry settings, the dispatcher), [RFC 0010](0010-harbor-registry-and-multi-container-tasks.md) (Harbor tasks, root verifiers) |
 | Discussion | The pull request that adds this RFC |
-| Implementation | Built, in open pull requests: M0 in "fix: Refuse judge agents minted by sandboxed harnesses"; M1 in "feat: Add the running credit estimator", and M2, stacked on it, in "feat: Add the roles credit composite"; M3 in "feat: Add a root role per environment entry", and M4, stacked on it, in "feat: Add program options"; M7 in "feat: Add a shared-service check for adapters". Built, each stacked on the one before, in pull requests that are not open yet: M5, "feat: Add runtime Harbor tasks"; M6, "feat: Add regrades of generated graders"; M5b, "feat: Add replay checks to runtime tasks". Not yet: M8 to M17 and M12b. The sections of built milestones describe the code |
+| Implementation | Built, in open pull requests: M0 in "fix: Refuse judge agents minted by sandboxed harnesses"; M1 in "feat: Add the running credit estimator", and M2, stacked on it, in "feat: Add the roles credit composite"; M3 in "feat: Add a root role per environment entry", and M4, stacked on it, in "feat: Add program options"; M5 in "feat: Add runtime Harbor tasks", M6, stacked on it, in "feat: Add regrades of generated graders", and M5b, stacked on M6's, in "feat: Add replay checks to runtime tasks"; M7 in "feat: Add a shared-service check for adapters". Not yet: M8 to M17 and M12b. The sections of built milestones describe the code |
 
 ## Summary
 
@@ -291,21 +291,46 @@ keeps what it writes root's. It:
 2. checks the declared artifacts against the output contract (regular files and directories, each file at most 64
    MiB, `.json` files that parse, nothing but directories above an output of the replay). For a task whose
    `grader.json` gives a replay (without one, the grader judges the submitted outputs as they are, and a regrade
-   compares the artifacts alone), it makes everything in the working directory, files and directories at any depth,
-   root's and closed to other users' writes (refusing, as the trusted side's fault, only a directory that the image or
-   the template leaves open to the replay's user), and replays the submission as `grader.json` declares, in a copy of
-   the working directory without the replay's outputs, which the replay must write again, for at most half the time
-   left (or `replay_timeout_s`, section 3.4): as a user of its own (uid 65533, never root, checked) without
-   supplementary groups or new privileges, with a thin environment (an explicit keep list: the path, cut to its
-   absolute entries so that nothing in the replay's copy stands in for a program, the locale and time zone, Python's
-   and the dynamic linker's search paths and prefixes, numeric libraries' thread counts, and the template's variables
-   that the verifier shares) and limits (no core files, no file larger than an output may be, 1,024 processes of its
-   user with threads counted, 1,024 open files, an `oom_score_adj` of 1000 so that the kernel's choice under memory
-   pressure falls on the replay and never on the launcher, and, where `replay_address_space_bytes` sets one, a ceiling
-   on each process's address space). A bounded sweep then ends every process below the launcher, which is their
-   subreaper, and every process of the replay's user; one of that user's that it cannot signal or end in time is a
-   survivor, never skipped. The replay's outputs then go back in place: the grader judges them, and finds the submitted
-   ones in `$PLATOON_SUBMITTED`;
+   compares the artifacts alone), it replays the submission as `grader.json` declares **in place**: in the working
+   directory itself, at its own path, without the replay's outputs, which the replay must write again. Code that names
+   its files by their absolute paths (`/app/answer.json`), as code a solver writes in the working directory often does,
+   then replays as it ran, where in a copy at another path it would write outside the copy and fail, the solver's 0 for
+   a submission that does reproduce its outputs. So the launcher lends the working directory to the replay and puts it
+   back after it:
+   - **before the replay**, it checks that nothing is mounted below the working directory and that it holds no socket or
+     device, none of which the launcher could put back, that no directory of it, itself included, is one that the image
+     or the template leaves open to the replay's user (by mode bits or access ACL), that no directory above it lets that
+     user replace what it holds (each must be one only root writes in, or one with the sticky bit set), so that the
+     replay cannot move the working directory away, and that the launcher's own directory is not inside it; each fails
+     closed, the trusted side's fault, before anything there changes. It then makes everything in the working directory,
+     files and directories at any depth, root's and closed to other users' writes, moves the submitted outputs to
+     `$PLATOON_SUBMITTED`, and copies the rest, never following a link, into a **pristine copy** in its own directory,
+     root's alone, which keeps its directories, files (with their holes), links and FIFOs, a file of several names as
+     one file, and their modes and modification times;
+   - **the replay** runs in the working directory, lent to its user: the directories and files there become that user's
+     to read and write (a file with other names, which may lie outside it, is first replaced with a copy of its own, so
+     that nothing beyond the working directory becomes that user's), while the directory itself stays root's, of that
+     user's group, so that the replay may change what it holds but can neither move it nor change its mode. It runs for
+     at most half the time left (or `replay_timeout_s`, section 3.4), less twice as long as the copy took, which putting
+     the directory back takes: as a user of its own (uid 65533, never root, checked) without supplementary groups or new
+     privileges, with a home and temporary directory of its own (`HOME` and `TMPDIR`), a thin environment (an explicit
+     keep list: the path, cut to its absolute entries so that nothing in the working directory stands in for a program,
+     the locale and time zone, Python's and the dynamic linker's search paths and prefixes, numeric libraries' thread
+     counts, and the template's variables that the verifier shares) and limits (no core files, no file larger than an
+     output may be, 1,024 processes of its user with threads counted, 1,024 open files, an `oom_score_adj` of 1000 so
+     that the kernel's choice under memory pressure falls on the replay and never on the launcher, and, where
+     `replay_address_space_bytes` sets one, a ceiling on each process's address space). A bounded sweep then ends every
+     process below the launcher, which is their subreaper, and every process of the replay's user; one of that user's
+     that it cannot signal or end in time is a survivor, never skipped;
+   - **after the sweep**, it checks that each output is a regular file of one name that keeps the output contract,
+     removes what the replay's user left where every user may write, its System V IPC objects and its home (section
+     3.4), and all it left in the working directory but its outputs, never following a link, holds the outputs as root's
+     in its own directory, and **puts the working directory back** from the pristine copy, root's again and closed to
+     other users' writes. Once the variants, if any, are done (section 3.4), the replayed outputs go in place of the
+     submitted ones. Whatever the replay changed, added or removed in the working directory, the grader finds it as the
+     pristine copy holds it, with the outputs the replay wrote (the copy keeps neither the extended attributes and ACLs
+     of what the directory holds nor other names of its files outside it), and finds the submitted outputs in
+     `$PLATOON_SUBMITTED`;
 3. runs the grader as root in `/tests/gen` for the rest of the verifier's time limit. It reads the outputs in
    `$PLATOON_WORKDIR`, the working directory (the replayed ones, for a task with a replay), and writes its verdict to
    `$PLATOON_VERDICT`, `{passed, checks: [{id, passed, margin}]}`, and nothing else;
@@ -324,10 +349,10 @@ since a grader that runs as root could write what they read.
 |---|---|
 | the verdict passed, or did not | `scored` 1 or 0 |
 | an artifact breaks the output contract; the working directory is larger than a replay copies; the artifacts take longer to check than the time limit allows | `scored` 0, reason `solver_output_contract` |
-| the replay fails, outlives its time, lacks its own program (`./run.sh`), leaves a process the sweep cannot signal or end, leaves more than the launcher removes in its time (section 3.4), takes the room the launcher's later steps need, or does not write an output again | `scored` 0, reason `solver_nonreproducible` |
+| the replay fails, outlives its time, lacks its own program (`./run.sh`), leaves a process the sweep cannot signal or end, leaves more than the launcher removes in its time (section 3.4), takes the room the launcher's later steps need, or does not write an output again; copying the working directory aside and back leaves the replay no time, or putting it back outlives the replay's time | `scored` 0, reason `solver_nonreproducible` |
 | the grader exits nonzero or cannot start, outlives its time, writes no verdict or one beyond the schema (`invalid` included: a grader cannot censor), or leaves what cannot be killed; a replay command of the image's own that cannot start | `invalid`, `<owner>_exit`, `_timeout`, `_protocol` or `_isolation` |
 | the launcher fails once the grader ran, exits nonzero, leaves no report or outlives the verifier's time limit; grading cannot kill what was left or read the verifier's output | `invalid`, `<owner>_unfinished`, whatever the reward file says |
-| the launcher cannot do its own part before the grader runs: no `python3`, no root, no replay user, a seal that does not take, a directory of the working directory that the image or the template leaves open to the replay's user | `invalid`, `verifier_trusted_launcher` |
+| the launcher cannot do its own part before the grader runs: no `python3`, no root, no replay user, a seal that does not take; a working directory that the image or the template leaves open to the replay's user at any depth, that holds a mount point, a socket, a device or the launcher's own directory, or that lies below a directory from which that user could replace it (by mode bits or ACL); a working directory it cannot put back, but for a full filesystem (section 3.4) | `invalid`, `verifier_trusted_launcher` |
 
 `<owner>` is `verifier_generated` for a generated grader and `verifier_trusted` for a trusted one; what fails before
 the launcher starts (the verifier's sandbox, the artifacts' upload) keeps platoon's kinds, such as `verifier_start`.
@@ -368,11 +393,16 @@ task), and their data lie in the task's sealed `tests/gen`:
 - **Variants**, each `{name, inputs, expected, tolerance, meta}`: `inputs`, a directory whose files are laid over the
   working inputs; `expected`, a JSON file that maps output keys (a `.json` output, or a JSON Pointer into one,
   `answer.json#/rows/2/value`) to numbers or lists of numbers; `tolerance`, absolute, per key with a default; `meta`,
-  opaque and recorded, such as the cells a variant covers. Once the replay has reproduced the submission, each variant
-  replays from the same clean inputs with its overlay, run as the replay ran, and must give what `expected` says
-  within tolerance, else the submission scores 0, reason `solver_variant_failed`; no variant runs after one that
-  fails. What the replay wrote waits meanwhile in its own copy, root's, where no variant's replay, run as the same
-  user, can reach it.
+  opaque and recorded, such as the cells a variant covers. Once the replay has reproduced the submission and the
+  working directory is back, each variant replays in place, as the replay ran: the launcher lays the variant's inputs
+  over the working directory, lends it to the replay's user, runs the replay there, reads the outputs it wrote and
+  puts the directory back from the pristine copy before the next replay or the grader. So a submission reads a
+  variant's inputs whether it names them by paths relative to the working directory or by their absolute paths there,
+  and no replay finds what an earlier one changed or left. Each variant's replay must give what `expected` says within
+  tolerance, else the submission scores 0, reason `solver_variant_failed`, as it does where the variant's time leaves
+  none for putting the directory back after it, or the put back outlives that time; no variant runs after one that
+  fails. What the replay wrote waits meanwhile as root's in the launcher's own directory, where no variant's replay,
+  run as the same user, can reach it, and goes back in its place after the last variant.
 - **Forbidden literals**: a JSON file that lists `{value, tolerance}`, and the submission's Python sources to scan (its
   `.py` artifacts, never a replay's output). Before the replay, the launcher parses each with the verifier's `python3`
   by a named rule, `python-numeric-literals/v1` (its int, float and complex constants under their chains of unary
@@ -387,15 +417,20 @@ task), and their data lie in the task's sealed `tests/gen`:
   checks run before the grader, which as root could change what they read, and after which any fault of the
   launcher's would be the grader's (`<owner>_unfinished`). So every grade, a regrade's too, pays for the variants'
   replays, and a wrong answer that also misses a variant is `solver_variant_failed`.
-- **Every replay leaves nothing behind**, the replay's own too, with or without checks. After each, the launcher
-  removes what its user left where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock`, `/var/lock`,
-  `/dev/mqueue`, where the sandbox has them) and in its copy, within 10 s past its time and never through a link; a
-  replay that leaves more is the solver's 0 (`solver_nonreproducible`, a variant's `solver_variant_failed`), and so is
-  a full filesystem in a later step of the launcher's once a replay left files there, so that exhausting the disk
-  never turns the solver's 0 into a fault of the trusted side or the grader's. `replay_timeout_s` gives each replay,
-  its own and each variant's, the time the producer
-  told its solver: the replays end within `(1 + variants) × replay_timeout_s`, and the grader keeps the rest
-  (`materialize` raises `ValueError` where none is left); without it the replays share half the time left.
+- **Every replay leaves nothing behind**, the replay's own too, with or without checks. After each, the launcher removes
+  what its user left where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock`, `/var/lock`,
+  `/dev/mqueue`, where the sandbox has them), its System V IPC objects, its home and all it left in the working
+  directory, never through a link, and puts the working directory back (section 3.2), within 10 s past its time; a
+  replay that leaves more than the launcher removes in that time, or whose put back outlives it, is the solver's 0
+  (`solver_nonreproducible`, a variant's `solver_variant_failed`). So is a full filesystem in a later step of the
+  launcher's, putting the directory back included, once a replay left files where every user may write or IPC objects,
+  so that exhausting the disk never turns the solver's 0 into a fault of the trusted side or the grader's. Where the
+  replays left neither, a full filesystem is the trusted side's, as it is before any replay ran; one found as the
+  directory is put back is so only once the filesystem has written out what it holds and the launcher has tried once
+  more, since some filesystems free what was removed only after a while. `replay_timeout_s` gives each replay, its own
+  and each variant's, the time the producer told its solver, copying the working directory aside and putting it back
+  included: the replays end within `(1 + variants) × replay_timeout_s`, and the grader keeps the rest (`materialize`
+  raises `ValueError` where none is left); without it the replays share half the time left.
 
 Two checks, not one: a perturbation catches a stated answer only where it moves the answer beyond tolerance, so the
 scan for the answers themselves stands beside it. The scan reads Python only, by a rule that a producer applies to its
@@ -406,18 +441,20 @@ environment's own template. Its refusal cases need no sandbox: a network, GPUs, 
 `task.toml`, an artifact at `/tests/gen`, a Dockerfile, a compose file, a `tests/test.sh` of the task's own, a link,
 files beyond `max_bytes`, a malformed grader manifest, a variant whose inputs overlay the submission, and the honest
 task twice into one digest. Its grading cases run on the environment's sandboxes: right and wrong answers, a missing
-artifact, a failing replay, a replay that reaches for the grader's files, the published answer or the reward, a
+artifact, a failing replay, a replay that reaches for the grader's files, the published answer or the reward, a replay
+that reads and writes its files by their absolute paths, one that changes its inputs and its code and leaves files
+beside its output, after which the grader must find the inputs and the code as they were and none of those files, a
 submitted module shadow; graders that declare `invalid`, crash after a verdict of 0, kill the launcher, write a reward
 file of their own or leave a process that keeps writing one, or write a verifier classifier's line into the log; a
 trusted grader that crashes; a coin-flip grader, graded again up to 20 times until it comes out `verifier_flaky`; and
-a variant followed, a variant ignored, a hardcoded literal, and a variant's replay that reaches for the replay's
-outputs and the grader's files. A hash-keyed grader and a planted secret are no property of `materialize` or the
-launcher: the program's controls catch the first, and the toolkit's final check, which knows the secrets, the second
-(section 9.7). The refusal cases run in CI; the grading cases need verifiers that run as root, so they run end to end
-in an opt-in Singularity test with `--fakeroot` verifiers (one of CONTRIBUTING's [tests that skip without local
-files](../../CONTRIBUTING.md#tests-that-skip-without-local-files)), which each pull request that touches
-`materialize` or the launcher runs and reports in its checks; the minting cases (section 2.5) are CPU tests and run
-in CI.
+a variant followed, a variant ignored, a hardcoded literal, a variant's replay that reaches for the replay's outputs
+and the grader's files, and the two in-place cases again with a variant. A hash-keyed grader and a planted secret are no
+property of `materialize` or the launcher: the program's controls catch the first, and the toolkit's final check, which
+knows the secrets, the second (section 9.7). The refusal cases run in CI; the grading cases need verifiers that run as
+root, so they run end to end in an opt-in Singularity test with `--fakeroot` verifiers (one of CONTRIBUTING's [tests
+that skip without local files](../../CONTRIBUTING.md#tests-that-skip-without-local-files)), which each pull request that
+touches `materialize` or the launcher runs and reports in its checks; the minting cases (section 2.5) are CPU tests and
+run in CI.
 
 ### 4. Permits for trees
 
@@ -1115,9 +1152,9 @@ mixture-of-experts base.
 | M2 `roles` | section 5.2 (EST 300 + 350; built 1,103 + 1,596) | shares hold in a fake run as validity rises; a weight read at the sampling version keeps the outcomes' sign; per-role `kl`; exact resume; the envgen entry of section 10.1 loads with no group-of-one warning | "feat: Add the roles credit composite", open, on M1's |
 | M3 root roles | section 6.1 (EST 150 + 200; built 386 + 859) | a role-bound root samples its policy for life; a frozen root; `verifier` and `judge` roots refused; TOML entries load with `root_role`; a resume refuses a changed root role | "feat: Add a root role per environment entry", open |
 | M4 program options | section 6.2's options and checks (EST 150 + 200; built 631 + 1,119) | options checked at load and in `platoon config validate`, each problem where it is written; `ep.options` in the worker; a check sees only its entry and the phase's rollout config | "feat: Add program options", open, on M3's |
-| M5 runtime tasks | section 3 but `ep.materialize`, regrades and replay checks (EST 400 + 450; built 2,886 + 2,337) | `check_runtime_tasks` refuses or grades every sabotage as listed but the flaky grader, which M6's regrade catches, end to end on Singularity with root verifiers; curated grading unchanged | "feat: Add runtime Harbor tasks", built; its pull request is not open yet |
-| M6 regrades | section 3.3 (EST 120 + 150; built 276 + 578) | a flaky fake grader is `verifier_flaky`; an unseeded submission whose replays differ is the solver's 0, never `verifier_flaky`; curated tasks are never regraded | "feat: Add regrades of generated graders", built, on M5's; its pull request is not open yet |
-| M5b replay checks | section 3.4 (built 1,575 + 1,830) | the honest submission scores 1, and its regrade replays the variant again; one that ignores its inputs is `solver_variant_failed`, one that states the answer `solver_hardcoded`; unusable check data is the grader owner's; a variant's replay reaches neither the replay's outputs nor the grader's files, on Singularity | "feat: Add replay checks to runtime tasks", built, on M6's; its pull request is not open yet |
+| M5 runtime tasks | section 3 but `ep.materialize`, regrades and replay checks (EST 400 + 450; built 2,886 + 2,337) | `check_runtime_tasks` refuses or grades every sabotage as listed but the flaky grader, which M6's regrade catches, end to end on Singularity with root verifiers; curated grading unchanged | "feat: Add runtime Harbor tasks", open |
+| M6 regrades | section 3.3 (EST 120 + 150; built 276 + 578) | a flaky fake grader is `verifier_flaky`; an unseeded submission whose replays differ is the solver's 0, never `verifier_flaky`; curated tasks are never regraded | "feat: Add regrades of generated graders", open, on M5's |
+| M5b replay checks | section 3.4 (built 1,575 + 1,830) | the honest submission scores 1, and its regrade replays the variant again; one that ignores its inputs is `solver_variant_failed`, one that states the answer `solver_hardcoded`; unusable check data is the grader owner's; a variant's replay reaches neither the replay's outputs nor the grader's files, on Singularity | "feat: Add replay checks to runtime tasks", open, on M6's |
 | M7 shared-service check | `check_shared_service` for RFC 0021's U1-U4 (EST 150 + 150; built 497 + 529) | passes on a toy service that keeps two adapters apart, and each of its faults fails its own check; run on a live LoRA service before a two-adapter study | "feat: Add a shared-service check for adapters", open |
 | M8 static permits | section 4.1 (200 + 250) | a draw holds `group_size × W` permits until its episode returns; in a randomized fake under a full pool, a child that takes its start slot before its seat deadlocks and seat, then slot does not; the derived label cap | |
 | M9 child rollouts | sections 2.1-2.4, 2.5's second refusal and `ep.materialize`, for function harnesses (450 + 500) | children train in their episode's group; a subagent a solver child mints trains on that child's outcome; inspections and their subtrees never train; a solver child's mints of `judge` and `generator` get 403; a check of an entry with children sees them, and other checks see only their entry; start slots and the grant channel under process isolation; without `child_entries`, no new metric and no channel | |
