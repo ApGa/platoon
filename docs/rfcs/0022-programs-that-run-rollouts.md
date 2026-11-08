@@ -316,11 +316,11 @@ when it is built, a template that gives the agents or the verifier a network, gr
 verifier on an image of its own (which would bring its own `/tests`) or names none of `images`. Then `materialize`
 installs the launcher with its settings (`tests/platoon/launch.json`: the grader's owner, the reward's name, the
 verifier's time limit, the artifacts, the grader's command and the replay, the variables the replay keeps, the replay
-checks and time, and a fingerprint of the `runtime_tasks` it checked against), and renames the copy to
-`<store>/<digest>`, a SHA-256 of every file with its executable bit, so that the same directory twice, or from two
-producers at once, is one task; the store also holds the files of the tasks in flight, for a producer's final check to
-read, while the producer keeps the list of them (section 9.6). Nothing a generator wrote is patched:
-it must learn the rules.
+checks and time, a fingerprint of the `runtime_tasks` it checked against, and the digest of the launcher it installed),
+and renames the copy to `<store>/<digest>`, a SHA-256 of every file with its executable bit, so that the same directory
+twice, or from two producers at once, is one task; the store also holds the files of the tasks in flight, for a
+producer's final check to read, while the producer keeps the list of them (section 9.6). Nothing a generator wrote is
+patched: it must learn the rules.
 - **What stays the producer's to refuse.** `materialize` refuses no dotfile and no module shadow among the task's own
   files (a `numpy.py`, a `.pth`): a repository's task needs its `.git`, and only the producer knows what its grader
   imports, so the producer's final check refuses those (section 9.7). A submission cannot shadow the grader's modules,
@@ -329,10 +329,12 @@ it must learn the rules.
 - **Only its own entry runs it,** or one with the same settings. A runtime task's directory says it is one, by the
   launch settings that only `materialize` writes. An entry opens one only from its own store, and only if the
   fingerprint of the `runtime_tasks` it was checked against (all but `regrade` and `store`), which also records the
-  reward's name and `verifier_timeout_multiplier`, is the entry's own, so entries that share a store and those settings
-  share their tasks. Another store's task, another entry's in a shared store whose settings differ, one checked before a
-  resumed run changed its template, and any runtime task of an entry without `runtime_tasks` are refused when they open
-  or are looked up (`env_config`), never run as ordinary tasks.
+  reward's name and `verifier_timeout_multiplier`, is the entry's own, and only if it holds this platoon's launcher (the
+  digest its settings record), so entries that share a store and those settings share their tasks, and a task stored by
+  another platoon, as before an upgrade, is never graded by the launcher it was given. Another store's task, one with
+  another platoon's launcher (materialize it again, under a new digest), another entry's in a shared store whose
+  settings differ, one checked before a resumed run changed its template, and any runtime task of an entry without
+  `runtime_tasks` are refused when they open or are looked up (`env_config`), never run as ordinary tasks.
 - **How it opens.** Its sessions run the image that `images` binds its `docker_image` to, with its `environment/`
   uploaded into the working directory: the prebuilt-image plan that a session otherwise finds only in its dataset's
   lock (`platoon/envs/harbor/locked.py`), computed from the stored files. Its separate verifier starts with
