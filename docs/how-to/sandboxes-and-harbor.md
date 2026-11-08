@@ -1893,8 +1893,8 @@ JSON, nothing but directories above an output of the replay), and scans the sour
 forbidden literals. For a replay, it checks, before it changes anything, that nothing is mounted below the working
 directory (a directory or a file, from any filesystem, which it could not put back), that the replay's user may write in
 no directory of it, by its mode bits or its access ACL, that it holds no socket or device, which it could not copy back,
-that the replay's user cannot replace it from a directory above it (the parent, and each directory above that, must be
-one only root writes in, or one with the sticky bit set), and that the launcher's own directory is not inside it. It
+that the replay's user cannot replace it from a directory above it (the parent and each directory above that: none may
+be that user's, or writable by it without the sticky bit), and that the launcher's own directory is not inside it. It
 then makes the working directory root's with the group and other write bits stripped so nothing there is the replay's
 user's to write (files and directories, at any depth); moves the replay's outputs aside and copies the rest, never
 following a link, into a pristine copy only root reads; and lends the working directory to the replay's user: its
