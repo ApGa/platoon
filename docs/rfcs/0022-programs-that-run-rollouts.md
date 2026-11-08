@@ -777,8 +777,9 @@ such a production took in (`stored.json`) those that no other production of the 
 owns alone, a solver entry's default `runtime-tasks` in the run's directory. Store entries are content-addressed and
 shared (the grading canary is one task for every production of a template), so a store that `runtime_tasks.store` names,
 which other runs may share, is never collected. An evaluation during training notes what its productions take in from
-the run's store in directories of its own, which collection does not read, so an entry that only such an evaluation and
-the garbage took in goes with the garbage. Appendix A.5 prices a crash.
+the run's store in directories of its own, below its rollouts (`<run>/rollouts/<scope>/<version>/envgen/`), and
+collection reads their `stored.json` and evidence too, so nothing that such an evaluation took in goes with the garbage.
+Appendix A.5 prices a crash.
 
 ### 9. The envgen program (experimental)
 
@@ -895,13 +896,23 @@ generated task the dataset is the policy's output, so the taxonomy flips. Four r
    for the sandboxes, the verifiers and the launcher at the gate as well as after it; the judge canary, a judge on a
    review whose answer its instruction gives, asked once per production; the toolkit's, its data verb (`judge-spec`)
    answering and the production's directory taking a file; and the collection's, a file the program writes into the
-   authoring sandbox. No canary judges a sampler or a verb that reads nothing generated, and the toolkit ships no
-   known-good input per verb: a solve whose two attempts fail as infrastructure would, one of them in its sampler, a
+   authoring sandbox. No canary judges a sampler, the platform's setup and launch of the solver's harness, which the
+   oracle never runs, or a verb that reads nothing generated, and the toolkit ships no known-good input per verb: a
+   solve whose two attempts fail as infrastructure would, one of them in its sampler or in what the platform could not
+   set up or launch (`harness_setup`, such as a toolchain the node could not stage, a gateway that cannot cap the
+   harness's calls or no route to the gateway; `harness_config`, a spec that cannot launch with the run's settings), a
    review whose judge's sampler failed it or whose sandbox did not start, `judge-spec`'s failures and a verb that a
-   signal killed from outside are censored; the generator's own sampler failure voids the production at once; and a verb
-   that crashes on every input while `judge-spec` answers is charged to the generator, loudly, since every production's
-   validity drops. Where the table names no row, this rule decides: a judge out of its time twice beside a healthy judge
-   canary is the generator's, `invalid(review_malformed)`, as a judge malformed twice is.
+   signal killed from outside are censored (a production left with too few valid solves is `void(infra)`, as when every
+   solve fails so); the generator's own sampler failure voids the production at once; and a verb that crashes on every
+   input while `judge-spec` answers is charged to the generator, loudly, since every production's validity drops. An
+   install of the solver's harness that fails in the task's sandbox runs among the task's own files, which can break it,
+   so it has a failure kind of its own, `harness_install` (M11, proposed: open question 11), and the grading canary
+   decides it as any other reproduced failure: one that infrastructure breaks on both attempts beside a healthy canary
+   is the generator's, the trade of open question 12. Each finding is a `CanaryRecord` in the evidence, of its canary's
+   kind (`grading`, `judge`, `toolkit`, or `workspace` for the collection's; `healthy` None where none ran) or, for a
+   child's failure that no canary judges, `sampler` or `platform`. Where the table names no row, this rule decides: a
+   judge out of its time twice beside a healthy judge canary is the generator's, `invalid(review_malformed)`, as a judge
+   malformed twice is.
 3. **No escape hatches.** Nothing the generator can cause maps to censoring, the deadline included.
 4. **No role pays for another's fault.** A generator fault *drops* the solver rows, since zero-advantage rows keep
    their token denominator (`platoon/train/step/step.py`); an infra fault censors the generator, never penalizes it.
@@ -909,7 +920,7 @@ generated task the dataset is the policy's output, so the taxonomy flips. Four r
 | Fault | What is observed | Verdict | Solver rows |
 |---|---|---|---|
 | infra, in the production | authoring infrastructure fails; a trusted command crashes and its canary fails; export refuses trusted input the host handed over (`fault: infra`, such as an unusable seed); fewer valid solves than the solver entry's `min_successful_group_size`; a judge outage with a failing judge canary, after backoff within the queueing allowance; an infra fault in the duplicate index; the worker dies; the deadline passes, which only infrastructure slower than the budgets allow can cause, or a usage error of the toolkit's | `void(infra)`; `void(deadline)` and `void(toolkit_usage)` for the last two | none train (lost with a dead worker) |
-| infra, in one child | a child's sandbox start or platoon-side grading fails (`verifier_start`, `verifier_trusted_launcher`), a trusted grader gives no score (`verifier_trusted_*`), a solver crashes with gateway errors or a sampler times out, unless rule 2 reproduces it with a healthy canary, which makes it the generator's; an audited failure whose review calls it infrastructure | s and n leave that member out; an audited one is replaced by the seeded rule | that member censored |
+| infra, in one child | a child's sandbox start or platoon-side grading fails (`verifier_start`, `verifier_trusted_launcher`), a trusted grader gives no score (`verifier_trusted_*`) or the solver's harness install fails in the task's sandbox (`harness_install`, proposed), unless rule 2 reproduces it with a healthy canary, which makes it the generator's; a solver crashes with gateway errors or a sampler times out, or the platform cannot set up or launch the solver's harness (`harness_setup`, `harness_config`), which no canary judges; an audited failure whose review calls it infrastructure | s and n leave that member out; an audited one is replaced by the seeded rule | that member censored |
 | generator | no bundle within the budget; a malformed bundle; export refuses what the generator wrote (`fault: generator`), or `materialize` or the final check refuses; a trusted command crashes on the content with a healthy canary; the oracle fails, disagrees with itself or takes over a quarter of the solver's budget; a no-op, a mutant or an author control passes; a metamorphic variant fails; a generated grader gives no score (`verifier_generated_*`; an `_unfinished` one once a healthy canary rules out the sandbox); a regrade disagrees on the same bytes (`verifier_flaky`); an audited failure whose review is not clean (a false negative, a grader the specification does not support, unresolved); a pass that exploits the grader; a judge malformed or out of its time twice with a healthy canary; a sampled all-fail audit that finds a false negative or an intractable task | `invalid(<kind>)` | dropped |
 | claim | the generator abstains: no viable task in the seed; 25% of abstentions are audited | `abstained(unaudited)`, `abstained(confirmed)` or `abstained(refuted)` | none |
 | duplicate | an exact or near duplicate of the archive or of a task in flight | `duplicate` | not solved |
@@ -1036,9 +1047,7 @@ run's directory), `strata` (the seed's columns that make the stratum whose exemp
   is the stage that ended the production and what `materialize` and the final check found, never what the audits found:
   those are judges' findings about the solvers' trials, and the generator's only feedback is the toolkit's validity
   check (section 9.1). The duplicate index holds the valid tasks, so that a repeat of a refused task is refused for what
-  it is. Stepping independently, the hook journals at the leader's step ends, which consume every group, and its alarms
-  read the leader's step's metrics: a generator policy on a clock of its own (section 10.2) has its metrics read by no
-  alarm.
+  it is. Stepping independently, the hook journals at the leader's step ends, which consume every group.
 - **Tasks in flight** are those that passed their final check and that the journal does not hold yet, of the current
   start or of a group its checkpoint kept, as the productions' directories record them (`final-check.json`); a
   production hands them to its final check (section 9.7), which reads their files in the store.
@@ -1054,7 +1063,7 @@ run's directory), `strata` (the seed's columns that make the stratum whose exemp
   (`.lock`): a new run whose archive already holds a journal, a resume of another run's archive outside its own
   directory, a journal shorter than the checkpoint says and a second start are refused (exit 78).
 - **Alarms and stops.** It computes its alarms from the journal and the step's metrics: exploit kinds, contamination,
-  validity, judge outages, infra censoring, ρ_G, the generator's mean advantage, masked generator rows (from
+  validity, judge outages, censoring, ρ_G, the generator's mean advantage, masked generator rows (from
   `roles/<role>/stale_share`, which the step logs under `credit: roles`, and records before its hooks run), the
   generator's mean |log r| against the solver's, the top domain's share, and `toolkit_usage`, a production that ended on
   a usage error of the toolkit's (section 9.7). Each has an action, `stop`, `warn` (logged as it starts to hold) or
@@ -1064,6 +1073,18 @@ run's directory), `strata` (the seed's columns that make the stratum whose exemp
   which supervise restarts. A resume restores the alarms' counters and clears no signal, so an alarm that stopped the
   run stops it again once its signal holds after the resume (validity once the refill window has closed, contamination
   and usage errors on the next such production), until its thresholds or its action change.
+- **Where the generator's alarms read.** Stepping independently, with the generator's role on a trained policy other
+  than the leader, on a clock of its own (section 10.2), the masked generator rows and the generator's mean |log r| are
+  read at that policy's own step ends and logged in its row, the latter against the last mean |log r| that the solver's
+  steps logged (the leader's, where the solver samples the leader); the generator's mean advantage, its groups' credit,
+  is read at the leader's. ρ_G (`generator_share`) says something only of a step that holds the solver's rows beside the
+  generator's, so it is read only where one trained policy samples both roles, at that policy's step ends (on a clock of
+  its own, outside the refill window that the leader's keep). Where the two roles sample different policies (two
+  adapters, in lockstep or not, or a solver on a policy of its own), each lane holds one role's rows, a share of 1 in
+  the generator's by construction, and where they sample one the run does not train, no step holds their rows: there the
+  alarm is off, which an INFO line of the log says, and the hook refuses a config that sets its action to anything but
+  `off` (exit 78), so section 10.2's config loads as written. One shape stays blind: a solver on a clock of its own
+  beside a generator on the leader leaves `generator_log_ratio` no solver ratio at the leader's step ends.
 - **The refill window.** The validity and share alarms skip the step ends after each start while batches hold only fast
   groups (Appendix A.3): by default ⌈p50 / p50⌉ of the latencies of the mixed productions among the journal's last 100
   (of the measured ones when none mixed), a latency being the stages' running time, and of the last 16 step durations
@@ -1214,7 +1235,7 @@ start experimental.
 | components | the estimators `running` and `roles` (M1, M2), core names that a package can no longer register; the program `platoon-envgen` and the rewards `learnability`, `tiers` and `plateau-regret` (M11); the step hook `platoon-envgen-archive` (M12); the hosted frozen-policy runtime (M12b); the control harness `platoon-artifacts` (M16) |
 | checks in `platoon.testing` | `check_runtime_tasks` (M5; its regrade case M6, its replay-check cases M5b), `check_shared_service` (M7), `check_program` (M11) |
 | metrics | `credit/running/*` (M1); `credit/role_mass/<role>`, `credit/role_weight/<role>`, `credit/role_kl/<role>` and `roles/<role>/*`, ρ_G among them (M2); `rollout_client/start_limit/releases/{ready,child}` and the grant latency (`start_limit/grant_latency_p50` and `_max`), with `child_entries` only (M9); `roles/<role>/stale_share` and the archive's `envgen_archive/*` (M12) |
-| protocols and formats | `agents.root_roles` in `identity.json` (M3); the failure kind `program_options`, and a program's options in `lock.json` (M4); the launcher, `tests/gen/grader.json`, the verdict, the report (`platoon.launcher/v1`), the launch settings, the store, the reasons `solver_output_contract` and `solver_nonreproducible`, and the failure kinds `verifier_generated_*` and `verifier_trusted_*` (M5); `verifier_flaky` and the report's `replayed_sha256` (M6); the reasons `solver_variant_failed` and `solver_hardcoded`, and the scan rule `python-numeric-literals/v1` (M5b); `RolloutLease.size` of a draw of several permits per rollout, and platoon's own key of a rollout config's `extra`, `platoon_rollout_permits` (M8); the grant channel, the key `platoon_child_entries`, the trace's `child_rollout` record of a child's root and the failure kind `child_conversion` (M9); the record's `failed_to_open` (M10); `envgen.evidence/v1` and its verdicts, `void(deadline)` and `void(toolkit_usage)` among them, the record's `rescored`, the toolkit's `envgen.<verb>/v1` and its arguments, `export.json` (`envgen.task/v1`), review tasks (`envgen.review-task/v1`) and the trial layout (M11); the archive's manifest (`envgen.archive/v1`) and journal (`envgen.journal/v1`), a production's `final-check.json` and `stored.json`, the evidence's `task.instruction` and `task.final_check`, and the final check's `checks`, `digest` and `fingerprint` (M12); rolling child permits (M13); the drain signal (M14) |
+| protocols and formats | `agents.root_roles` in `identity.json` (M3); the failure kind `program_options`, and a program's options in `lock.json` (M4); the launcher, `tests/gen/grader.json`, the verdict, the report (`platoon.launcher/v1`), the launch settings, the store, the reasons `solver_output_contract` and `solver_nonreproducible`, and the failure kinds `verifier_generated_*` and `verifier_trusted_*` (M5); `verifier_flaky` and the report's `replayed_sha256` (M6); the reasons `solver_variant_failed` and `solver_hardcoded`, and the scan rule `python-numeric-literals/v1` (M5b); `RolloutLease.size` of a draw of several permits per rollout, and platoon's own key of a rollout config's `extra`, `platoon_rollout_permits` (M8); the grant channel, the key `platoon_child_entries`, the trace's `child_rollout` record of a child's root and the failure kind `child_conversion` (M9); the record's `failed_to_open` (M10); `envgen.evidence/v1` and its verdicts, `void(deadline)` and `void(toolkit_usage)` among them, the record's `rescored`, the toolkit's `envgen.<verb>/v1` and its arguments, `export.json` (`envgen.task/v1`), review tasks (`envgen.review-task/v1`) and the trial layout, and, proposed (open question 11), the failure kind `harness_install` (M11); the archive's manifest (`envgen.archive/v1`) and journal (`envgen.journal/v1`), a production's `final-check.json` and `stored.json`, the evidence's `task.instruction` and `task.final_check`, and the final check's `checks`, `digest` and `fingerprint` (M12); rolling child permits (M13); the drain signal (M14) |
 
 ### 11. Compatibility, the golden trace and tests
 
@@ -1247,7 +1268,10 @@ start experimental.
     label's line, when a stop request comes meanwhile, where it started the group; and loading refuses platoon's own
     keys of a rollout config's `extra` in a config's own, `platoon_rollout_permits` and M9's `platoon_child_entries`,
     which no earlier release read;
-  - M11: `selfplay` is a reserved trainer name, as `interleaved` is.
+  - M11: `selfplay` is a reserved trainer name, as `interleaved` is; and, proposed (open question 11), a TOML spec's
+    install that fails in a task's sandbox (one of its commands, or a toolchain given as a path that is missing after
+    them) is an `error` of the failure kind `harness_install` on any dataset, where it was `harness_setup`, and its
+    rollout trains as before: nothing.
 - **What an opting-in config changes on purpose:** the solver entry's root takes the role `solver`; `stale_filter:
   datum`, which is run-wide, trains the fresh rows of the solver entry's partly stale groups; with `child_entries` the
   start limit's metrics gain `releases/{ready,child}`, and workers take their slots over the grant channel; and under
@@ -1279,7 +1303,7 @@ start experimental.
 | the age of child rows, as a step metric (section 2.1) | not built with M9: child rows are young | a bound that child rows approach; the trace's `child_rollout` marks let the conversion flag child rows and the step log their ages |
 | child rollouts under `platoon eval` and `platoon rollout` | they reserve no rollout permits, so their episodes would have no seats; an entry with children is evaluated during training (`eval.every`), and section 2.7's smoke trains at a learning rate of 0 | the dry run under `platoon eval` (Appendix A.6): seats and child settings per entry, its concurrency counted in permits |
 | the archive under a group admission rule | a group that a rule decides as it settles reaches the step without its draw's key, so `StepEnd.consumed` never names it, and the archive refuses such a config (section 9.6) | a step end that names those draws with their fates (RFC 0021's), and an answer for a crash between their settle and the step that takes their markers |
-| the alarms that need a signal from outside the run (Appendix A.3) | neither the journal nor the step's metrics hold judge canary agreement, the deep audits, the held-out generated set, red-team regressions, diversity, or infra censoring correlated with outcomes | evaluations that report them; for diversity, a similarity of tasks, which only the toolkit's fingerprints define |
+| the alarms that need a signal from outside the run (Appendix A.3) | neither the journal nor the step's metrics hold judge canary agreement, the deep audits, the held-out generated set, red-team regressions, diversity, or censoring correlated with outcomes | evaluations that report them; for diversity, a similarity of tasks, which only the toolkit's fingerprints define |
 
 ### 13. Relation to other RFCs
 
@@ -1402,6 +1426,29 @@ a mixture-of-experts base.
     stop, and the share warning then go live on a known schedule, where M12's window stays open, and those alarms blind,
     for as long as slower productions keep raising it. Proposed: choose with the dry run's step durations and latencies,
     which show how far the window grows within a start. Decide before study 1.
+11. **The failure kind `harness_install`.** M11 gives a TOML spec's install that fails in a task's sandbox, among the
+    task's own files (one of its commands, or a toolchain given as a path that is missing after them), a failure kind of
+    its own, `harness_install`, where it was `harness_setup`, so that envgen can censor what only the platform causes
+    and leave to rule 2 what the task's files can break (section 9.2). The change reaches every dataset, not envgen
+    alone: such a rollout is still an `error` that trains nothing, but a dashboard or a filter that counts
+    `harness_setup` finds those failures under the new kind. Options: keep the kind, as built; or keep `harness_setup`
+    for every setup failure and mark an install among the task's files in the outcome's metadata, which envgen reads, so
+    that no user sees a change, while the failure kind goes on calling the platform's what the task's image or files may
+    have caused. Proposed: keep the kind, which tells a user of any dataset where to look (the task's image or files,
+    not the platform), and which M11's changelog announces. Decide before M11's pull request opens.
+12. **An install that infrastructure breaks on one node.** The grading canary runs the oracle, which never installs the
+    solver's harness, so it cannot fail for what breaks an install: a `harness_install` that reproduces beside a healthy
+    canary is the generator's, `invalid(harness_install)` at a reward of −1, also where infrastructure broke both
+    attempts on the worker's node (a full disk, say), where the retry and the canary run too. A break on every node is
+    loud, as a toolkit verb that crashes on every input is (rule 2): every production's validity drops, and the validity
+    alarm stops the run. A break on one node of many is quiet: validity drops by that node's share. Options: name the
+    trade, as section 9.2 does and M11 builds; or split further, with a canary of the install's own, the solver's
+    harness installed on the grading canary's task, on the same service and image and among files no generator wrote, so
+    that a `harness_install` that reproduces beside a failing install canary is infrastructure's and censored. That
+    canary runs only where an install reproduces, once per stage, and the solve stage's budget gains a sandbox start and
+    the install's time limit, which the deadline must cover (open question 9). Proposed: split further before study 2,
+    at scale; on study 1's one node a lasting break fails every production, which the validity alarm stops. Decide
+    before study 2.
 
 ## Appendix A: envgen's estimates and defaults
 
@@ -1449,7 +1496,7 @@ reads that window at each step end until it closes (section 9.6, open question 1
 | validity | below 50% for 3 steps after step 10, or 20 points below its maximum | stop |
 | judge canaries; judge outages | agreement below 90%; 10 outage-censored productions in a row | stop |
 | a held-out generated set (accepted tasks on seeds never trained on) | more than 2 standard errors below its first 3 evaluations, twice | stop |
-| infra censoring | above 5% of productions, or correlated with outcomes | investigate |
+| censoring (every void production) | above 5% of productions, or correlated with outcomes | investigate |
 | ρ_G; the per-step mean of the generator's advantages | outside [0.03, 0.30]; above 0.5 in magnitude for 5 steps | review the share |
 | masked generator rows; the generator's mean \|log r\| | above 1% over 10 steps; above 2 × the solver's | raise the bound; consider two adapters |
 | diversity (Vendi score per task); the top domain's share | below half its value at the start; above 50% | turn on the generator's `kl` |
@@ -1461,12 +1508,16 @@ toolkit's (section 9.7). Its windows: the exploit kinds over the last 200 measur
 `task_exploit`, and the final check's `leak` and `contamination`), against a base rate measured before training
 (`exploits.base_rate`); validity over the last 32 measured productions (a void one is not measured), counted at the step
 ends from step 10 that journaled one, and 20 points below its most over full windows; judge outages, productions voided
-by a review that could not be had or a failing judge canary; infra censoring, every void production, over the last 100,
-at least 20; the top domain's share of the last 100 valid productions, at least 20; and masked generator rows from the
-step's `roles/<role>/stale_share`. A production that left no evidence counts as `void(no_evidence)`. Not built, since
-neither the journal nor the step's metrics hold them, each needing a signal from an evaluation or from outside the run
-(section 12): judge canary agreement, the deep audits, the held-out generated set, red-team regressions, diversity, and
-infra censoring correlated with outcomes.
+by a review that could not be had or a failing judge canary; censoring (`censoring`, its signal `censored_share`), every
+void production whatever voided it, over the last 100, at least 20, whose line, when it holds, counts each kind; the top
+domain's share of the last 100 valid productions, at least 20; and masked generator rows from the step's
+`roles/<role>/stale_share`. A production that left no evidence counts as `void(no_evidence)`. The generator's alarms
+read its rows where they train (section 9.6): its masked rows and its mean |log r| at its policy's own step ends when
+that policy steps on a clock of its own, the latter against the solver's last; ρ_G only where one trained policy samples
+both roles, and off elsewhere; and a solver on a clock of its own beside a generator on the leader leaves the
+generator's mean |log r| no solver ratio to compare. Not built, since neither the journal nor the step's metrics hold
+them, each needing a signal from an evaluation or from outside the run (section 12): judge canary agreement, the deep
+audits, the held-out generated set, red-team regressions, diversity, and censoring correlated with outcomes.
 
 **A.4 Judges.** The judge canary set holds 30 or more items with known verdicts (false negatives, clean
 failures, hacked and clean passes, leaky tasks), and `eval.every` runs it about every 6 h. Deep audits re-audit a
