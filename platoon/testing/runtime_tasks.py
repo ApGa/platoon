@@ -30,19 +30,25 @@ artifact (``missing_artifact``) and a replay that fails (``replay_fails``) score
 (``variant_followed``), one that computes the answer without reading its inputs fails the variant (``variant_ignored``,
 ``solver_variant_failed``), one that states the answer is hardcoded (``hardcoded_literal``, ``solver_hardcoded``), and a
 variant's replay can neither change what the replay wrote, which waits as root's, nor read the grader's files
-(``variant_sealed``: its wrong answer scores 0); a replay can read neither the grader's files nor the copy of
-the answer the agents published in ``/logs/artifacts``, and cannot write a reward (``replay_sealed``); a module of the
-submission's never shadows one the grader imports (``module_shadow``); a grader that declares its measurement invalid
-is ``verifier_generated_protocol`` (``invalid_grader``), one that crashes after a verdict of 0 is
+(``variant_sealed``: its wrong answer scores 0); a replay can read neither the grader's files nor the copy of the answer
+the agents published in ``/logs/artifacts``, and cannot write a reward (``replay_sealed``); a replay runs in the working
+directory at its own path, so one that reads and writes its files by their absolute paths reproduces its output, which
+the grader grades in place of the submitted one (``absolute_paths``), as a variant's replay, in the working directory
+with the variant's inputs laid over it, gives what the variant expects (``variant_absolute_paths``); and the grader
+finds the working directory as it was before the replay, with the replayed output, however the replay changed its inputs
+and its code or left files beside its output (``restored_inputs``), as each variant's replay finds it, with the
+variant's inputs laid over it, however the replays before it changed it (``variant_restored``); a module of the
+submission's never shadows one the grader imports (``module_shadow``); a grader that declares its measurement invalid is
+``verifier_generated_protocol`` (``invalid_grader``), one that crashes after a verdict of 0 is
 ``verifier_generated_exit`` (``crash_after_zero``), and one that kills the launcher and writes a reward of its own is
 ``verifier_generated_unfinished`` (``kills_launcher``); one that writes a reward file of its own (``own_reward_file``),
-leaves a process that keeps writing one (``lingering_writer``) or writes what a verifier classifier would match into
-the verifier's log (``log_censor``) gets the launcher's reward; a trusted grader that crashes is
-``verifier_trusted_exit`` (``trusted_grader_crash``); and a grader that flips a coin is ``verifier_flaky``
-(``flaky_grader``), as its regrades in fresh verifiers find (``runtime_tasks.regrade``): the case grades the same
-submission again, up to :data:`FLAKY_GRADES` times, while each grade is the grader's score that every regrade gave
-again, which a coin flip's is half the time with one regrade.  The solution reads ``data.txt``, which only the task's
-uploaded ``environment/`` holds, and its replay writes the same bytes each time.
+leaves a process that keeps writing one (``lingering_writer``) or writes what a verifier classifier would match into the
+verifier's log (``log_censor``) gets the launcher's reward; a trusted grader that crashes is ``verifier_trusted_exit``
+(``trusted_grader_crash``); and a grader that flips a coin is ``verifier_flaky`` (``flaky_grader``), as its regrades in
+fresh verifiers find (``runtime_tasks.regrade``): the case grades the same submission again, up to :data:`FLAKY_GRADES`
+times, while each grade is the grader's score that every regrade gave again, which a coin flip's is half the time with
+one regrade.  The solution reads ``data.txt``, which only the task's uploaded ``environment/`` holds, and its replay
+writes the same bytes each time.
 
 The tasks it takes in stay in the environment's store.  The experimental runtime-task API (``platoon.experimental``)
 can change in a minor release, and this check changes with it.
@@ -91,6 +97,10 @@ GRADES = (
     "hardcoded_literal",
     "variant_sealed",
     "replay_sealed",
+    "absolute_paths",
+    "variant_absolute_paths",
+    "restored_inputs",
+    "variant_restored",
     "module_shadow",
     "invalid_grader",
     "crash_after_zero",
@@ -106,8 +116,9 @@ GRADES = (
 FLAKY_GRADES = 20
 _FLAKY = "verifier_flaky"
 #: The replay checks of the cases that have them (``variant_overlay``, ``variant_followed``, ``variant_ignored``,
-#: ``hardcoded_literal``, ``variant_sealed``): a variant whose ``data.txt`` holds 50, so that the solution, which reads
-#: it, writes 100, and the answer, 42, as a forbidden literal of ``solve.py``.
+#: ``hardcoded_literal``, ``variant_sealed``, ``variant_absolute_paths``, ``variant_restored``): a variant whose
+#: ``data.txt`` holds 50, so that the solution, which reads it, writes 100, and the answer, 42, as a forbidden literal
+#: of ``solve.py``.
 REPLAY_CHECKS: dict[str, Any] = {
     "variants": [
         {
@@ -169,6 +180,64 @@ for name in ("reward.json", "reward.txt"):
         pass
 with open("answer.json", "w") as stream:
     json.dump({"answer": answer}, stream)
+"""
+# The lines of a solution that leave, as the submission, a solve.py that reads data.txt and writes answer.json by
+# their absolute paths in the working directory, where the solution runs (as the verifier's replay does), and then a
+# wrong answer.json, 41, which the replayed one replaces.
+_ABSOLUTE_SOLVE = """here=$(pwd)
+cat > solve.py <<PLATOON_SOLVE
+import json
+
+with open("$here/data.txt") as stream:
+    answer = 2 * int(stream.read())
+with open("$here/answer.json", "w") as stream:
+    json.dump({"answer": answer}, stream)
+PLATOON_SOLVE
+python3 solve.py
+echo '{"answer": 41}' > answer.json
+"""
+# A submission whose replay writes the right answer, then changes its input and its own code and leaves files and a
+# directory beside its output, none of which the grader may find (_RESTORED_GRADER).
+_TAMPERING_SOLVE = """import json
+import os
+
+with open("data.txt") as stream:
+    answer = 2 * int(stream.read())
+with open("answer.json", "w") as stream:
+    json.dump({"answer": answer}, stream)
+with open("data.txt", "w") as stream:
+    stream.write("20\\n")
+with open("solve.py", "w") as stream:
+    stream.write("pass\\n")
+with open("extra.txt", "w") as stream:
+    stream.write("left by the replay\\n")
+os.makedirs(os.path.join("left", "inner"))
+with open(os.path.join("left", "inner", "junk"), "w") as stream:
+    stream.write("x")
+"""
+# Passes only on the right answer, the task's data.txt, the submitted solve.py, and nothing that the replay left.
+_RESTORED_GRADER = """import json
+import os
+
+workdir = os.environ["PLATOON_WORKDIR"]
+
+
+def read(name):
+    with open(os.path.join(workdir, name)) as stream:
+        return stream.read()
+
+
+try:
+    passed = (
+        json.loads(read("answer.json")) == {"answer": 42}
+        and read("data.txt").strip() == "21"
+        and read("solve.py").startswith("import json")
+        and not any(os.path.lexists(os.path.join(workdir, name)) for name in ("extra.txt", "left"))
+    )
+except (OSError, ValueError):
+    passed = False
+with open(os.environ["PLATOON_VERDICT"], "w") as stream:
+    json.dump({"passed": passed, "checks": [{"id": "restored", "passed": passed}]}, stream)
 """
 _GRADERS = {
     "invalid": """import json, os
@@ -242,23 +311,26 @@ with open("answer.json", "w") as stream:
     json.dump({"answer": 42}, stream)
 """
 # A submission whose replay writes a wrong answer, 41, and whose replay of the variant (a data.txt of 50) gives what the
-# variant expects but first tries what a sealed verifier keeps it from: replace what the replay wrote, which waits
-# beside it as root's, with the right answer, and read the grader's files.  It scores 1 only if either leaks.
+# variant expects but first tries what a sealed verifier keeps it from: replace what the replay wrote, which waits as
+# root's in the launcher's directory, beside the replay's home, with the right answer, and read the grader's files.
+# It scores 1 only if either leaks.
 _SEALED_SOLVE = """import json
+import os
 
 with open("data.txt") as stream:
     data = int(stream.read())
 answer = 41
 if data == 50:
+    held = os.path.join(os.path.dirname(os.environ["HOME"]), "replayed", "answer.json")
     try:
-        with open("../replayed/answer.json", "w") as stream:
+        with open(held, "w") as stream:
             json.dump({"answer": 6 * 7}, stream)
     except OSError:
         pass
     try:
         with open("/tests/gen/grader.json") as stream:
             stream.read()
-        with open("../replayed/answer.json", "w") as stream:
+        with open(held, "w") as stream:
             json.dump({"answer": 6 * 7}, stream)
     except OSError:
         pass
@@ -556,6 +628,18 @@ _GRADE_CASES: dict[str, tuple[dict[str, Any], str, tuple[str, float | None, str 
     ),
     "variant_sealed": ({"checks": True, "solve": _solve_line(_SEALED_SOLVE)}, "generated", ("scored", 0.0, None, None)),
     "replay_sealed": ({"solve": _PUBLISH + _solve_line(_PRYING_SOLVE)}, "generated", ("scored", 0.0, None, None)),
+    "absolute_paths": ({"solve": _ABSOLUTE_SOLVE}, "generated", ("scored", 1.0, None, None)),
+    "variant_absolute_paths": ({"checks": True, "solve": _ABSOLUTE_SOLVE}, "generated", ("scored", 1.0, None, None)),
+    "restored_inputs": (
+        {"solve": _solve_line(_TAMPERING_SOLVE), "grader": _RESTORED_GRADER},
+        "generated",
+        ("scored", 1.0, None, None),
+    ),
+    "variant_restored": (
+        {"checks": True, "solve": _solve_line(_TAMPERING_SOLVE), "grader": _RESTORED_GRADER},
+        "generated",
+        ("scored", 1.0, None, None),
+    ),
     "module_shadow": (
         {
             "data": "20",

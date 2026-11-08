@@ -328,10 +328,10 @@ class MaterializedTask:
 @dataclass(frozen=True)
 class ReplayVariant:
     """A variant of a runtime task's replay (:class:`ReplayChecks`): once the replay wrote every output again, the
-    launcher replays the submission once more, as it replayed it, in a fresh copy of the working directory with
-    ``inputs`` laid over it, and the outputs that replay writes must hold what ``expected`` lists, each within its
-    ``tolerance``.  A submission that ignores its inputs, such as one that states the answer, writes the working
-    inputs' answer again, and fails (``solver_variant_failed``)."""
+    launcher replays the submission once more, as it replayed it, in place, in the working directory as it was before
+    the replay with ``inputs`` laid over it, and the outputs that replay writes must hold what ``expected`` lists, each
+    within its ``tolerance``.  A submission that ignores its inputs, such as one that states the answer, writes the
+    working inputs' answer again, and fails (``solver_variant_failed``)."""
 
     # The variant's name, its own among the task's: letters, digits, _, . and -, at most 128 characters.
     name: str
@@ -856,9 +856,9 @@ def _artifact_sources(config: Mapping[str, Any] | None) -> list[str]:
 
 def read_grader_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
     """``tests/gen/grader.json``: ``{"command": [...], "replay": {"command": [...], "outputs": [...]}}``, the grader's
-    argv, run in ``/tests/gen``, and the replay's, run in a copy of the working directory, with the outputs it writes
-    there (relative paths); ``replay`` may be left out, and nothing else may be there.  The manifest and None, or None
-    and why it breaks that."""
+    argv, run in ``/tests/gen``, and the replay's, run in the working directory, with the outputs it writes there
+    (relative paths); ``replay`` may be left out, and nothing else may be there.  The manifest and None, or None and
+    why it breaks that."""
 
     where = f"{TESTS_DIR}/{GEN_DIR}/{GRADER_MANIFEST}"
     try:

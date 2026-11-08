@@ -147,7 +147,7 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`MaterializedTask`](#platoon-experimental-materializedtask) | What `materialize` made of a directory: a runtime task, or why there is none. |
 | [`RuntimeTasksConfig`](#platoon-experimental-runtimetasksconfig) | How an environment entry's runtime tasks run: `service_kwargs.runtime_tasks` of a Harbor environment. |
 | [`ReplayChecks`](#platoon-experimental-replaychecks) | The replay checks of a runtime task, which `materialize(source, replay_checks=...)` gives it, beside its replay: the task's launcher scans the submission's sources for `forbidden_literals` before the replay, and once the replay wrote every output again, replays each of `variants` on its own inputs. A check that fails is the solver's 0 (`solver_hardcoded`, `solver_variant_failed`), never a censored measurement. Their data lie in the task's `tests/gen`, beside its grader and as sealed as it is; `materialize` refuses data the launcher could not use, as data that a grade finds unusable all the same is the protocol fault of the grader's owner (`verifier_generated_protocol`, `verifier_trusted_protocol`). Built from a mapping of its fields (`coerce`), whose variants and forbidden literals may be mappings too. |
-| [`ReplayVariant`](#platoon-experimental-replayvariant) | A variant of a runtime task's replay (`ReplayChecks`): once the replay wrote every output again, the launcher replays the submission once more, as it replayed it, in a fresh copy of the working directory with `inputs` laid over it, and the outputs that replay writes must hold what `expected` lists, each within its `tolerance`. A submission that ignores its inputs, such as one that states the answer, writes the working inputs' answer again, and fails (`solver_variant_failed`). |
+| [`ReplayVariant`](#platoon-experimental-replayvariant) | A variant of a runtime task's replay (`ReplayChecks`): once the replay wrote every output again, the launcher replays the submission once more, as it replayed it, in place, in the working directory as it was before the replay with `inputs` laid over it, and the outputs that replay writes must hold what `expected` lists, each within its `tolerance`. A submission that ignores its inputs, such as one that states the answer, writes the working inputs' answer again, and fails (`solver_variant_failed`). |
 | [`ForbiddenLiterals`](#platoon-experimental-forbiddenliterals) | The forbidden literals of a runtime task (`ReplayChecks`): numbers its submission's sources may not state, such as the answers it must compute. Before the replay, the launcher reads each source as Python, by the rule `scan` names, and a number one states within the tolerance of a forbidden one scores 0 (`solver_hardcoded`). |
 
 ## Task samplers
@@ -2465,10 +2465,10 @@ class ReplayVariant
 ```
 
 A variant of a runtime task's replay (`ReplayChecks`): once the replay wrote every output again, the
-launcher replays the submission once more, as it replayed it, in a fresh copy of the working directory with
-`inputs` laid over it, and the outputs that replay writes must hold what `expected` lists, each within its
-`tolerance`.  A submission that ignores its inputs, such as one that states the answer, writes the working
-inputs' answer again, and fails (`solver_variant_failed`).
+launcher replays the submission once more, as it replayed it, in place, in the working directory as it was before
+the replay with `inputs` laid over it, and the outputs that replay writes must hold what `expected` lists, each
+within its `tolerance`.  A submission that ignores its inputs, such as one that states the answer, writes the
+working inputs' answer again, and fails (`solver_variant_failed`).
 
 | Field | Type | Default | Description |
 |---|---|---|---|
