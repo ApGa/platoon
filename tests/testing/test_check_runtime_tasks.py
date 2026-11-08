@@ -237,8 +237,12 @@ def test_the_cases_scripts_are_python_that_compiles():
     from platoon.testing import runtime_tasks
 
     scripts = {f"grader {name}": source for name, source in runtime_tasks._GRADERS.items()}
-    for name in ("_HONEST_GRADER", "_FRACTION_GRADER", "_SOLVE", "_PRYING_SOLVE", "_FAILING_SOLVE", "_SHADOW"):
+    names = ("_HONEST_GRADER", "_FRACTION_GRADER", "_RESTORED_GRADER", "_SOLVE", "_PRYING_SOLVE", "_FAILING_SOLVE")
+    for name in (*names, "_TAMPERING_SOLVE", "_SHADOW"):
         scripts[name] = getattr(runtime_tasks, name)
+    # The solve.py that _ABSOLUTE_SOLVE's lines write, with the working directory the shell puts in.
+    written = runtime_tasks._ABSOLUTE_SOLVE.split("<<PLATOON_SOLVE\n", 1)[1].split("PLATOON_SOLVE\n", 1)[0]
+    scripts["_ABSOLUTE_SOLVE"] = written.replace("$here", "/app")
     for name, source in scripts.items():
         compile(source, name, "exec")
 
