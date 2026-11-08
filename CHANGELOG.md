@@ -59,8 +59,8 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
     replay wrote. The replay's home and temporary directory are a directory of its own, removed after it, and its time
     leaves twice as long as the copy took for putting the directory back; the System V shared memory, semaphores and
     message queues it leaves are removed too, and one that cannot be removed is the solver's 0. A working directory
-    below a directory in which the replay's user could replace it, by mode bits or ACL (the parent, and each directory
-    above it, must be one only root writes in or one with the sticky bit set), one that holds the launcher's own
+    below a directory in which the replay's user could replace it, by mode bits or ACL (the parent and each directory
+    above it: none may be that user's, or writable by it without the sticky bit), one that holds the launcher's own
     directory, and one with anything mounted below it or a socket or a device in it are faults on the trusted side
     (`verifier_trusted_launcher`), found before anything there changes; a full filesystem as the directory is put back
     is judged as one as the outputs are put back, and with nothing of the replay's left where every user may write,
