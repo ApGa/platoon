@@ -300,7 +300,7 @@ keeps what it writes root's. It:
    - **before the replay**, it checks that nothing is mounted below the working directory and that it holds no socket or
      device, none of which the launcher could put back, that no directory of it, itself included, is one that the image
      or the template leaves open to the replay's user (by mode bits or access ACL), that no directory above it lets that
-     user replace what it holds (each must be one only root writes in, or one with the sticky bit set), so that the
+     user replace what it holds (none may be that user's, or writable by it without the sticky bit), so that the
      replay cannot move the working directory away, and that the launcher's own directory is not inside it; each fails
      closed, the trusted side's fault, before anything there changes. It then makes everything in the working directory,
      files and directories at any depth, root's and closed to other users' writes, moves the submitted outputs to
@@ -352,7 +352,7 @@ since a grader that runs as root could write what they read.
 | the replay fails, outlives its time, lacks its own program (`./run.sh`), leaves a process the sweep cannot signal or end, leaves more than the launcher removes in its time (section 3.4), takes the room the launcher's later steps need, or does not write an output again; copying the working directory aside and back leaves the replay no time, or putting it back outlives the replay's time | `scored` 0, reason `solver_nonreproducible` |
 | the grader exits nonzero or cannot start, outlives its time, writes no verdict or one beyond the schema (`invalid` included: a grader cannot censor), or leaves what cannot be killed; a replay command of the image's own that cannot start | `invalid`, `<owner>_exit`, `_timeout`, `_protocol` or `_isolation` |
 | the launcher fails once the grader ran, exits nonzero, leaves no report or outlives the verifier's time limit; grading cannot kill what was left or read the verifier's output | `invalid`, `<owner>_unfinished`, whatever the reward file says |
-| the launcher cannot do its own part before the grader runs: no `python3`, no root, no replay user, a seal that does not take; a working directory that the image or the template leaves open to the replay's user at any depth, that holds a mount point, a socket, a device or the launcher's own directory, or that lies below a directory from which that user could replace it (by mode bits or ACL); a working directory it cannot put back, but for a full filesystem (section 3.4) | `invalid`, `verifier_trusted_launcher` |
+| the launcher cannot do its own part before the grader runs: no `python3`, no root, no replay user, a seal that does not take; a working directory that the image or the template leaves open to the replay's user at any depth, that holds a mount point, a socket, a device or the launcher's own directory, or that lies below a directory from which that user could replace it (by mode bits or ACL), or whose mounts it cannot read (`/proc/self/mountinfo`); outputs it cannot hold as root's, or a working directory it cannot put back, but for a full filesystem (section 3.4) | `invalid`, `verifier_trusted_launcher` |
 
 `<owner>` is `verifier_generated` for a generated grader and `verifier_trusted` for a trusted one; what fails before
 the launcher starts (the verifier's sandbox, the artifacts' upload) keeps platoon's kinds, such as `verifier_start`.
@@ -402,7 +402,9 @@ task), and their data lie in the task's sealed `tests/gen`:
   tolerance, else the submission scores 0, reason `solver_variant_failed`, as it does where the variant's time leaves
   none for putting the directory back after it, or the put back outlives that time; no variant runs after one that
   fails. What the replay wrote waits meanwhile as root's in the launcher's own directory, where no variant's replay,
-  run as the same user, can reach it, and goes back in its place after the last variant.
+  run as the same user, can reach it, and goes back in its place after the last variant. That return is the replay's own
+  step: one that ends past the last replay's time and the window after it, or finds no room once the replays left files
+  where every user may write or IPC objects, is `solver_nonreproducible`, not `solver_variant_failed`.
 - **Forbidden literals**: a JSON file that lists `{value, tolerance}`, and the submission's Python sources to scan (its
   `.py` artifacts, never a replay's output). Before the replay, the launcher parses each with the verifier's `python3`
   by a named rule, `python-numeric-literals/v1` (its int, float and complex constants under their chains of unary
