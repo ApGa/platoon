@@ -104,7 +104,7 @@ def test_a_materialize_that_takes_artifacts_outside_the_working_directory_fails_
 
 
 def test_a_materialize_that_lets_a_variant_replace_the_submission_fails_that_case(options, monkeypatch):
-    monkeypatch.setattr(runtime, "_overlay_problem", lambda task_dir, variant, protected: None)
+    monkeypatch.setattr(runtime, "_overlay_problem", lambda task_dir, kind, owner, path, protected: None)
 
     with pytest.raises(AssertionError) as failed:
         check_runtime_tasks(options, grade=False)

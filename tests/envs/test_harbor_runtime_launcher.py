@@ -4772,7 +4772,8 @@ def test_a_conditions_replay_that_outlives_its_time_is_the_solvers_zero(verifier
     _, reward, report = verifier.run()
 
     assert (reward, report["reason"]) == ({"reward": 0}, "solver_condition_failed")
-    assert report["detail"].startswith("the replay of condition sixty outlived its 1.9"), report["detail"]
+    found = re.fullmatch(r"the replay of condition sixty outlived its ([0-9.]+) s", report["detail"])
+    assert found is not None and 1.0 < float(found.group(1)) <= 2.0, report["detail"]  # less putting the directory back
     assert report["conditions"]["ran"][1]["timed_out"]
 
 
