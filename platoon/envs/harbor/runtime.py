@@ -57,9 +57,13 @@ A task with a replay may also have **replay checks** (:class:`ReplayChecks`), wh
 gives and the task's launcher settings record, with their data in the task's ``tests/gen`` (checked first,
 :func:`replay_check_problems`): the literals its submission's sources may not state (:class:`ForbiddenLiterals`), and
 variants of its inputs, on which the replay must give what each expects (:class:`ReplayVariant`).  Each grade runs
-them, a regrade's too; one that fails is the solver's 0 (``solver_hardcoded``, ``solver_variant_failed``).  The
-caller may also give each replay, the replay's own and each variant's, a time of its own (``replay_timeout_s``), such
-as the time a producer told its solver, which the settings record too.
+them, a regrade's too; one that fails is the solver's 0 (``solver_hardcoded``, ``solver_variant_failed``).  A
+task's ``tests/gen/grader.json`` may list **hidden evaluation conditions** in ``replay.conditions``, input sets in its
+``tests/gen`` that replace public inputs (:func:`condition_problems`): each grade replays the submission once per
+condition and gives the grader what each wrote, in ``$PLATOON_CONDITIONS``; a condition's replay that fails is the
+solver's 0 (``solver_condition_failed``), and a regrade compares what they wrote too (``conditions_sha256``).  The
+caller may also give each replay, the replay's own, each variant's and each condition's, a time of its own
+(``replay_timeout_s``), such as the time a producer told its solver, which the settings record too.
 """
 
 from __future__ import annotations
@@ -123,7 +127,7 @@ MAX_OUTPUT_BYTES = 64 * 2**20
 #: ceiling as well passes ``replay_address_space_bytes``.
 DEFAULT_REPLAY_ADDRESS_SPACE_BYTES: int | None = None
 #: The largest ``tests/gen/grader.json``.
-MAX_MANIFEST_BYTES = 64 * 1024
+MAX_MANIFEST_BYTES = 256 * 1024
 #: How deeply a runtime task's ``task.toml``, and the template, may nest tables and arrays, the document's own table
 #: included: deeper TOML is refused, before it is parsed where its text shows it (:func:`load_toml`).  Python's TOML
 #: parser gives up at depths of its own, all deeper than this: where the stack it was called with reaches the
@@ -600,19 +604,21 @@ def materialize_task(
     replay_timeout_s: float | None = None,
 ) -> MaterializedTask:
     """Make the task directory ``source`` a runtime task in ``store`` under ``config`` (the module docstring), or say
-    why it cannot be one.  ``load`` reads a task directory as the environment reads its runtime tasks; ``reward_key``
-    is the name of the reward the launcher writes (the reward contract's first), and ``timeout_multiplier`` scales the
+    why it cannot be one.  ``load`` reads a task directory as the environment reads its runtime tasks; ``reward_key`` is
+    the name of the reward the launcher writes (the reward contract's first), and ``timeout_multiplier`` scales the
     verifier's time limit, as the environment's ``verifier_timeout_multiplier``.  ``grader_owner`` says who wrote the
     task's grader: ``generated`` (by the producer) or ``trusted`` (trusted code), which names the failure kinds of its
     non-scores and says whether its scores are regraded (:func:`regrade_count`).  ``replay_address_space_bytes`` caps
-    the address space each process of the task's replays may reserve, the replay's own and each variant's
-    (``RLIMIT_AS``; :data:`DEFAULT_REPLAY_ADDRESS_SPACE_BYTES`, None, sets no per-process cap).  ``replay_checks``
-    (:class:`ReplayChecks`) are the task's replay checks, whose data the directory must hold
-    (:func:`replay_check_problems`).  ``replay_timeout_s`` is the most each replay of the task takes, its own and each
-    variant's, such as the time a producer told its solver: without it, the replays share half of the time the
-    launcher has; with it, the grader gets what they leave, which must be some (:func:`launcher.replay_time_problem`).
-    Problems of ``source`` come back as problems; a ``ValueError`` for an owner, a replay address space that is not a
-    positive integer, checks or a replay time that are none, or replays that would leave the grader no time, and an
+    the address space each process of the task's replays may reserve, the replay's own, each variant's and each
+    condition's (``RLIMIT_AS``; :data:`DEFAULT_REPLAY_ADDRESS_SPACE_BYTES`, None, sets no per-process
+    cap).  ``replay_checks`` (:class:`ReplayChecks`) are the task's replay checks, whose data the directory must hold
+    (:func:`replay_check_problems`); the hidden evaluation conditions its ``grader.json`` lists must be ones the
+    launcher can run (:func:`condition_problems`).  ``replay_timeout_s`` is the most each replay of the task takes, its
+    own, each variant's and each condition's, such as the time a producer told its solver: without it, the replays share
+    half of the time the launcher has; with it, the grader gets what they leave, which must be some
+    (:func:`launcher.replay_time_problem`).  Problems of ``source`` come back as problems, conditions too many for the
+    grader to get any time among them; a ``ValueError`` for an owner, a replay address space that is not a positive
+    integer, checks or a replay time that are none, or a replay and variants that would leave the grader no time, and an
     ``OSError`` writing the store, are raised."""
 
     if grader_owner not in GRADER_OWNERS:
@@ -678,6 +684,16 @@ def materialize_task(
         if replay_timeout_s is not None:
             settings["replay_timeout_s"] = replay_timeout_s
             if (why := launcher.replay_time_problem(settings)) is not None:
+                bare = {**settings, "replay": {**manifest["replay"], "conditions": []}}
+                if manifest["replay"].get("conditions") and launcher.replay_time_problem(bare) is None:
+                    # The caller's time fits the replay and its variants: the task's own conditions are too many.
+                    count = len(manifest["replay"]["conditions"])
+                    return _refused(
+                        [
+                            f"{TESTS_DIR}/{GEN_DIR}/{GRADER_MANIFEST} lists {count} conditions, whose replays leave "
+                            f"the grader no time: {why} (the verifier's time limit, scaled); list fewer conditions"
+                        ]
+                    )
                 raise ValueError(f"replay_timeout_s cannot be given: {why} (the verifier's time limit, scaled)")
         text = _settings_text(settings)
         if len(text) > min(launcher.MAX_CONFIG_BYTES, MAX_SETTINGS_BYTES):
@@ -867,10 +883,11 @@ def condition_problems(
     whose replay checks are ``checks``, cannot be run, each one sentence: inputs the launcher could not use, read as it
     reads them (``launcher.load_conditions``: no directory); inputs that hold no file, one at or around a path the
     submission holds or the replay writes, or one the task's ``environment/`` holds as a directory where the inputs
-    hold a file, or the reverse; two conditions whose inputs lie one in the other; a condition's inputs that lie in a
-    variant's or hold them, or hold a variant's expected outputs or the forbidden literals, which the condition's
-    replay would read.  Whether they hold the grader's hidden targets ``materialize`` cannot tell: a task's producer
-    checks that."""
+    hold a file, or the reverse, or a file ``environment/`` does not hold as one (a condition replaces public inputs,
+    and adds none: :func:`_unknown_input`); two conditions whose inputs lie one in the other; a condition's inputs
+    that lie in a variant's or hold them, or hold a variant's expected outputs or the forbidden literals, which the
+    condition's replay would read.  Whether they hold the grader's hidden targets ``materialize`` cannot tell: a task's
+    producer splits a condition's inputs from its targets, which lie elsewhere in ``tests/gen``, and checks that."""
 
     conditions = list((replay or {}).get("conditions") or ())
     if not conditions:
@@ -883,6 +900,8 @@ def condition_problems(
         _, problem = launcher.load_conditions({"conditions": [condition]}, tests)
         if problem is None:
             problem = _overlay_problem(task_dir, "condition", name, inputs, protected)
+        if problem is None:
+            problem = _unknown_input(task_dir, name, inputs)
         if problem is not None:
             problems.append(_without(problem, task_dir))
     for index, condition in enumerate(conditions):
@@ -903,6 +922,25 @@ def condition_problems(
         if forbidden is not None and _below(forbidden.path, inputs):
             problems.append(f"the forbidden literals lie in condition {name}'s inputs")
     return problems
+
+
+def _unknown_input(task_dir: Path, name: str, inputs: str) -> str | None:
+    """Why the inputs ``inputs`` of the condition ``name``, a directory of the task in ``task_dir``, hold a file the
+    task's ``environment/`` does not hold as a regular file at its path, or None: a condition replaces public inputs
+    and adds none, so that the replay command, which runs on the public inputs too, reads the same files on each, and
+    a working directory that differs there at grade time is what the submission left, the solver's 0."""
+
+    root, environment = task_dir / inputs, task_dir / ENVIRONMENT_DIR
+    for directory, _, names in sorted(os.walk(root)):
+        for file in sorted(names):
+            shown = (Path(directory) / file).relative_to(root).as_posix()
+            there = environment / shown
+            if there.is_symlink() or not there.is_file():
+                return (
+                    f"condition {name}'s inputs hold {shown}, which {ENVIRONMENT_DIR}/ does not hold as a file: a "
+                    "condition replaces public inputs, and adds none"
+                )
+    return None
 
 
 def _artifact_sources(config: Mapping[str, Any] | None) -> list[str]:

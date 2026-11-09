@@ -116,6 +116,34 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   that names its files by their absolute paths passes its variant, and one that changes its inputs and its code finds
   them as they were in its variant's replay, as the grader does ([Runtime
   tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
+- **Hidden evaluation conditions of runtime tasks** (experimental, RFC 0022). A runtime task's
+  `tests/gen/grader.json` may list 1 to 32 conditions in `replay.conditions`, each an `id` and `inputs`, a directory of
+  its `tests/gen` whose files replace public inputs of its `environment/` and add none, with the grader's targets kept
+  elsewhere. After the replay and its variants, the launcher replays the submission once per condition as it replays
+  a variant, in place, with the condition's inputs laid over the working directory, and holds every output each wrote,
+  root's alone, in `$PLATOON_CONDITIONS` for the grader (`manifest.json`, schema `platoon.conditions/v1`, and
+  `outputs/<id>/<output>`), which computes its verdict from them and its hidden targets. A condition's replay that
+  fails, outlives its time, leaves what cannot be removed or does not write every output again scores 0, reason
+  `solver_condition_failed`, and the grader does not run; the conditions' outputs hold at most 256 MiB together, and
+  the launcher fails closed (`verifier_trusted_launcher`) before any replay where its `/tmp` lacks room for them. The
+  report records each condition's replay, never the tail of its output, which may echo its hidden inputs, and
+  `conditions_sha256`, which a regrade compares beside `replayed_sha256`. With `replay_timeout_s` the replays end by
+  `(1 + variants + conditions)` times it; `materialize` refuses conditions it could not run, and a task whose
+  conditions leave the grader no time. Inputs of a variant or a condition that cannot be laid over the working
+  directory the submission left (a public file it turned into a directory, say) are now the solver's 0, as
+  `materialize` checked them against the task's `environment/`, no longer the grader owner's `_protocol` fault
+  ([Runtime tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
+
+### Fixes
+
+- **A replay of a runtime task leaves nothing in its user's kernel keyrings for the next.** Every replay, a task's
+  own, each variant's and each condition's, now runs in a session keyring of its own, never the launcher's, and after
+  it the launcher clears the replay user's user, user-session and persistent keyrings, which outlive its processes, as
+  that user. A keyring the replay closed to its own user or revoked, or keys that fill that user's quota, score 0 with
+  the replay's reason; a sandbox that keeps the user from keys (Docker's default seccomp profile, gVisor) is no
+  fault, told by adding a key to a keyring new to the clearing process; a sandbox that lets the user make keys but not
+  clear them, or a machine whose key system calls the launcher does not know, is `verifier_trusted_launcher` for any
+  task with a replay ([Runtime tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
 
 ## 0.5.0 (2026-10-29)
 

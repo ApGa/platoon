@@ -1940,6 +1940,22 @@ def test_the_grader_manifest_gives_the_replays_conditions_with_their_inputs_as_p
     assert "conditions" not in runtime.read_grader_manifest(manifest)[0]["replay"]  # none: the launcher's as before
 
 
+def test_the_grader_manifest_holds_the_most_conditions_with_their_longest_ids_and_long_paths(tmp_path):
+    """32 conditions, each of a 128-character id and inputs 2,000 characters long, take more than 64 KiB."""
+
+    conditions = [
+        {"id": f"{number:02d}" + "x" * 126, "inputs": f"conditions/{number:02d}/" + "d/" * 993 + "in"}
+        for number in range(32)
+    ]
+    manifest = tmp_path / "grader.json"
+    manifest.write_text(_manifest(conditions))
+    assert manifest.stat().st_size > 64 * 1024
+
+    read, problems = runtime.read_grader_manifest(manifest)
+
+    assert problems == [] and read is not None and len(read["replay"]["conditions"]) == 32
+
+
 @pytest.mark.parametrize(
     ("conditions", "problem"),
     [
@@ -2017,8 +2033,13 @@ async def test_a_time_for_each_replay_counts_the_conditions(tmp_path, rootful, s
     source = write_task(tmp_path / "sources", files=CONDITION_FILES)
 
     assert (await service.materialize(source, replay_timeout_s=35)).ok
-    with pytest.raises(ValueError, match=re.escape("3 replays of 36 s leave the grader none of the 108 s")):
-        await service.materialize(source, replay_timeout_s=36)
+    made = await service.materialize(source, replay_timeout_s=36)  # the replay alone fits: the task's conditions not
+    assert not made.ok and made.problems == (
+        "tests/gen/grader.json lists 2 conditions, whose replays leave the grader no time: 3 replays of 36 s leave the "
+        "grader none of the 108 s the launcher's steps have (the verifier's time limit, scaled); list fewer conditions",
+    )
+    with pytest.raises(ValueError, match=re.escape("3 replays of 108 s leave the grader none of the 108 s")):
+        await service.materialize(source, replay_timeout_s=108)  # the caller's time, which not even the replay fits
 
 
 def _conditions_with_checks() -> dict[str, Any]:
@@ -2060,6 +2081,12 @@ def _conditions_with_checks() -> dict[str, Any]:
             {"tests/gen/conditions/E1/data.txt": None, "tests/gen/conditions/E1/data.txt/x": "1\n"},
             None,
             "data.txt is a directory of the condition's and a file of environment/'s",
+        ),
+        (
+            {"tests/gen/conditions/E1/hidden-format/query.tsv": "k\tu\n"},
+            None,
+            "condition E1's inputs hold hidden-format/query.tsv, which environment/ does not hold as a file: a "
+            "condition replaces public inputs, and adds none",
         ),
         (
             {
@@ -2110,6 +2137,7 @@ def _conditions_with_checks() -> dict[str, Any]:
         "inputs-replace-an-output",
         "inputs-a-file-for-a-directory",
         "inputs-a-directory-for-a-file",
+        "inputs-a-file-the-environment-lacks",
         "nested",
         "the-same-inputs",
         "a-variants-inputs-inside",

@@ -2966,16 +2966,6 @@ def _workdir_has(*artifacts: str, directories: tuple[str, ...] = ()) -> Any:
             "answer.json would change answer.json, which the submission holds or the replay writes",
         ),
         (
-            {"data.txt/inner": "x"},
-            None,
-            "data.txt is a directory of the variant's and a file of the working directory's",
-        ),
-        (
-            {"tools": "a file"},
-            _workdir_has(directories=("tools",)),
-            "tools is a file of the variant's and a directory of the working directory's",
-        ),
-        (
             {"src/extra.py": "x = 1\n"},
             _workdir_has("src", directories=("src",)),
             "src would change src, which the submission holds or the replay writes",
@@ -2986,14 +2976,7 @@ def _workdir_has(*artifacts: str, directories: tuple[str, ...] = ()) -> Any:
             "pkg would change pkg/mod.py, which the submission holds or the replay writes",
         ),
     ],
-    ids=[
-        "an-artifact",
-        "an-output",
-        "a-directory-for-a-file",
-        "a-file-for-a-directory",
-        "a-directory-artifact",
-        "a-file-above-an-artifact",
-    ],
+    ids=["an-artifact", "an-output", "a-directory-artifact", "a-file-above-an-artifact"],
 )
 def test_variant_inputs_that_cannot_be_laid_over_the_working_inputs_are_the_owners_protocol_fault(
     verifier, inputs, setup, problem
@@ -3007,6 +2990,52 @@ def test_variant_inputs_that_cannot_be_laid_over_the_working_inputs_are_the_owne
 
     assert reward == {"invalid": 1, "failure_kind": "verifier_generated_protocol"}
     assert report["detail"] == f"variant fifty's inputs cannot be laid over the working inputs: {problem}"
+    assert report["replay"]["exit_code"] == 0 and "grader" not in report
+
+
+def _workdir_link(name: str) -> Any:
+    def setup(verifier: Verifier) -> None:
+        (verifier.workdir / name).symlink_to("/etc")
+
+    return setup
+
+
+@pytest.mark.parametrize(
+    ("inputs", "setup", "problem"),
+    [
+        (
+            {"data.txt/inner": "x"},
+            None,
+            "data.txt is a directory of the variant's and a file of the working directory's",
+        ),
+        (
+            {"tools": "a file"},
+            _workdir_has(directories=("tools",)),
+            "tools is a file of the variant's and a directory of the working directory's",
+        ),
+        (
+            {"sub/data.txt": "50"},
+            _workdir_link("sub"),
+            "sub is a directory of the variant's and a file of the working directory's",
+        ),
+    ],
+    ids=["a-directory-for-a-file", "a-file-for-a-directory", "a-directory-for-a-link"],
+)
+def test_variant_inputs_the_working_directory_the_submission_left_differs_from_are_the_solvers_zero(
+    verifier, inputs, setup, problem
+):
+    # materialize checked the inputs against the task's environment/: what differs there, the submission left.
+    _checked(verifier)
+    if setup is not None:
+        setup(verifier)
+    verifier.variant(inputs=inputs)
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 0} and report["reason"] == launcher.VARIANT_FAILED
+    assert report["detail"] == (
+        f"variant fifty's inputs cannot be laid over the working inputs: {problem}, which the submission changed"
+    )
     assert report["replay"]["exit_code"] == 0 and "grader" not in report
 
 
@@ -4361,6 +4390,7 @@ if conditions is not None:
         for entry in manifest["conditions"]
     }}
     seen["answers"] = answers
+    seen["resolved"] = [os.path.isdir(entry["inputs"]) for entry in manifest["conditions"]]  # from /tests/gen
     targets = {targets!r}
     passed = all(answers.get(key, {{}}).get("answer") == value for key, value in targets.items())
 with open(os.path.join(os.environ["PLATOON_WORKDIR"], "answer.json")) as stream:
@@ -4438,12 +4468,13 @@ def test_the_grader_gets_each_conditions_outputs_root_s_alone_with_a_manifest_of
     assert [(entry["id"], entry["inputs"], entry["outputs"], sorted(entry)) for entry in manifest["conditions"]] == [
         (
             name,
-            f"tests/gen/conditions/{name}",
+            f"conditions/{name}",  # as grader.json gives it: relative to the grader's own directory
             [{"path": "answer.json", "bytes": 15, "sha256": sha}],
             ["id", "inputs", "outputs", "seconds", "timeout_s"],
         )
         for name, sha in zip(("fifty", "sixty"), digest, strict=True)
     ]
+    assert found["resolved"] == [True, True]
     assert (
         manifest["sha256"]
         == report[launcher.CONDITIONS_SHA256]
@@ -4465,14 +4496,109 @@ def test_the_grader_gets_each_conditions_outputs_root_s_alone_with_a_manifest_of
 
 
 def test_a_task_without_conditions_gives_the_grader_no_conditions_and_its_report_none(verifier):
-    seen = verifier.root / "seen.json"
-    _checked(verifier)
-    verifier.grader(_CONDITION_GRADER.format(targets={}, seen=str(seen)))
+    """Not even the verifier's own PLATOON_CONDITIONS or PLATOON_SUBMITTED, which would name what no replay wrote: the
+    grader gets them from the launcher alone."""
 
-    _, reward, report = verifier.run()
+    seen = verifier.root / "seen.json"
+    verifier.grader(_CONDITION_GRADER.format(targets={}, seen=str(seen)))
+    stale = {"PLATOON_CONDITIONS": str(verifier.root), "PLATOON_SUBMITTED": str(verifier.root)}
+
+    _checked(verifier)
+    _, reward, report = verifier.run(env=stale)
 
     assert json.loads(seen.read_text()) == {"conditions": None} and reward == {"reward": 0}
     assert not {"conditions", launcher.CONDITIONS_SHA256} & set(report)
+
+
+def test_a_grader_without_a_replay_gets_no_inherited_platoon_submitted(verifier):
+    seen = verifier.root / "seen.txt"
+    verifier.grader(
+        f"""
+        import os
+        open({str(seen)!r}, "w").write(repr(os.environ.get("PLATOON_SUBMITTED")))
+        open(os.environ["PLATOON_VERDICT"], "w").write('{{"passed": true}}')
+        """
+    )
+
+    verifier.submit(42)
+
+    _, reward, report = verifier.run(env={"PLATOON_SUBMITTED": str(verifier.root)})
+
+    assert reward == {"reward": 1}, report
+    assert seen.read_text() == "None"
+
+
+def test_the_manifest_lists_the_conditions_in_the_order_the_task_declares_them(verifier):
+    _checked(verifier)
+    verifier.condition("sixty", {"data.txt": "60"})
+    verifier.condition("fifty")
+    seen = verifier.root / "seen.json"
+    verifier.grader(_CONDITION_GRADER.format(targets={"fifty": 100, "sixty": 120}, seen=str(seen)))
+
+    _, reward, report = verifier.run()
+
+    assert reward == {"reward": 1}, report
+    assert [entry["id"] for entry in json.loads(seen.read_text())["manifest"]["conditions"]] == ["sixty", "fifty"]
+    assert [entry["id"] for entry in report["conditions"]["ran"]] == ["sixty", "fifty"]
+
+
+def test_the_launcher_seals_what_the_conditions_wrote_before_the_grader_reads_it(verifier):
+    sealed = verifier.root / "sealed.txt"
+    seen = _conditioned(verifier)
+
+    _, reward, report = verifier.run(
+        extra=f"""
+        seal = WithoutRoot.seal
+        def recorded(self, path):
+            open({str(sealed)!r}, "a").write(path + "\\n")
+            seal(self, path)
+        WithoutRoot.seal = recorded
+        """
+    )
+
+    assert reward == {"reward": 1}, report
+    assert json.loads(seen.read_text())["conditions"] in sealed.read_text().splitlines()
+
+
+def test_the_conditions_outputs_may_fill_what_the_launcher_holds_to_the_byte(verifier):
+    _conditioned(verifier)
+
+    _, reward, report = verifier.run(extra="launcher.MAX_CONDITION_BYTES = 30")  # 15 bytes each
+
+    assert reward == {"reward": 1}, report
+
+
+@pytest.mark.parametrize(("free", "fault"), [(10, True), (3 << 20, False)], ids=["too-little", "enough"])
+def test_a_launcher_directory_without_room_for_the_outputs_fails_closed_before_any_replay(verifier, free, fault):
+    """The replay's outputs (1 MiB each here) and the conditions' (2 x 1 MiB) may need 3 MiB where the launcher holds
+    them: a sandbox whose own directory lacks that room is the trusted side's fault, before any replay, never a full
+    filesystem a submission's large outputs would make the trusted side's, censoring it."""
+
+    _conditioned(verifier)
+
+    _, reward, report = verifier.run(extra=f"launcher._free_bytes = lambda path: {free}")
+
+    if fault:
+        assert reward == {"invalid": 1, "failure_kind": launcher.LAUNCHER_FAULT}, report
+        assert report["detail"] == (
+            "its own directory has 10 bytes free, less than the 3145728 the replay's and the conditions' outputs may "
+            "take there"
+        )
+        assert "replay" not in report
+    else:
+        assert reward == {"reward": 1}, report
+
+
+def test_a_failed_conditions_report_holds_nothing_its_replay_printed(verifier):
+    """A condition's replay may print its hidden inputs: the report, which reaches the outcome's metadata, keeps no
+    tail of its output."""
+
+    _conditioned(verifier, SOLVE + _in_condition("60", "print('HIDDEN=' + open('data.txt').read()); sys.exit(3)"))
+
+    _, reward, report = verifier.run()
+
+    assert (reward, report["reason"]) == ({"reward": 0}, launcher.CONDITION_FAILED), report
+    assert "HIDDEN" not in (verifier.logs / launcher.REPORT).read_text()
 
 
 def test_no_replay_learns_which_condition_it_runs_or_where_the_grader_finds_it(verifier):
@@ -4612,7 +4738,7 @@ def test_a_conditions_replay_that_does_not_write_every_output_again_is_the_solve
     assert detail in report["detail"], report["detail"]
     first, failed = report["conditions"]["ran"]
     assert first["passed"] and not failed["passed"] and failed["problem"] == report["detail"]
-    assert "output_tail" in failed and "output_tail" not in first
+    assert "output_tail" not in failed and "output_tail" not in first  # it may echo the hidden inputs
     assert "grader" not in report and launcher.CONDITIONS_SHA256 not in report
 
 
@@ -4843,12 +4969,8 @@ def _condition_inputs_a_link(verifier: Verifier) -> None:
             lambda v: v.condition(inputs={"solve.py": "print(1)"}),
             "condition fifty's inputs cannot be laid over the working inputs: solve.py would change solve.py",
         ),
-        (
-            lambda v: v.condition(inputs={"data.txt/inner": "1"}),
-            "data.txt is a directory of the condition's and a file of the working directory's",
-        ),
     ],
-    ids=["missing", "a-file", "a-link", "a-link-inside", "over-the-submission", "a-directory-for-a-file"],
+    ids=["missing", "a-file", "a-link", "a-link-inside", "over-the-submission"],
 )
 def test_condition_inputs_the_launcher_cannot_use_are_the_protocol_fault_of_the_graders_owner(
     verifier, owner, prefix, setup, problem
@@ -4864,6 +4986,40 @@ def test_condition_inputs_the_launcher_cannot_use_are_the_protocol_fault_of_the_
 
     assert reward == {"invalid": 1, "failure_kind": f"{prefix}_protocol"}, report
     assert problem in report["detail"], report["detail"]
+    assert "grader" not in report
+
+
+@pytest.mark.parametrize(
+    ("setup", "problem"),
+    [
+        (
+            lambda v: (v.workdir / "notes.txt").mkdir(),
+            "notes.txt is a file of the condition's and a directory of the working directory's",
+        ),
+        (
+            lambda v: (v.workdir / "sub").symlink_to("/etc"),
+            "sub is a directory of the condition's and a file of the working directory's",
+        ),
+    ],
+    ids=["a-directory-for-its-file", "a-link-for-its-directory"],
+)
+def test_condition_inputs_the_working_directory_the_submission_left_differs_from_are_the_solvers_zero(
+    verifier, setup, problem
+):
+    """materialize checked the condition's files against the task's environment/, which holds each: where the working
+    directory differs there, the submission changed it, and the grade is the solver's 0, never the owner's fault that
+    would drop it from the scores."""
+
+    _checked(verifier)
+    verifier.condition(inputs={"data.txt": "50", "notes.txt": "x", "sub/more.txt": "1"})
+    setup(verifier)
+
+    _, reward, report = verifier.run()
+
+    assert (reward, report["reason"]) == ({"reward": 0}, launcher.CONDITION_FAILED), report
+    assert report["detail"] == (
+        f"condition fifty's inputs cannot be laid over the working inputs: {problem}, which the submission changed"
+    )
     assert "grader" not in report
 
 
@@ -4981,7 +5137,7 @@ def test_a_report_too_large_for_its_bound_leaves_out_the_conditions_records_and_
 
 
 # The kernel's keyrings: add_key and keyctl stand-ins for cleared_keys, each a list of results by call.
-def _fake_keys(clears: list[tuple[int, int]], persistent=(5, 0), probe=(-1, errno.ENOSYS)):
+def _fake_keys(clears: list[tuple[int, int]], persistent=(5, 0), probe=(9, 0)):
     calls: list[Any] = []
     pending = list(clears)
 
@@ -4989,6 +5145,8 @@ def _fake_keys(clears: list[tuple[int, int]], persistent=(5, 0), probe=(-1, errn
         calls.append(args)
         if args[0] == launcher._KEYCTL_GET_PERSISTENT:
             return persistent
+        if args[0] == launcher._KEYCTL_INVALIDATE:
+            return 0, 0
         return pending.pop(0) if pending else (0, 0)
 
     def add_key(*args):
@@ -4999,6 +5157,9 @@ def _fake_keys(clears: list[tuple[int, int]], persistent=(5, 0), probe=(-1, errn
 
 
 def test_cleared_keys_clears_the_user_the_user_session_and_the_persistent_keyring():
+    """Then it adds a key to a keyring new to its process, which no replay reached, and invalidates it: the user may
+    make keys, and has the room for them."""
+
     add_key, keyctl, calls = _fake_keys([])
 
     assert launcher.cleared_keys(add_key, keyctl) == "ok"
@@ -5007,15 +5168,30 @@ def test_cleared_keys_clears_the_user_the_user_session_and_the_persistent_keyrin
         (launcher._KEYCTL_CLEAR, launcher._KEY_SPEC_USER_SESSION_KEYRING),
         (launcher._KEYCTL_GET_PERSISTENT, -1, launcher._KEY_SPEC_PROCESS_KEYRING),
         (launcher._KEYCTL_CLEAR, 5),
+        ("add_key", b"user", b"platoon-launcher-probe", b"x", 1, launcher._KEY_SPEC_PROCESS_KEYRING),
+        (launcher._KEYCTL_INVALIDATE, 9),
     ]
 
 
-@pytest.mark.parametrize("number", [errno.ENOSYS, errno.EPERM, errno.EOPNOTSUPP])
-def test_cleared_keys_finds_no_channel_where_the_user_may_make_no_keys(number):
-    """A kernel without keys, or a seccomp profile that keeps the replay's user from them (Docker's default), leaves
-    nothing to clear: the child runs as that user, under the same profile, so the replay could make none either."""
+@pytest.mark.parametrize(
+    ("clears", "probed"),
+    [
+        ([(-1, errno.ENOSYS)], errno.ENOSYS),
+        ([(-1, errno.EPERM)], errno.EPERM),
+        ([(-1, errno.EOPNOTSUPP)], errno.EOPNOTSUPP),
+        ([(-1, errno.ENOSYS)], errno.EACCES),
+        ([(-1, errno.EACCES)], errno.EACCES),
+        ([], errno.EACCES),
+    ],
+    ids=["no-keys", "docker-seccomp", "unsupported", "gvisor", "older-gvisor", "clears-but-adds-none"],
+)
+def test_cleared_keys_finds_no_channel_where_the_user_may_make_no_keys(clears, probed):
+    """A kernel without keys, or a sandbox that keeps the replay's user from them (Docker's default seccomp profile:
+    EPERM; gVisor: EACCES from add_key, ENOSYS from most of keyctl, or EACCES from all of it before), leaves nothing to
+    clear: a key added to a keyring new to the child, as that user, fails for any reason but a full quota, so the
+    replay could make none either.  Any errors of the clearing go with it: an honest replay never scores 0 there."""
 
-    add_key, keyctl, _ = _fake_keys([(-1, number)], probe=(-1, number))
+    add_key, keyctl, _ = _fake_keys(clears, probe=(-1, probed))
 
     assert launcher.cleared_keys(add_key, keyctl) == "absent"
     assert launcher.keys_verdict("absent") is None
@@ -5028,14 +5204,18 @@ def test_cleared_keys_finds_no_channel_where_the_user_may_make_no_keys(number):
     [
         ([(-1, errno.EACCES)], (9, 0), f"left user {errno.EACCES}"),
         ([(0, 0), (-1, errno.EKEYREVOKED)], (9, 0), f"left user-session {errno.EKEYREVOKED}"),
-        ([(-1, errno.EACCES)], (-1, errno.EDQUOT), f"left user {errno.EACCES}"),
+        ([(-1, errno.EDQUOT)], (9, 0), f"left user {errno.EDQUOT}"),
+        ([], (-1, errno.EDQUOT), f"left quota {errno.EDQUOT}"),
+        ([(-1, errno.EACCES)], (-1, errno.EDQUOT), f"left quota {errno.EDQUOT}"),
         ([(-1, errno.EIO)], (9, 0), f"fault user {errno.EIO}"),
     ],
-    ids=["closed-to-its-user", "revoked", "keys-fill-its-quota", "the-sandboxs"],
+    ids=["closed-to-its-user", "revoked", "a-full-keyring", "keys-fill-its-quota", "closed-and-full", "the-sandboxs"],
 )
 def test_a_keyring_that_cannot_be_cleared_is_left_over_or_a_trusted_fault(clears, probe, found):
     """A keyring the replay closed to its own user (KEYCTL_SETPERM) or revoked, where that user may make keys, is what
-    the replay left: Leftover, the solver's 0.  One that cannot be cleared otherwise is the sandbox's."""
+    the replay left: Leftover, the solver's 0; so are keys that fill the user's quota once its keyrings were cleared,
+    which would keep the next replay from starting (a launcher fault there).  One that cannot be cleared otherwise is
+    the sandbox's."""
 
     add_key, keyctl, _ = _fake_keys(clears, probe=probe)
 
@@ -5103,28 +5283,85 @@ def test_the_keys_a_replays_user_leaves_in_its_keyrings_are_cleared_before_the_n
     ]
 
 
-def test_the_replay_joins_a_session_keyring_of_its_own(monkeypatch):
+@pytest.mark.parametrize(
+    ("joined", "probe", "fails"),
+    [
+        ((0, 0), None, False),
+        ((-1, errno.ENOSYS), (-1, errno.EACCES), False),
+        ((-1, errno.EPERM), (-1, errno.EPERM), False),
+        ((-1, errno.EACCES), (9, 0), True),
+        ((-1, errno.EDQUOT), (-1, errno.EDQUOT), True),
+    ],
+    ids=["joined", "gvisor", "docker-seccomp", "keys-reach-the-launchers", "a-full-quota"],
+)
+def test_the_replay_joins_a_session_keyring_of_its_own(monkeypatch, joined, probe, fails):
     """A replay keeps no session keyring of the launcher's, which every later replay would share: its demotion joins a
-    new one, after it switched user; a sandbox that keeps it from keys is no fault."""
+    new one, after it switched user.  Where the join fails, a key added to the session keyring it has tells: one that
+    cannot be added for any reason but a full quota is a sandbox that keeps it from keys, no fault; else the replay
+    does not start."""
 
-    joined: list[Any] = []
+    seen: list[Any] = []
+
+    def keyctl(*args):
+        seen.append(args)
+        return joined if args[0] == launcher._KEYCTL_JOIN_SESSION_KEYRING else (0, 0)
+
+    def add_key(*args):
+        seen.append(("add_key", args[-1]))
+        return probe
+
     monkeypatch.setattr(launcher, "_libc", lambda: None)
-    monkeypatch.setattr(launcher, "_key_calls", lambda: (None, lambda *args: joined.append(args) or (-1, errno.ENOSYS)))
+    monkeypatch.setattr(launcher, "_key_calls", lambda: (add_key, keyctl))
     for name in ("_oom_disfavor", "_limit_replay", "_prctl"):
         monkeypatch.setattr(launcher, name, lambda *a, **k: None)
     monkeypatch.setattr(os, "setgroups", lambda groups: None)
     monkeypatch.setattr(os, "setgid", lambda gid: None)
-    monkeypatch.setattr(os, "setuid", lambda uid: joined.append("setuid"))
+    monkeypatch.setattr(os, "setuid", lambda uid: seen.append("setuid"))
     monkeypatch.setattr(os, "getresuid", lambda: (launcher.REPLAY_UID,) * 3)
     monkeypatch.setattr(os, "getresgid", lambda: (launcher.REPLAY_UID,) * 3)
     monkeypatch.setattr(os, "getgroups", lambda: [])
+    demote = launcher.Ops().demote(1 << 20)
 
-    launcher.Ops().demote(1 << 20)()
+    if fails:
+        with pytest.raises(OSError, match="cannot join a session keyring of its own"):
+            demote()
+    else:
+        demote()
 
-    assert joined == ["setuid", (launcher._KEYCTL_JOIN_SESSION_KEYRING, 0)]
-    monkeypatch.setattr(launcher, "_key_calls", lambda: (None, lambda *args: (-1, errno.EDQUOT)))
-    with pytest.raises(OSError, match="cannot join a session keyring of its own"):
-        launcher.Ops().demote(1 << 20)()
+    assert seen[:2] == ["setuid", (launcher._KEYCTL_JOIN_SESSION_KEYRING, 0)]
+    assert seen[2:3] == ([] if probe is None else [("add_key", launcher._KEY_SPEC_SESSION_KEYRING)])
+
+
+# Run as root of a fresh user namespace, in a session keyring of its own (the launcher's): one child adds a key to its
+# session keyring, the next looks for it, each demoted as a replay's process joins its keyring, or not.
+_SESSION_KEYS = """
+import subprocess, sys
+sys.path.insert(0, {directory!r})
+import launcher
+calls = launcher._key_calls()
+write = "import ctypes; print(ctypes.CDLL(None).syscall({add_key}, b'user', b'platoon-marker', b'x', 1, -3) > 0)"
+read = "import ctypes; print(ctypes.CDLL(None).syscall({keyctl}, 10, -3, b'user', b'platoon-marker', 0) > 0)"
+calls[1](launcher._KEYCTL_JOIN_SESSION_KEYRING, 0)
+pre = (lambda: launcher._join_new_session_keyring(calls)) if {join} else None
+found = [subprocess.run([sys.executable, "-c", code], preexec_fn=pre, capture_output=True, text=True).stdout.strip()
+         for code in (write, read)]
+print(" ".join(found))
+"""
+
+
+@pytest.mark.skipif(not _keys_work(), reason="keys in an unprivileged user namespace are unavailable")
+@pytest.mark.parametrize("join", [True, False], ids=["joined", "shared"])
+def test_no_replay_finds_a_key_an_earlier_replay_left_in_its_session_keyring(join):
+    """On the kernel itself: a replay's process that kept the launcher's session keyring would leave a key there that
+    the next replay finds; one that joined its own leaves it in a keyring that goes with it."""
+
+    add_key, keyctl = launcher._KEY_SYSCALLS[os.uname().machine]
+    code = _SESSION_KEYS.format(directory=str(LAUNCHER.parent), add_key=add_key, keyctl=keyctl, join=join)
+
+    done = subprocess.run(["unshare", "-r", sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["True", str(not join)]
 
 
 def test_every_replay_clears_its_users_keyrings_after_it(verifier):
