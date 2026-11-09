@@ -206,7 +206,9 @@ class HarborEnvironmentService:
     one does not, ``verifier_flaky``, or the solver's 0 where the submission's replay wrote other outputs).  A task
     that ``materialize`` gave replay checks (:class:`~platoon.envs.harbor.runtime.ReplayChecks`) is the solver's 0
     where its submission's sources state a forbidden literal or the replay of a variant of its inputs does not give
-    what the variant expects, in every grade, a regrade's too.  A runtime task that another store holds, that holds
+    what the variant expects, in every grade, a regrade's too; one whose ``tests/gen/grader.json`` lists hidden
+    evaluation conditions is replayed on each, its grader judging what each wrote, and the solver's 0 where one of
+    those replays fails (``solver_condition_failed``).  A runtime task that another store holds, that holds
     another platoon's launcher (one stored before an upgrade), or that was checked against other ``runtime_tasks``, is
     refused, with or without ``runtime_tasks``, never served as an ordinary task.  The service's other tasks are served
     as before.
@@ -616,23 +618,23 @@ class HarborEnvironmentService:
         replay_timeout_s: float | None = None,
     ) -> MaterializedTask:
         """Make the task directory ``source`` one of the service's runtime tasks (:mod:`platoon.envs.harbor.runtime`):
-        checked against ``runtime_tasks``, refused and never rewritten where it breaks them, else given
-        platoon's launcher and kept in the store under its digest, which is its id.  ``grader_owner`` says who wrote
-        its grader, ``generated`` (the producer) or ``trusted`` (trusted code), which names the failure kinds of the
-        grader's non-scores (``verifier_generated_*`` or ``verifier_trusted_*``) and says whether its scores are
-        regraded (a generated grader's are, ``runtime_tasks.regrade`` times): the caller's word, never the directory's.
+        checked against ``runtime_tasks``, refused and never rewritten where it breaks them, else given platoon's
+        launcher and kept in the store under its digest, which is its id.  ``grader_owner`` says who wrote its grader,
+        ``generated`` (the producer) or ``trusted`` (trusted code), which names the failure kinds of the grader's
+        non-scores (``verifier_generated_*`` or ``verifier_trusted_*``) and says whether its scores are regraded (a
+        generated grader's are, ``runtime_tasks.regrade`` times): the caller's word, never the directory's.
         ``replay_address_space_bytes`` caps the address space each process of the task's replays may reserve, the
-        replay's own and each variant's (``RLIMIT_AS``; None, the default, sets no per-process cap, the launcher
-        disfavouring the replays for the OOM killer either way).  ``replay_checks``
+        replay's own, each variant's and each condition's (``RLIMIT_AS``; None, the default, sets no per-process cap,
+        the launcher disfavouring the replays for the OOM killer either way).  ``replay_checks``
         (:class:`~platoon.envs.harbor.runtime.ReplayChecks`, or a mapping of its fields) are the task's replay checks,
         its replay on variants of its inputs and the literals its sources may not state, whose data the directory holds
-        in ``tests/gen``: the caller's word too, which the task's launcher settings record.  ``replay_timeout_s`` is
-        the most each of the task's replays takes, its own and each variant's (such as the time its producer told the
-        solver), the grader getting what they leave; without it, they share half of the time the launcher has.  What
-        is wrong with the directory comes back in :attr:`MaterializedTask.problems`; a ``ValueError`` for a service
-        without ``runtime_tasks``, an owner, a replay address space, checks or a replay time that are none, or replays
-        that would leave the grader no time, and an ``OSError`` for a store it cannot write.  The copy and the checks
-        run in a thread."""
+        in ``tests/gen``: the caller's word too, which the task's launcher settings record.  ``replay_timeout_s`` is the
+        most each of the task's replays takes, its own, each variant's and each condition's (such as the time its
+        producer told the solver), the grader getting what they leave; without it, they share half of the time the
+        launcher has.  What is wrong with the directory comes back in :attr:`MaterializedTask.problems`; a
+        ``ValueError`` for a service without ``runtime_tasks``, an owner, a replay address space, checks or a replay
+        time that are none, or replays that would leave the grader no time, and an ``OSError`` for a store it cannot
+        write.  The copy and the checks run in a thread."""
 
         config = self.runtime_tasks
         if config is None:

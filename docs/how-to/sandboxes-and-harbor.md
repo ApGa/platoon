@@ -1846,8 +1846,12 @@ that reads tasks outside the run's processes, or across runs, sets `store`.
 
 ```json
 {"command": ["python3", "grade.py"],
- "replay": {"command": ["python3", "analysis.py"], "outputs": ["answer.json"]}}
+ "replay": {"command": ["python3", "analysis.py"], "outputs": ["answer.json"],
+            "conditions": [{"id": "E1", "inputs": "conditions/E1"}]}}
 ```
+
+`replay.conditions`, which may be left out, lists the task's hidden evaluation conditions (**Hidden evaluation
+conditions**, below).
 
 The grader runs as root in `/tests/gen`. It reads the submission in `$PLATOON_WORKDIR`, the verifier's working
 directory, where the artifacts are, and writes its verdict to `$PLATOON_VERDICT`:
@@ -1876,16 +1880,23 @@ legitimately reserves a large virtual address space. A replay command whose prog
 (`./analysis.sh`) runs the submission's own program, and one that cannot start is the solver's fault; one that names a
 program of the image's (`python3`) and cannot start is the task's.
 
-`materialize(source, replay_timeout_s=300)` gives each of the task's replays, its own and each variant's (**Replay
-checks**, below), at most that long, copying the working directory and putting it back included, rather than an equal
-part of half the time left: the time a producer tells its solver. The replays then end at most `(1 + variants) ×
-replay_timeout_s` after the launcher started, so that its checks of the submission before them take from their time,
-never the grader's, and the grader gets the rest; `materialize` raises `ValueError` where that leaves the grader none of
-the time the launcher's steps have (the verifier's time limit, scaled by `verifier_timeout_multiplier`, less a margin of
-5 to 30 s for the launcher to kill what is left and write the reward). So a producer that tells its solver `R` seconds a
-replay sizes the template's `[verifier] timeout_sec` for `(1 + variants) × R`, the grader and that margin. Without it,
-the replay and its variants share half of what is left once the artifacts are checked and the sources scanned: each gets
-about `((T - m) / 2) / (1 + variants)` of a time limit `T` with the margin `m`.
+`materialize(source, replay_timeout_s=300)` gives each of the task's replays, its own, each variant's (**Replay
+checks**, below) and each condition's (**Hidden evaluation conditions**, below), at most that long, copying the working
+directory and putting it back included, rather than an equal part of half the time left: the time a producer tells its
+solver. The replays then end at most `(1 + variants + conditions) × replay_timeout_s` after the launcher started, so
+that its checks of the submission before them take from their time, never the grader's, and the grader gets the rest;
+`materialize` raises `ValueError` where that leaves the grader none of the time the launcher's steps have (the
+verifier's time limit, scaled by `verifier_timeout_multiplier`, less a margin of 5 to 30 s for the launcher to kill what
+is left and write the reward), and refuses the task where the replay and its variants alone would leave the grader some
+and its conditions do not (`tests/gen/grader.json lists N conditions, whose replays leave the grader no time`). So a
+producer that tells its solver `R` seconds a replay sizes the template's `[verifier] timeout_sec` for
+`(1 + variants + conditions) × R`, the grader and that margin; each regrade takes as long again. `R` includes laying a
+variant's or a condition's inputs over the working directory and putting it back, about twice as long as copying the
+working directory aside took, so a producer whose solver leaves many files adds that to the time it told its solver.
+Without it, the replay, its variants and its conditions share half of what is left once the artifacts are checked and
+the sources scanned: each gets about `((T - m) / 2) / (1 + variants + conditions)` of a time limit `T` with the margin
+`m`, so the replay's own share shrinks as conditions are added; a producer of tasks with conditions should give
+`replay_timeout_s`.
 
 **How a runtime task runs.** Its sessions run the image `images` binds its `docker_image` to, with its
 `environment/` uploaded into the working directory, as Harbor does for a task with a prebuilt image. It grades in its
@@ -1909,16 +1920,20 @@ that user's group, so the replay may change what it holds but can neither move t
 runs the replay there and kills what it left (below the launcher, or of the replay's user — one of that user's it cannot
 signal is a survivor, the solver's 0, never excluded as foreign), removes what that user left where every user may write
 (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and `/dev/mqueue`) and the System V shared memory, semaphores and message
-queues it left, its home, and all it left in the working directory but the outputs (which wait as root's), and puts the
-working directory back from the pristine copy, root's again with the group and other write bits stripped. It replays
-each variant of its replay checks the same way, in the working directory with the variant's inputs laid over it, and
-puts the directory back after each; then it puts the replayed outputs in their places and notes their SHA-256
-(`replayed_sha256`), before the grader reads them. A filesystem it finds full as it puts the directory back, with
+queues it left, the keys of its user's kernel keyrings that outlive its processes (its user, user-session and
+persistent keyrings; each replay also runs in a session keyring of its own, never the launcher's), its home, and all it
+left in the working directory but the outputs (which wait as root's), and puts the working directory back from the
+pristine copy, root's again with the group and other write bits stripped. It replays each variant of its replay checks
+the same way, in the working directory with the variant's inputs laid over it, and puts the directory back after each,
+then each hidden evaluation condition the same way, holding what each wrote for the grader; then it puts the replayed
+outputs in their places and notes their SHA-256 (`replayed_sha256`), and that of the conditions' outputs
+(`conditions_sha256`), before the grader reads them. A filesystem it finds full as it puts the directory back, with
 nothing of the replays' left where every user may write, it has write out what it holds and tries once more, since one
 may free what was removed only after a while. It then runs the grader for the rest of the verifier's time limit, kills
 every process the grader left, and writes the only reward file, with its report, `/logs/verifier/launcher.json` (at most
 64 KiB: a larger one leaves out the verdict's checks, then the artifacts' names, the replay's outputs, the variants'
-records and the scan's record, in that order, before it keeps only the outcome), which the outcome's metadata holds as
+records, the conditions' records and the scan's record, in that order, before it keeps only the outcome, with
+`replayed_sha256` and `conditions_sha256`), which the outcome's metadata holds as
 `launcher`. It reads every file whose contents it uses (its settings, a JSON artifact, a source it scans, the replay
 checks' data, a replayed output, the verdict, a log's tail) without following a link or waiting on a FIFO, checking the
 open file, and refuses JSON there that nests more than 256 levels deep before it parses it, as it refuses text that is
@@ -1932,13 +1947,15 @@ that runs as root could write what they read.
 | A declared artifact breaks the output contract; the working directory is more than a replay copies (4 GiB beyond the task's own files), or the artifacts take longer to check than the verifier's time limit allows; a source the replay checks scan is missing, larger than 256 KiB, no UTF-8 or no Python, or the sources take longer to scan than that time limit allows (**Replay checks**, below) | `scored` 0, reason `solver_output_contract` |
 | The replay fails, outlives its time, lacks its own program, leaves processes that cannot be killed, leaves more than the launcher removes in its time (System V IPC objects it cannot remove among it) or fills a filesystem (disk, inode or memory exhaustion it causes is its own, never the launcher's), or does not write an output again; copying the working directory aside and back leaves the replay no time, or putting it back takes longer than the replay's time allows; or a regrade's replay writes other outputs than the first grade's, which the grader scores otherwise (**Regrades**, below) | `scored` 0, reason `solver_nonreproducible` |
 | A source the replay checks scan states a forbidden literal (**Replay checks**, below) | `scored` 0, reason `solver_hardcoded` |
-| The replay of a variant fails, outlives its time, leaves processes that cannot be killed, leaves more than the launcher removes in its time (System V IPC objects it cannot remove among it) or fills a filesystem, or does not give what the variant expects; putting the working directory back after it leaves it no time, or takes longer than its time allows (**Replay checks**, below) | `scored` 0, reason `solver_variant_failed` |
+| The replay of a variant fails, outlives its time, leaves processes that cannot be killed, leaves more than the launcher removes in its time (System V IPC objects it cannot remove among it) or fills a filesystem, or does not give what the variant expects; putting the working directory back after it leaves it no time, or takes longer than its time allows; its inputs cannot be laid over the working directory the submission left, which differs from the task's `environment/` there (**Replay checks**, below) | `scored` 0, reason `solver_variant_failed` |
+| The replay of a hidden evaluation condition fails, outlives its time, leaves processes that cannot be killed, leaves more than the launcher removes in its time or fills a filesystem, or does not write every output again; the conditions' outputs hold more than 256 MiB; putting the working directory back after it leaves it no time, or takes longer than its time allows; its inputs cannot be laid over the working directory the submission left (**Hidden evaluation conditions**, below) | `scored` 0, reason `solver_condition_failed` |
+| After any replay, a kernel keyring of the replay's user cannot be cleared (the replay closed it to its own user, or revoked it), or that user's keys fill its quota | `scored` 0, the replay's own reason (`solver_nonreproducible`, `solver_variant_failed` or `solver_condition_failed`) |
 | The grader exits nonzero, or cannot start | `invalid`, `verifier_generated_exit` |
 | The grader outlives its time | `invalid`, `verifier_generated_timeout` |
-| No verdict, or one beyond the schema; a replay command of the image's that cannot start; data of the replay checks that cannot be used | `invalid`, `verifier_generated_protocol` |
+| No verdict, or one beyond the schema; a replay command of the image's that cannot start; data of the replay checks or the conditions that cannot be used (a link or a special file in their inputs, one that would replace a file of the submission's) | `invalid`, `verifier_generated_protocol` |
 | What the grader left could not be killed | `invalid`, `verifier_generated_isolation` |
 | The launcher fails once the grader ran; it exits nonzero, leaves no report it writes, or outlives the verifier's time limit; grading cannot kill what was left in the verifier, or read its output | `invalid`, `verifier_generated_unfinished`, whatever the reward file says: the grader, root beside the launcher, may have stopped it |
-| The launcher cannot do its own part before the grader runs: no `python3`, no root, no other user to replay as, a seal that does not take; a working directory inside what it seals, one the replay's user may write in or replace from a directory above it (by mode bits or ACL), or one that holds the launcher's own directory, a mount point, a socket or a device; a working directory it cannot put back, but for a full filesystem | `invalid`, `verifier_trusted_launcher` |
+| The launcher cannot do its own part before the grader runs: no `python3`, no root, no other user to replay as, a seal that does not take; a working directory inside what it seals, one the replay's user may write in or replace from a directory above it (by mode bits or ACL), or one that holds the launcher's own directory, a mount point, a socket or a device; a working directory it cannot put back, but for a full filesystem; for a task with conditions, a launcher directory (`/tmp`) without room for the replay's and the conditions' outputs at their largest; a machine whose system call numbers of the kernel's keys the launcher does not know (any task with a replay), or a sandbox that lets the replay's user make keys but not clear them, or join a session keyring of its own | `invalid`, `verifier_trusted_launcher` |
 | A generated grader's score, graded again in a fresh verifier, comes out otherwise for the same artifacts and replayed outputs (**Regrades**, below) | `invalid`, `verifier_flaky` |
 
 A trusted grader (`grader_owner="trusted"`) gets `verifier_trusted_exit`, `verifier_trusted_timeout`,
@@ -1963,8 +1980,8 @@ launchers' reports say whether the replays wrote the same bytes (`replayed_sha25
 | A regrade | The grade |
 |---|---|
 | gives the same score | the first grade's score, and the next regrade runs |
-| gives another score of the same bytes: the same artifacts and, for a task with a replay, the same outputs of it | `invalid`, `verifier_flaky`, and no regrade runs after it |
-| gives another score, its replay having written other outputs than the first grade's | `scored` 0, reason `solver_nonreproducible`: a submission that computes something else each time it runs does not reproduce, which is the solver's fault and never the grader's; no regrade runs after it |
+| gives another score of the same bytes: the same artifacts and, for a task with a replay, the same outputs of it, and of its conditions' replays (`conditions_sha256`) | `invalid`, `verifier_flaky`, and no regrade runs after it |
+| gives another score, its replay, or a condition's, having written other outputs than the first grade's | `scored` 0, reason `solver_nonreproducible`: a submission that computes something else each time it runs does not reproduce, which is the solver's fault and never the grader's; no regrade runs after it |
 | gives no score of the grader's: the solver's 0, such as a replay that does not reproduce the submission this time; a non-score of the grader's, such as `verifier_generated_timeout`; or an infrastructure fault, such as `verifier_start` | that regrade's own outcome, attributed as any grade's, and no regrade runs after it |
 
 A grade that is no score of the grader's, such as the solver's 0 that the launcher gives before the grader runs, is not
@@ -2042,6 +2059,56 @@ made = await service.materialize(directory, grader_owner="trusted", replay_check
   numbers, name an output that is no `.json` file, or lack a key the tolerance names; forbidden literals that are no
   list of values and tolerances; a source the submission does not hold. Data that a grade finds unusable all the same
   are the protocol fault of the grader's owner (`verifier_generated_protocol`, `verifier_trusted_protocol`).
+
+**Hidden evaluation conditions.** A replay check judges a variant's outputs against fixed numbers, and the grader never
+sees them. A task whose grader must judge the submission's code on inputs the solver never saw, such as a research
+challenge that measures a method on held-out data, lists them in `tests/gen/grader.json`, beside its replay:
+
+```json
+{"command": ["python3", "grade.py"],
+ "replay": {"command": ["python3", "predict.py"], "outputs": ["output/prediction.csv"],
+            "conditions": [{"id": "E1", "inputs": "conditions/E1"},
+                           {"id": "E2", "inputs": "conditions/E2"}]}}
+```
+
+- **The data.** Each condition has an `id` of its own (at most 128 letters, digits, `_`, `.` and `-`, starting with a
+  letter or digit) and `inputs`, a directory of the task's `tests/gen` (`tests/gen/conditions/E1/data/query.csv`), as
+  sealed as the grader. A task has 1 to 32 conditions. A condition replaces public inputs and adds none: each file of
+  its inputs must be a file the task's `environment/` holds at that path (`environment/data/query.csv`), since the
+  replay command, which runs on the public inputs too, reads the same files on each. Its **targets stay outside its
+  inputs**, elsewhere in `tests/gen` (`tests/gen/targets/E1.csv`): the condition's replay reads all of its inputs, so
+  a file that holds inputs and targets together, as many graders keep them, must be split before it becomes a
+  condition. `materialize` refuses inputs that are no directory, hold no file, hold one at or around a path the
+  submission holds or the replay writes, one `environment/` does not hold as a file, or a directory where it holds a
+  file; two conditions whose inputs are the same or lie one in the other; and inputs that lie in a variant's, hold one,
+  or hold a variant's expected outputs or the forbidden literals. Whether the inputs hold the grader's targets it
+  cannot tell: that is the producer's check.
+- **The replays.** After the replay and its variants, the launcher replays the submission once per condition, in their
+  order, as it replays a variant (in place, the same user, thin environment, limits, sweep and clearing), in the working
+  directory as its pristine copy holds it with the condition's inputs laid over it, and puts the directory back after
+  each. No replay is told which condition it runs, and none finds what an earlier replay left. It holds every output
+  each condition's replay wrote, as root's, and puts the replay's own outputs back in their places after the last.
+- **What the grader gets.** `$PLATOON_CONDITIONS`, set for the grader alone (never for a replay, nor inherited from the
+  verifier), names a directory only root reads: `manifest.json` (`{"schema": "platoon.conditions/v1", "sha256": ...,
+  "conditions": [{"id", "inputs", "seconds", "timeout_s", "outputs": [{"path", "bytes", "sha256"}]}]}`, the
+  conditions in their order, `inputs` as `grader.json` gives it, relative to the grader's directory) and
+  `outputs/<id>/<output>`. The grader computes its own verdict from them and its hidden targets. They are what the
+  submission wrote: read them as untrusted data, and never execute, import or unpickle them. `seconds` and `timeout_s`
+  are informational, differ from grade to grade and are not in `conditions_sha256`: a verdict that depends on them is a
+  flaky grader's.
+- **Failures are the launcher's to decide.** A condition's replay that fails, outlives its time, leaves what cannot be
+  removed, or does not write every output again scores 0, reason `solver_condition_failed`, and the grader does not run;
+  so does one whose inputs cannot be laid over the working directory the submission left (it turned a public input into
+  a directory, say). The conditions' outputs hold at most 256 MiB together (each output at most 64 MiB), and the
+  launcher fails closed (`verifier_trusted_launcher`) before any replay where its own directory, `/tmp`, lacks room for
+  the replay's outputs and the conditions' at their largest. The report lists each condition that replayed
+  (`conditions.ran`), the one that failed with its problem but never the tail of its output, which may echo its hidden
+  inputs: the report reaches the outcome's metadata. To see why a generated task's condition fails, audit the task
+  itself, which holds its conditions in `tests/gen`. A generated task's own failure audits should cover these 0s: the
+  generator wrote the conditions, and a mistake in them is charged to the solver.
+- **Variants or conditions.** Both replay the submission on inputs of the task's, one mechanism: a variant is the
+  producer's check, judged by the launcher against fixed numbers, its outputs discarded; a condition is the grader's
+  data, its outputs handed to the grader, which judges them.
 
 **Before a run.** `platoon train`, `eval` and `rollout` refuse an environment whose provider options could not run its
 runtime tasks when they list its tasks (exit 78): sandboxes without a network, the verifiers' root filesystem layout,

@@ -437,7 +437,10 @@ toolkit holds the domain's half, in the checks it runs on a task before the task
 module the task's own grader directory shadows), and a program that runs runtime tasks catches graders that score by
 anything but the answer with its controls. The tasks it takes in stay in the environment's store (outside a run, the
 Harbor cache's unless `runtime_tasks` names a `store`). Call it outside a running event loop. `check_runtime_tasks`
-checks the experimental runtime-task API (`platoon.experimental`), and changes with it.
+checks the experimental runtime-task API (`platoon.experimental`), and changes with it. The cases do not yet cover a
+task's hidden evaluation conditions, nor the kernel keyrings every replay's user has cleared after it: the unit tests of
+`tests/envs/test_harbor_runtime_launcher.py` cover them, the keyrings on the kernel itself where unprivileged user
+namespaces allow.
 
 ## Reference
 

@@ -1896,3 +1896,342 @@ async def test_a_replay_checks_reason_with_a_reward_of_1_is_no_report_the_launch
 
     assert (outcome.status, outcome.failure_kind) == ("invalid", "verifier_generated_unfinished")
     assert "its report holds no reward the launcher writes" in outcome.reason
+
+
+# ----------------------------------------------------------------------------------------- hidden evaluation conditions
+
+# A grader manifest whose replay has two hidden conditions, with their inputs in tests/gen/conditions and the grader's
+# hidden targets beside them, outside every condition's inputs.
+CONDITIONED_JSON = {
+    **GRADER_JSON,
+    "replay": {
+        **GRADER_JSON["replay"],
+        "conditions": [{"id": "E1", "inputs": "conditions/E1"}, {"id": "E2", "inputs": "conditions/E2"}],
+    },
+}
+CONDITION_FILES = {
+    "tests/gen/grader.json": json.dumps(CONDITIONED_JSON),
+    "tests/gen/conditions/E1/data.txt": "50\n",
+    "tests/gen/conditions/E2/data.txt": "60\n",
+    "tests/gen/targets.json": json.dumps({"E1": 100, "E2": 120}),
+}
+
+
+def _manifest(conditions: Any) -> str:
+    return json.dumps({**GRADER_JSON, "replay": {**GRADER_JSON["replay"], "conditions": conditions}})
+
+
+def test_the_grader_manifest_gives_the_replays_conditions_with_their_inputs_as_paths_of_the_task(tmp_path):
+    manifest = tmp_path / "grader.json"
+    manifest.write_text(json.dumps(CONDITIONED_JSON))
+
+    read, problems = runtime.read_grader_manifest(manifest)
+
+    assert problems == [] and read is not None
+    assert read["replay"] == {
+        "command": ["python3", "solve.py"],
+        "outputs": ["a.json"],
+        "conditions": [
+            {"id": "E1", "inputs": "tests/gen/conditions/E1"},
+            {"id": "E2", "inputs": "tests/gen/conditions/E2"},
+        ],
+    }
+    manifest.write_text(json.dumps(GRADER_JSON))
+    assert "conditions" not in runtime.read_grader_manifest(manifest)[0]["replay"]  # none: the launcher's as before
+
+
+def test_the_grader_manifest_holds_the_most_conditions_with_their_longest_ids_and_long_paths(tmp_path):
+    """32 conditions, each of a 128-character id and inputs 2,000 characters long, take more than 64 KiB."""
+
+    conditions = [
+        {"id": f"{number:02d}" + "x" * 126, "inputs": f"conditions/{number:02d}/" + "d/" * 993 + "in"}
+        for number in range(32)
+    ]
+    manifest = tmp_path / "grader.json"
+    manifest.write_text(_manifest(conditions))
+    assert manifest.stat().st_size > 64 * 1024
+
+    read, problems = runtime.read_grader_manifest(manifest)
+
+    assert problems == [] and read is not None and len(read["replay"]["conditions"]) == 32
+
+
+@pytest.mark.parametrize(
+    ("conditions", "problem"),
+    [
+        ([], "replay.conditions must list 1 to 32 conditions, each an object of id and inputs (leave conditions out"),
+        ({"id": "E1", "inputs": "c"}, "replay.conditions must list 1 to 32 conditions"),
+        ([{"id": f"E{n}", "inputs": f"c/{n}"} for n in range(33)], "replay.conditions must list 1 to 32 conditions"),
+        (["conditions/E1"], "replay.conditions[0] must be an object of id and inputs, and nothing else"),
+        ([{"id": "E1"}], "replay.conditions[0] must be an object of id and inputs, and nothing else"),
+        (
+            [{"id": "E1", "inputs": "c", "outputs": ["a.json"]}],
+            "replay.conditions[0] must be an object of id and inputs, and nothing else",
+        ),
+        ([{"id": "E/1", "inputs": "c"}], "replay.conditions[0].id must be letters, digits, _, . and -, at most 128"),
+        ([{"id": ".E1", "inputs": "c"}], 'starting with a letter or digit, got ".E1"'),
+        ([{"id": 1, "inputs": "c"}], "starting with a letter or digit, got 1"),
+        ([{"id": "E1", "inputs": "c"}, {"id": "E1", "inputs": "d"}], "replay.conditions name the condition E1 twice"),
+        ([{"id": "E1", "inputs": "../c"}], "replay.conditions[0].inputs must be a directory of the task's tests/gen"),
+        ([{"id": "E1", "inputs": "/tests/gen/c"}], 'relative to it (conditions/E1), got "/tests/gen/c"'),
+        ([{"id": "E1", "inputs": "c//d"}], 'got "c//d"'),
+        ([{"id": "E1", "inputs": "."}], 'got "."'),
+        ([{"id": "E1", "inputs": "c" * 2100}], "replay.conditions[0].inputs must be a directory"),
+    ],
+    ids=[
+        "empty",
+        "no-list",
+        "too-many",
+        "no-object",
+        "no-inputs",
+        "an-outputs-key",
+        "an-id-with-a-slash",
+        "a-hidden-id",
+        "an-id-no-string",
+        "an-id-twice",
+        "inputs-above-tests-gen",
+        "inputs-absolute",
+        "inputs-not-normalized",
+        "inputs-tests-gen-itself",
+        "inputs-too-long",
+    ],
+)
+def test_the_grader_manifest_refuses_conditions_no_launcher_runs(tmp_path, conditions, problem):
+    manifest = tmp_path / "grader.json"
+    manifest.write_text(_manifest(conditions))
+
+    read, problems = runtime.read_grader_manifest(manifest)
+
+    assert read is None and any(problem in found for found in problems), problems
+
+
+@pytest.mark.asyncio
+async def test_materialize_records_the_conditions_in_the_tasks_launcher_settings(tmp_path, rootful, store):
+    """The conditions are the task's own word, in its grader manifest: its launcher settings record them, with their
+    inputs as paths of the task, and a task without conditions has the settings it had."""
+
+    service = make_service(tmp_path, rootful, store)
+    conditioned = await service.materialize(write_task(tmp_path / "sources", files=CONDITION_FILES))
+    plain = await service.materialize(write_task(tmp_path / "plain"))
+
+    assert conditioned.ok and plain.ok, (conditioned.problems, plain.problems)
+    settings = json.loads((store / conditioned.digest / "tests" / "platoon" / "launch.json").read_text())
+    assert settings["replay"]["conditions"] == [
+        {"id": "E1", "inputs": "tests/gen/conditions/E1"},
+        {"id": "E2", "inputs": "tests/gen/conditions/E2"},
+    ]
+    assert launcher.read_config(str(store / conditioned.digest / "tests" / "platoon" / "launch.json")) == settings
+    plain_settings = json.loads((store / plain.digest / "tests" / "platoon" / "launch.json").read_text())
+    assert plain_settings["replay"] == GRADER_JSON["replay"]
+
+
+@pytest.mark.asyncio
+async def test_a_time_for_each_replay_counts_the_conditions(tmp_path, rootful, store):
+    """The template's verifier gives the launcher 108 s: the replay and two conditions may take 35 s each, not 36."""
+
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources", files=CONDITION_FILES)
+
+    assert (await service.materialize(source, replay_timeout_s=35)).ok
+    made = await service.materialize(source, replay_timeout_s=36)  # the replay alone fits: the task's conditions not
+    assert not made.ok and made.problems == (
+        "tests/gen/grader.json lists 2 conditions, whose replays leave the grader no time: 3 replays of 36 s leave the "
+        "grader none of the 108 s the launcher's steps have (the verifier's time limit, scaled); list fewer conditions",
+    )
+    with pytest.raises(ValueError, match=re.escape("3 replays of 108 s leave the grader none of the 108 s")):
+        await service.materialize(source, replay_timeout_s=108)  # the caller's time, which not even the replay fits
+
+
+def _conditions_with_checks() -> dict[str, Any]:
+    return {**CHECKS, "variants": [_variant(inputs="tests/gen/conditions/E1/v", expected="tests/gen/v.json")]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("files", "checks", "problem"),
+    [
+        (
+            {"tests/gen/conditions/E2/data.txt": None},
+            None,
+            "condition E2's inputs, tests/gen/conditions/E2, cannot be read:",
+        ),
+        (
+            {"tests/gen/conditions/E2/data.txt": None, "tests/gen/conditions/E2": "a file\n"},
+            None,
+            "condition E2's inputs, tests/gen/conditions/E2, are a file, not a directory",
+        ),
+        (
+            {"tests/gen/conditions/E2/data.txt": None, "tests/gen/conditions/E2/empty/.keep": None},
+            None,
+            "condition E2's inputs, tests/gen/conditions/E2, hold no file to lay over the working inputs",
+        ),
+        (
+            {"tests/gen/conditions/E1/solve.py": "print(1)\n"},
+            None,
+            "condition E1's inputs cannot be laid over the working inputs: solve.py would change solve.py, which the "
+            "submission holds or the replay writes",
+        ),
+        ({"tests/gen/conditions/E1/a.json": "{}"}, None, "a.json would change a.json"),
+        (
+            {"tests/gen/conditions/E1/tools": "a file\n"},
+            None,
+            "tools is a file of the condition's and a directory of environment/'s",
+        ),
+        (
+            {"tests/gen/conditions/E1/data.txt": None, "tests/gen/conditions/E1/data.txt/x": "1\n"},
+            None,
+            "data.txt is a directory of the condition's and a file of environment/'s",
+        ),
+        (
+            {"tests/gen/conditions/E1/hidden-format/query.tsv": "k\tu\n"},
+            None,
+            "condition E1's inputs hold hidden-format/query.tsv, which environment/ does not hold as a file: a "
+            "condition replaces public inputs, and adds none",
+        ),
+        (
+            {
+                "tests/gen/grader.json": _manifest(
+                    [{"id": "E1", "inputs": "conditions/E1"}, {"id": "E2", "inputs": "conditions/E1/E2"}]
+                ),
+                "tests/gen/conditions/E1/E2/data.txt": "60\n",
+            },
+            None,
+            "condition E2's inputs lie in condition E1's",
+        ),
+        (
+            {
+                "tests/gen/grader.json": _manifest(
+                    [{"id": "E1", "inputs": "conditions/E1"}, {"id": "E2", "inputs": "conditions/E1"}]
+                )
+            },
+            None,
+            "conditions E1 and E2 name the same inputs",
+        ),
+        (
+            {**CHECK_FILES, "tests/gen/conditions/E1/v/data.txt": "7\n", "tests/gen/v.json": '{"a.json#/answer": 14}'},
+            _conditions_with_checks(),
+            "condition E1's inputs and replay variant fifty's lie one in the other",
+        ),
+        (
+            {**CHECK_FILES, "tests/gen/conditions/E1/expected.json": '{"a.json#/answer": 100}'},
+            {**CHECKS, "variants": [_variant(expected="tests/gen/conditions/E1/expected.json")]},
+            "replay variant fifty's expected outputs lie in condition E1's inputs",
+        ),
+        (
+            {**CHECK_FILES, "tests/gen/conditions/E1/forbidden.json": '[{"value": 42, "tolerance": 0.5}]'},
+            {
+                **CHECKS,
+                "forbidden_literals": {
+                    **CHECKS["forbidden_literals"],
+                    "path": "tests/gen/conditions/E1/forbidden.json",
+                },
+            },
+            "the forbidden literals lie in condition E1's inputs",
+        ),
+    ],
+    ids=[
+        "no-inputs",
+        "inputs-a-file",
+        "empty-inputs",
+        "inputs-replace-an-artifact",
+        "inputs-replace-an-output",
+        "inputs-a-file-for-a-directory",
+        "inputs-a-directory-for-a-file",
+        "inputs-a-file-the-environment-lacks",
+        "nested",
+        "the-same-inputs",
+        "a-variants-inputs-inside",
+        "a-variants-expected-outputs-inside",
+        "the-forbidden-literals-inside",
+    ],
+)
+async def test_materialize_refuses_conditions_whose_inputs_the_launcher_could_not_use(
+    tmp_path, rootful, store, files, checks, problem
+):
+    service = make_service(tmp_path, rootful, store)
+    source = write_task(tmp_path / "sources", files={**CONDITION_FILES, **files})
+    if "tests/gen/conditions/E2/empty/.keep" in files:
+        (source / "tests" / "gen" / "conditions" / "E2" / "empty").mkdir(parents=True)
+    before = sorted(str(path.relative_to(source)) for path in source.rglob("*"))
+
+    made = await service.materialize(source, **({"replay_checks": checks} if checks is not None else {}))
+
+    assert not made.ok and any(problem in found for found in made.problems), made.problems
+    assert not any(".staging" in found or str(store) in found for found in made.problems)
+    assert [path.name for path in store.iterdir()] == [".staging"] and list((store / ".staging").iterdir()) == []
+    assert sorted(str(path.relative_to(source)) for path in source.rglob("*")) == before
+
+
+_CONDITION_ZERO = {
+    **_SCORED_ZERO,
+    "reason": "solver_condition_failed",
+    "detail": "the replay of condition E1 exited 3",
+}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_conditions_zero_is_the_solvers_and_never_regraded(tmp_path, rootful, store, monkeypatch):
+    monkeypatch.setattr(
+        runtime, "TEST_SH", _in_turn(tmp_path, _launched(_CONDITION_ZERO, '{"reward": 0}'), _launched(_PASSED))
+    )
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources", files=CONDITION_FILES))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.reason, outcome.failure_kind) == (
+        "scored",
+        0.0,
+        "solver_condition_failed",
+        None,
+    )
+    assert "regrades" not in outcome.metadata and len(_verifiers(tmp_path)) == 1
+    assert not runtime.grader_scored(outcome)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_conditions_reason_with_a_reward_of_1_is_no_report_the_launcher_writes(
+    tmp_path, rootful, store, monkeypatch
+):
+    monkeypatch.setattr(runtime, "TEST_SH", _launched({**_CONDITION_ZERO, "reward": 1}))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources", files=CONDITION_FILES))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.failure_kind) == ("invalid", "verifier_generated_unfinished")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("conditions", "expected"),
+    [
+        (("c" * 64, "c" * 64), ("invalid", None, "verifier_flaky")),
+        (("c" * 64, "d" * 64), ("scored", 0.0, None)),
+    ],
+    ids=["the-same-condition-outputs", "other-condition-outputs"],
+)
+async def test_a_disagreement_over_what_the_conditions_replays_wrote_otherwise_is_the_solvers_0(
+    tmp_path, rootful, store, monkeypatch, conditions, expected
+):
+    """A submission deterministic on the working inputs and random on the hidden conditions writes the same replayed
+    outputs each time, and other condition outputs: a grader that scores those otherwise is not flaky, and the
+    solver's 0 is the grade.  The same bytes everywhere, scored otherwise, are the grader's flakiness."""
+
+    reports = [
+        {**report, "replayed_sha256": "a" * 64, "conditions_sha256": digest}
+        for report, digest in zip((_PASSED, _FAILED), conditions, strict=True)
+    ]
+    monkeypatch.setattr(runtime, "TEST_SH", _in_turn(tmp_path, *map(_launched, reports)))
+    service = make_service(tmp_path, rootful, store)
+    made = await service.materialize(write_task(tmp_path / "sources", files=CONDITION_FILES))
+
+    outcome = await _graded(service, made.task)
+
+    assert (outcome.status, outcome.reward, outcome.failure_kind) == expected
+    if outcome.trainable:
+        assert outcome.reason == "solver_nonreproducible"
+    else:
+        assert outcome.reason.startswith(
+            "the task's generated grader scored the same artifacts, replayed outputs and condition outputs 1, then 0"
+        )
