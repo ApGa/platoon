@@ -32,6 +32,7 @@ For how platoon is built today, read the [architecture overview](../architecture
 | [0019](0019-training-mixtures.md) | Training mixtures: per-environment settings, task statistics and samplers | Draft |
 | [0020](0020-rollout-permits.md) | Rollout permits that return as each rollout ends | Draft |
 | [0021](0021-trainers-credit-and-policies.md) | Trainers, credit and policies | Draft |
+| [0022](0022-programs-that-run-rollouts.md) | Programs that run rollouts, and online environment generation | Draft |
 
 `tests/test_rfc_index.py` checks that this table lists every RFC file with the title and status the RFC itself
 gives, so add the row in the same pull request as the RFC.
