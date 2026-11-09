@@ -435,10 +435,10 @@ apart.
 **3.3 Regrades** (`runtime_tasks.regrade`, default 1). Once a generated grader scores a submission, the session grades
 the same collected artifacts again `regrade` times, each in a fresh verifier that starts after the one before
 stopped, and the score stands only while every regrade gives it again. Each regrade replays the submission, and the
-launcher's report holds the SHA-256 of what the replay wrote (`replayed_sha256`), taken before the grader could change
-it:
-- another score of the same bytes (the same artifacts and replayed outputs) is `invalid`, `verifier_flaky`, the task
-  author's fault, and no regrade runs after it;
+launcher's report holds the SHA-256 of what the replay wrote (`replayed_sha256`), and of what its hidden conditions'
+replays wrote (`conditions_sha256`, section 3.4), taken before the grader could change them:
+- another score of the same bytes (the same artifacts, replayed outputs and condition outputs) is `invalid`,
+  `verifier_flaky`, the task author's fault, and no regrade runs after it;
 - another score after a replay that wrote other bytes is the solver's 0, `solver_nonreproducible`: a submission that
   draws from an unseeded generator or reads the clock can get an honest grader's 1 one time and its 0 the next, and
   charging that to the grader would count the solver's code against the author. A flaky grader then goes unseen on
@@ -498,16 +498,36 @@ task), and their data lie in the task's sealed `tests/gen`:
   so that exhausting the disk never turns the solver's 0 into a fault of the trusted side or the grader's. Where the
   replays left neither, a full filesystem is the trusted side's, as it is before any replay ran; one found as the
   directory is put back is so only once the filesystem has written out what it holds and the launcher has tried once
-  more, since some filesystems free what was removed only after a while. `replay_timeout_s` gives each replay, its own
-  and each variant's, the time the producer told its solver, copying the working directory aside and putting it back
-  included: the replays end within `(1 + variants) × replay_timeout_s`, and the grader keeps the rest (`materialize`
-  raises `ValueError` where none is left); without it the replays share half the time left.
+  more, since some filesystems free what was removed only after a while. The keys of the replay user's kernel
+  keyrings that outlive its processes (its user, user-session and persistent keyrings) are cleared after each replay
+  too, and each replay runs in a session keyring of its own: a keyring the replay closed to its user or revoked, or
+  keys that fill the user's quota, are its own 0; a sandbox that keeps the user from keys (Docker's seccomp profile,
+  gVisor) is no fault, and one that lets it make keys but not clear them is `verifier_trusted_launcher`.
+  `replay_timeout_s` gives each replay, its own, each variant's and each condition's, the time the producer told its
+  solver, copying the working directory aside and putting it back included: the replays end within
+  `(1 + variants + conditions) × replay_timeout_s`, and the grader keeps the rest (`materialize` raises `ValueError`
+  where none is left, and refuses the task where its conditions alone leave none); without it the replays share half
+  the time left.
+- **Hidden evaluation conditions** (`tests/gen/grader.json`'s `replay.conditions`: 1 to 32, each `{id, inputs}`, the
+  inputs a directory of `tests/gen` whose files replace public inputs of `environment/` and add none, the grader's
+  targets elsewhere in `tests/gen`). They are the grader's data, where variants are the producer's check: after the
+  variants, the launcher replays the submission once per condition by the same code path, in place, with the
+  condition's inputs laid over the working directory, holds every output each wrote as root's, and hands them to the
+  grader alone in `$PLATOON_CONDITIONS` (`manifest.json`, schema `platoon.conditions/v1`, and `outputs/<id>/`); the
+  grader computes its verdict from them and its hidden targets. The launcher decides a condition's failure: a replay
+  that fails, outlives its time, leaves what cannot be removed, or does not write every output again is the solver's
+  0, reason `solver_condition_failed`, and the grader does not run. Inputs of a variant or a condition that cannot be
+  laid over the working directory the submission left are the solver's 0 too, since `materialize` checked them
+  against `environment/`. The outputs hold at most 256 MiB together, and the launcher fails closed before any replay
+  where its own directory lacks room for them. The report keeps each condition's record but never the tail of its
+  output, which may echo the hidden inputs, and `conditions_sha256`, which a regrade compares (section 3.3).
 
 Two checks, not one: a perturbation catches a stated answer only where it moves the answer beyond tolerance, so the
 scan for the answers themselves stands beside it. The scan reads Python only, by a rule that a producer applies to its
 own reference, so that its oracle never fails it; other languages need rules of their own.
 
-**3.5 `platoon.testing.check_runtime_tasks`** runs the generic half of a red-team suite, written from the
+**3.5 `platoon.testing.check_runtime_tasks`** (which does not yet cover hidden evaluation conditions or the keyrings,
+covered by the launcher's unit tests) runs the generic half of a red-team suite, written from the
 environment's own template. Its refusal cases need no sandbox: a network, GPUs, another image and shared grading in
 `task.toml`, an artifact at `/tests/gen`, a Dockerfile, a compose file, a `tests/test.sh` of the task's own, a link,
 files beyond `max_bytes`, a malformed grader manifest, a variant whose inputs overlay the submission, and the honest
@@ -924,7 +944,7 @@ generated task the dataset is the policy's output, so the taxonomy flips. Four r
 | generator | no bundle within the budget; a malformed bundle; export refuses what the generator wrote (`fault: generator`), or `materialize` or the final check refuses; a trusted command crashes on the content with a healthy canary; the oracle fails, disagrees with itself or takes over a quarter of the solver's budget; a no-op, a mutant or an author control passes; a metamorphic variant fails; a generated grader gives no score (`verifier_generated_*`; an `_unfinished` one once a healthy canary rules out the sandbox); a regrade disagrees on the same bytes (`verifier_flaky`); an audited failure whose review is not clean (a false negative, a grader the specification does not support, unresolved); a pass that exploits the grader; a judge malformed or out of its time twice with a healthy canary; a sampled all-fail audit that finds a false negative or an intractable task | `invalid(<kind>)` | dropped |
 | claim | the generator abstains: no viable task in the seed; 25% of abstentions are audited | `abstained(unaudited)`, `abstained(confirmed)` or `abstained(refuted)` | none |
 | duplicate | an exact or near duplicate of the archive or of a task in flight | `duplicate` | not solved |
-| solver | its budget runs out; it crashes with a clean gateway; it fills its context window; the launcher scores it 0: its artifacts break the output contract (`solver_output_contract`), its replay fails or times out, or a regrade's replay writes other bytes that score otherwise (`solver_nonreproducible`), it misses a variant (`solver_variant_failed`) or states a forbidden literal (`solver_hardcoded`); a pass that its pass review finds faked, rescored as a failure | s and n count it as a failure | that member scores 0 |
+| solver | its budget runs out; it crashes with a clean gateway; it fills its context window; the launcher scores it 0: its artifacts break the output contract (`solver_output_contract`), its replay fails or times out, or a regrade's replay writes other bytes that score otherwise (`solver_nonreproducible`), it misses a variant (`solver_variant_failed`), states a forbidden literal (`solver_hardcoded`) or fails a hidden condition's replay (`solver_condition_failed`); a pass that its pass review finds faked, rescored as a failure | s and n count it as a failure | that member scores 0 |
 | none | all n valid outcomes are equal | `valid(s, n)` with s = 0 or s = n | zero advantage |
 | none | mixed outcomes, and every audit clean | `valid(s, n)` | trained, leave-one-out |
 
@@ -1021,6 +1041,11 @@ over a production's K children is GRPO without the std division, `A_j = r_j − 
 - **Why not platoon's other judges.** `ep.judge_endpoint()` is a bare endpoint, and an audit needs tools on the review
   sandbox; verifier agents grade one child and gate its score, while audits are drawn across siblings after all K
   land, read the privileged task and veto the whole production.
+- **Hidden conditions' failures are audited too.** `solver_condition_failed` is decided by the launcher, never
+  regraded, and charged to the solver, though a generated task's hidden inputs are the generator's (section 9.2, rule
+  1), whose oracle may be fitted to them. So a review task of a task with conditions carries its `tests/gen/conditions`,
+  and the sampled failures it reviews include those 0s; the launcher's report never holds the failed condition's
+  output, which may echo its hidden inputs, so the judge reruns or reads the task instead.
 - **What is audited**, a constant budget per informative task, drawn after all K land and seeded by the draw key
   (auditing failures as they land would favour fast ones): of a mixed task, 2 failures and 1 pass; of all-fail tasks,
   25%, with 2 failures and a tractability review each; of an all-pass task, nothing; of abstentions, 25%. One
@@ -1235,7 +1260,7 @@ start experimental.
 | components | the estimators `running` and `roles` (M1, M2), core names that a package can no longer register; the program `platoon-envgen` and the rewards `learnability`, `tiers` and `plateau-regret` (M11); the step hook `platoon-envgen-archive` (M12); the hosted frozen-policy runtime (M12b); the control harness `platoon-artifacts` (M16) |
 | checks in `platoon.testing` | `check_runtime_tasks` (M5; its regrade case M6, its replay-check cases M5b), `check_shared_service` (M7), `check_program` (M11) |
 | metrics | `credit/running/*` (M1); `credit/role_mass/<role>`, `credit/role_weight/<role>`, `credit/role_kl/<role>` and `roles/<role>/*`, ρ_G among them (M2); `rollout_client/start_limit/releases/{ready,child}` and the grant latency (`start_limit/grant_latency_p50` and `_max`), with `child_entries` only (M9); `roles/<role>/stale_share` and the archive's `envgen_archive/*` (M12) |
-| protocols and formats | `agents.root_roles` in `identity.json` (M3); the failure kind `program_options`, and a program's options in `lock.json` (M4); the launcher, `tests/gen/grader.json`, the verdict, the report (`platoon.launcher/v1`), the launch settings, the store, the reasons `solver_output_contract` and `solver_nonreproducible`, and the failure kinds `verifier_generated_*` and `verifier_trusted_*` (M5); `verifier_flaky` and the report's `replayed_sha256` (M6); the reasons `solver_variant_failed` and `solver_hardcoded`, and the scan rule `python-numeric-literals/v1` (M5b); `RolloutLease.size` of a draw of several permits per rollout, and platoon's own key of a rollout config's `extra`, `platoon_rollout_permits` (M8); the grant channel, the key `platoon_child_entries`, the trace's `child_rollout` record of a child's root and the failure kind `child_conversion` (M9); the record's `failed_to_open` (M10); `envgen.evidence/v1` and its verdicts, `void(deadline)` and `void(toolkit_usage)` among them, the record's `rescored`, the toolkit's `envgen.<verb>/v1` and its arguments, `export.json` (`envgen.task/v1`), review tasks (`envgen.review-task/v1`) and the trial layout, and, proposed (open question 11), the failure kind `harness_install` (M11); the archive's manifest (`envgen.archive/v1`) and journal (`envgen.journal/v1`), a production's `final-check.json` and `stored.json`, the evidence's `task.instruction` and `task.final_check`, and the final check's `checks`, `digest` and `fingerprint` (M12); rolling child permits (M13); the drain signal (M14) |
+| protocols and formats | `agents.root_roles` in `identity.json` (M3); the failure kind `program_options`, and a program's options in `lock.json` (M4); the launcher, `tests/gen/grader.json`, the verdict, the report (`platoon.launcher/v1`), the launch settings, the store, the reasons `solver_output_contract` and `solver_nonreproducible`, and the failure kinds `verifier_generated_*` and `verifier_trusted_*` (M5); `verifier_flaky` and the report's `replayed_sha256` (M6); the reasons `solver_variant_failed` and `solver_hardcoded`, and the scan rule `python-numeric-literals/v1` (M5b); the reason `solver_condition_failed`, `grader.json`'s `replay.conditions`, `$PLATOON_CONDITIONS`, `platoon.conditions/v1` and the report's `conditions_sha256` (M5c); `RolloutLease.size` of a draw of several permits per rollout, and platoon's own key of a rollout config's `extra`, `platoon_rollout_permits` (M8); the grant channel, the key `platoon_child_entries`, the trace's `child_rollout` record of a child's root and the failure kind `child_conversion` (M9); the record's `failed_to_open` (M10); `envgen.evidence/v1` and its verdicts, `void(deadline)` and `void(toolkit_usage)` among them, the record's `rescored`, the toolkit's `envgen.<verb>/v1` and its arguments, `export.json` (`envgen.task/v1`), review tasks (`envgen.review-task/v1`) and the trial layout, and, proposed (open question 11), the failure kind `harness_install` (M11); the archive's manifest (`envgen.archive/v1`) and journal (`envgen.journal/v1`), a production's `final-check.json` and `stored.json`, the evidence's `task.instruction` and `task.final_check`, and the final check's `checks`, `digest` and `fingerprint` (M12); rolling child permits (M13); the drain signal (M14) |
 
 ### 11. Compatibility, the golden trace and tests
 
@@ -1376,6 +1401,7 @@ a mixture-of-experts base.
 | M5 runtime tasks | section 3 but `ep.materialize`, regrades and replay checks (EST 400 + 450; built 2,886 + 2,337) | `check_runtime_tasks` refuses or grades every sabotage as listed but the flaky grader, which M6's regrade catches, end to end on Singularity with root verifiers; curated grading unchanged | "feat: Add runtime Harbor tasks", open |
 | M6 regrades | section 3.3 (EST 120 + 150; built 276 + 578) | a flaky fake grader is `verifier_flaky`; an unseeded submission whose replays differ is the solver's 0, never `verifier_flaky`; curated tasks are never regraded | "feat: Add regrades of generated graders", open, on M5's |
 | M5b replay checks | section 3.4 (built 1,575 + 1,830) | the honest submission scores 1, and its regrade replays the variant again; one that ignores its inputs is `solver_variant_failed`, one that states the answer `solver_hardcoded`; unusable check data is the grader owner's; a variant's replay reaches neither the replay's outputs nor the grader's files, on Singularity | "feat: Add replay checks to runtime tasks", open, on M6's |
+| M5c hidden conditions | section 3.4 | the honest submission scores 1 on each condition, its outputs reaching the grader alone; one that ignores its inputs is the grader's 0; a condition's replay that fails is `solver_condition_failed`; the keyrings of the replay's user are cleared after each replay, on Singularity | "feat: Add hidden evaluation conditions to runtime tasks", local, on M5b's |
 | M7 shared-service check | `check_shared_service` for RFC 0021's U1-U4 (EST 150 + 150; built 497 + 529) | passes on a toy service that keeps two adapters apart, and each of its faults fails its own check; run on a live LoRA service before a two-adapter study | "feat: Add a shared-service check for adapters", open |
 | M8 static permits | section 4.1 (EST 200 + 250; built 691 + 1,870) | a draw holds `group_size × W` permits whole until its group returns; in a randomized fake under a full pool, children that take their seat, then their start slot, never deadlock, while a child that takes its slot first among them can hold the start limit until a slot's timer; the derived label cap | "feat: Reserve rollout permits for episodes with several sessions", one commit, not open yet |
 | M9 child rollouts | sections 2.1-2.4, 2.5's second refusal and `ep.materialize`, for function harnesses (EST 450 + 500; built 2,629 + 2,932) | children train in their episode's group; a subagent a solver child mints trains on that child's outcome; inspections and their subtrees never train; a solver child's mints of `judge` and `generator` get 403; a check of an entry with children sees them, and other checks see only their entry; start slots and the grant channel under process isolation; without `child_entries`, no new metric and no channel | "feat: Run rollouts of other entries from programs", one commit on M8's, not open yet |
