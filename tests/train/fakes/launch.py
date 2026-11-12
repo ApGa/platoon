@@ -10,12 +10,12 @@ from platoon.train import entry_settings, launch
 from platoon.train.auto import AutoEnvironment
 from platoon.train.policy.policy import Policy
 from platoon.train.policy.set import PolicySet
-from platoon.train.policy.spec import MAIN, PolicySpec
+from platoon.train.policy.spec import agent_bindings, policy_specs
 
 
 def built_workflows(config: Any) -> tuple[Any, Any]:
-    """The training and evaluation workflows ``platoon train`` builds for ``config``, on its policy main of a model
-    that nothing loads."""
+    """The training and evaluation workflows ``platoon train`` builds for ``config``, on its policies (``main`` and
+    each of ``policies:``, which its agents sample as ``agents:`` says), each of a model that nothing loads."""
 
     AutoEnvironment.load(config)
     settings = entry_settings.entry_settings(config)
@@ -23,6 +23,6 @@ def built_workflows(config: Any) -> tuple[Any, Any]:
     model_info: Any = SimpleNamespace(
         model_name="m", renderer_name="r", renderer_kwargs={}, llm=SimpleNamespace(version=0)
     )
-    policies = PolicySet([Policy(PolicySpec(MAIN, model_name="m", renderer_name="r"), model_info)])
+    policies = PolicySet([Policy(spec, model_info) for spec in policy_specs(config).values()], agent_bindings(config))
     training: Any = SimpleNamespace(tasks=[])
     return launch._build_workflows(config, components, policies, settings, training, None)

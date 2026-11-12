@@ -203,8 +203,9 @@ class GroupRolloutWorkflow:
     # credit group's policies and versions.  Empty without: the group's policy is then main, from ``model_info``.
     policy_views: Mapping[str, PolicyView] = MappingProxyType({})
     # The phase whose groups it runs, ``train`` or ``eval`` (``WorkflowSetup.phase``, which ``from_setup`` keeps): an
-    # evaluation's groups train nothing, so no credit of theirs is refused for the spans their agents name
-    # (``_assign_credit``).  A train script sets ``eval`` on its evaluation's workflow, as ``platoon train`` does.
+    # evaluation's groups train nothing, so none is refused for the spans its agents name or, in a run that trains
+    # several policies, for having no estimator (``_assign_credit``).  A train script sets ``eval`` on its evaluation's
+    # workflow, as ``platoon train`` does.
     phase: Phase = "train"
     # In a run whose agents sample several policies, which ``platoon train`` sets after construction: the model info
     # of each sampled policy but the agents' default (``agents.default``), whose is ``model_info``, by id; which agent
@@ -599,18 +600,19 @@ class GroupRolloutWorkflow:
         else each member's datums centered on its baseline (:meth:`assign_advantages`), at once, as the workflow
         always credited them, and None.  Either way, a group of the training workflow (``phase``) whose agents name
         spans that its credit does not read stops the run first
-        (:func:`~platoon.train.credit.runtime.refuse_unread_spans`); an evaluation's group trains nothing, and is not
-        refused."""
+        (:func:`~platoon.train.credit.runtime.refuse_unread_spans`), and one without an estimator fails in a run that
+        trains several policies, since only an estimator tells each row's policy; an evaluation's group trains nothing,
+        and is not refused."""
 
         estimator = self._entry_estimator() if self.entry_credit else None
         if self.phase == "train":
             refuse_unread_spans(estimator, current_entry(), data.get("task_id"), valid_results)
         if estimator is None:
-            if len(self.trained_policies) > 1:
+            if self.phase == "train" and len(self.trained_policies) > 1:
                 raise RuntimeError(
-                    "a run that trains several policies credits every group with an estimator, which tells each row's "
-                    f"policy, and the group of task {data['task_id']} has none: its workflow credits with hooks of its "
-                    "own (applies_credit is False), or its entry has no settings of its own"
+                    "a run that trains several policies credits every training group with an estimator, which tells "
+                    f"each row's policy, and the group of task {data['task_id']} has none: its workflow credits with "
+                    "hooks of its own (applies_credit is False), or its entry has no settings of its own"
                 )
             self.assign_advantages(valid_results)
             return None
