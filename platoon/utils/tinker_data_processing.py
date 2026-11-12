@@ -8,6 +8,7 @@ https://raw.githubusercontent.com/thinking-machines-lab/tinker-cookbook/refs/hea
 """
 
 import logging
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Callable
@@ -17,6 +18,7 @@ import torch
 from tinker import TensorData
 
 from platoon.gateway.core import TinkerLLMInteraction
+from platoon.train.credit.api import Span
 from platoon.utils.generation import MODEL_GENERATIONS_KEY
 from platoon.utils.subagent_sampling import SubagentDatumSampler
 from platoon.utils.trajectory_error_filtering import (
@@ -196,15 +198,19 @@ class SubagentDatumSamplingStats:
 # role of a trajectory that records none.
 AGENT_MISC_KEY = "agent"
 DEFAULT_ROLE = "policy"
+# The trajectory misc key under which a program names the spans of its agent's trajectory (platoon.train.credit.api
+# .Span): a list of ``{"calls": [call id, ...], "reward": finite number or None}``, each call by its step's completion
+# id.
+SPANS_MISC_KEY = "spans"
 
 
 @dataclass(frozen=True)
 class AgentTag:
     """Who produced one trajectory of a rollout, for a credit estimator that reads agents (``tag_datums``): the agent
     the gateway recorded (a trajectory that records none, which a rollout run outside the gateway writes, is its own
-    agent, of the root's default role), its parent's trajectory (None for the root), its depth in the tree, and its
+    agent, of the root's default role), its parent's trajectory (None for the root), its depth in the tree, its
     processed reward, None when it is no score: the trajectory was interrupted, or it is a child whose verifier gave
-    no verdict; its rows then train nothing."""
+    no verdict; its rows then train nothing; and the spans its trajectory names."""
 
     trajectory_id: str
     agent_id: str
@@ -214,6 +220,9 @@ class AgentTag:
     reward: float | None
     # The policy the agent sampled, in a rollout of several policies (``policies``); None in a run of one.
     policy: str | None = None
+    # The spans its trajectory names (SPANS_MISC_KEY), each once; None when it names none (and in a tag pickled before
+    # the field, by this class default).
+    spans: tuple[Span, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -249,8 +258,8 @@ class TrajectoryCollectionResult:
     # Interrupted roots may carry a partial reward which is useful for metrics,
     # but must not participate in group advantage centering.
     task_reward_valid: bool = True
-    # With ``tag_datums``: every trajectory's agent, and each datum's trajectory, aligned with ``datums`` as converted.
-    # None without it.
+    # With ``tag_datums``, or when a trajectory names spans: every trajectory's agent, and each datum's trajectory,
+    # aligned with ``datums`` as converted.  None otherwise.
     agents: tuple[AgentTag, ...] | None = None
     datum_trajectories: tuple[str, ...] | None = None
     # Each datum's own policy version, in the order of ``datums`` as the conversion returned them: the oldest version
@@ -259,6 +268,12 @@ class TrajectoryCollectionResult:
     # result pickled before the field, by this class default).  Whatever changes ``datums`` afterwards, such as the
     # group's error-token filter, leaves it as it was: stamp first.
     own_versions: tuple[int, ...] = ()
+    # Each datum's model calls, in the order of ``datums`` as the conversion returned them: each call whose sampled
+    # tokens the datum trains, with its id (its step's ``completion_id``) and the target tokens ``[start, end)`` they
+    # fill, in the order the datum merged them (``TrainingSample.calls``).  Empty from a conversion that gives none, as
+    # ``own_versions`` is.  The group's error-token filter, which runs once credit is assigned, may mask a call's
+    # tokens after it: the mask stays the authority.
+    datum_calls: tuple[tuple[tuple[str, int, int], ...], ...] = ()
 
     def stamp_own_versions(self) -> bool:
         """Stamp each datum with its own policy version (``own_versions``) in place of the one it carries, as the
@@ -340,6 +355,9 @@ class SequenceAccumulator:
     last_routing_id: int | None = None
     # The policy version each merged interaction sampled (None: it recorded none).
     versions: list[int | None] = field(default_factory=list)
+    # Each merged interaction whose sampled tokens train: its call id and the datum's target tokens ``[start, end)``
+    # those tokens fill.
+    calls: list[tuple[str, int, int]] = field(default_factory=list)
 
     def clear(self):
         self.full_sequence = []
@@ -350,6 +368,7 @@ class SequenceAccumulator:
             self.error_action_mask = []
         self.last_routing_id = None
         self.versions = []
+        self.calls = []
 
     def own_version(self, rollout_version: int) -> int:
         """The policy version of the datum this sequence makes: the oldest its merged calls sampled, or
@@ -425,6 +444,8 @@ class TrajectoryDataResult:
     num_output_tokens: int
     # Each datum's own policy version (SequenceAccumulator.own_version), in the order of ``datums``.
     own_versions: list[int] = field(default_factory=list)
+    # Each datum's model calls (SequenceAccumulator.calls), in the order of ``datums``.
+    datum_calls: list[tuple[tuple[str, int, int], ...]] = field(default_factory=list)
 
 
 def tool_call_counts(trajectory: dict) -> dict[str, int]:
@@ -478,6 +499,7 @@ def trajectory_to_data(
     """
     data: list[tinker.Datum] = []
     own_versions: list[int] = []  # each datum's own policy version
+    datum_calls: list[tuple[tuple[str, int, int], ...]] = []  # each datum's model calls
     accumulator = SequenceAccumulator(error_action_mask=[] if filter_errors else None)
     count_found = 0
     total_input_tokens = 0
@@ -540,6 +562,7 @@ def trajectory_to_data(
                 )
             )
             own_versions.append(accumulator.own_version(checkpoint_version))
+            datum_calls.append(tuple(accumulator.calls))
             accumulator.clear()
             delta_ob_flat = ob_flat
 
@@ -552,13 +575,17 @@ def trajectory_to_data(
         if accumulator.error_action_mask is not None:
             accumulator.error_action_mask.extend([False] * delta_ob_len)
 
-        # Add action tokens (with actual logprobs and advantages)
+        # Add action tokens (with actual logprobs and advantages). The datum's targets drop the sequence's first token,
+        # so the call's sampled tokens fill its targets from one position before their place in the sequence.
+        start = len(accumulator.advantages) - 1
         accumulator.full_sequence.extend(ac_tokens)
         accumulator.sampled_logprobs.extend(ac_logprobs)
         # Keep messages in the model's context and routing sequence, but give
         # them no gradient for either advantage sign. Masked positions stay
         # zero during group centering; Tinker ultimately receives advantages.
         trainable = completion_id not in message_completion_ids
+        if trainable:
+            accumulator.calls.append((completion_id, start, start + len(ac_tokens)))
         accumulator.advantages.extend([trajectory_advantage if trainable else 0.0] * len(ac_tokens))
         accumulator.mask.extend([float(trainable)] * len(ac_tokens))
         if accumulator.error_action_mask is not None:
@@ -579,6 +606,7 @@ def trajectory_to_data(
             )
         )
         own_versions.append(accumulator.own_version(checkpoint_version))
+        datum_calls.append(tuple(accumulator.calls))
 
     if filter_message_actions and traj_depth is not None:
         # Empty datums survive until group centering so completed message-only
@@ -600,6 +628,7 @@ def trajectory_to_data(
         num_input_tokens=total_input_tokens,
         num_output_tokens=total_output_tokens,
         own_versions=own_versions,
+        datum_calls=datum_calls,
     )
 
 
@@ -636,7 +665,10 @@ def get_train_data_for_trajectory_collection(
             non-root trajectory after its steps have been merged into datums.
         tag_datums: Also give every trajectory's agent and each datum's
             trajectory (``agents``, ``datum_trajectories``), for a credit
-            estimator that reads agents.
+            estimator that reads agents.  A collection whose trajectory names
+            spans (``SPANS_MISC_KEY``) is tagged either way, so that the
+            trainer sees spans that its credit would not read, and refuses
+            them.
         policies: For a rollout that sampled several policies: each
             trajectory's datums are stamped with its own policy's version
             (instead of ``checkpoint_version``), and only the trajectories
@@ -648,6 +680,7 @@ def get_train_data_for_trajectory_collection(
     """
     train_data: list[tinker.Datum] = []
     own_versions: list[int] = []
+    datum_calls: list[tuple[tuple[str, int, int], ...]] = []
     trajectory_stats: list[TrajectoryStats] = []
     task_reward = 0.0
     root_rewards_dict: dict[str, float] = {}
@@ -658,6 +691,9 @@ def get_train_data_for_trajectory_collection(
     task_reward_valid = True
     if root_trajectory_id is not None:
         task_reward_valid = not trajectory_was_interrupted(trajectories[root_trajectory_id])
+    tag_datums = tag_datums or any(
+        _names_spans(trajectory) for trajectory in trajectories.values() if not _exclude_from_training(trajectory)
+    )
     need_depths = include_traj_depth or subagent_datum_sampler is not None or tag_datums
     agents: list[AgentTag] = []
     datum_trajectories: list[str] = []
@@ -742,12 +778,15 @@ def get_train_data_for_trajectory_collection(
         # Each datum's own version; a trajectory conversion that gives none leaves each its trajectory's (``version``:
         # its rollout's, or in a rollout of several policies its own policy's).
         versions = result.own_versions or [version] * len(result.datums)
-        for datum, own_version, retained in zip(result.datums, versions, keep_mask, strict=True):
+        # Each datum's model calls; none for a trajectory conversion that gives none.
+        calls_of = result.datum_calls or [()] * len(result.datums)
+        for datum, own_version, calls, retained in zip(result.datums, versions, calls_of, keep_mask, strict=True):
             if subagent_datum_sampler is not None and not policy_ineligible:
                 sampling_stats.record(datum, depth=depth, retained=retained)
             if retained:
                 retained_datums.append(datum)
                 own_versions.append(own_version)
+                datum_calls.append(calls)
 
         # Sampling may remove the datum which originally carried traj_start.
         # Mark the first *retained* datum so depth weighting counts only
@@ -799,13 +838,14 @@ def get_train_data_for_trajectory_collection(
         agents=tuple(agents) if tag_datums else None,
         datum_trajectories=tuple(datum_trajectories) if tag_datums else None,
         own_versions=tuple(own_versions),
+        datum_calls=tuple(datum_calls),
     )
 
 
 def _agent_tag(trajectory_id: str, trajectory: dict, depth: int, reward: float, policy: str | None = None) -> AgentTag:
     """The :class:`AgentTag` of one converted trajectory: its agent as the gateway recorded it in its misc, its parent
     (``parent_info``), its depth, its processed ``reward``, None when it was interrupted or its verifier gave no
-    verdict, and its ``policy`` (None in a run of one)."""
+    verdict, its ``policy`` (None in a run of one) and the spans it names (:func:`_spans`)."""
 
     misc = trajectory.get("misc")
     agent = misc.get(AGENT_MISC_KEY) if isinstance(misc, dict) else None
@@ -820,7 +860,48 @@ def _agent_tag(trajectory_id: str, trajectory: dict, depth: int, reward: float, 
         depth=depth,
         reward=float(reward) if scored else None,
         policy=policy,
+        spans=_spans(trajectory_id, trajectory),
     )
+
+
+def _names_spans(trajectory: dict) -> bool:
+    misc = trajectory.get("misc")
+    return isinstance(misc, dict) and SPANS_MISC_KEY in misc
+
+
+def _spans(trajectory_id: str, trajectory: dict) -> tuple[Span, ...] | None:
+    """The spans ``trajectory`` names (its ``misc["spans"]``), in its order; None when it names none.  A
+    ``ValueError`` for spans of another shape than a list of ``{"calls": [call id, ...], "reward": finite number or
+    None}``, for a call that no step of the trajectory made, and for a call that two spans name: a call lies in one
+    span."""
+
+    if not _names_spans(trajectory):
+        return None
+    named = trajectory["misc"][SPANS_MISC_KEY]
+    where = f"trajectory {trajectory_id}'s misc[{SPANS_MISC_KEY!r}]"
+    if not isinstance(named, list):
+        raise ValueError(f"{where} is no list of spans: {named!r}")
+    made = {completion_id_for_step(step) for step in trajectory.get("steps", ())}
+    spans: list[Span] = []
+    named_calls: set[str] = set()
+    for index, span in enumerate(named):
+        shape = f"{where}[{index}] is no {{'calls': [call id, ...], 'reward': finite number or None}}: {span!r}"
+        if not isinstance(span, dict) or not isinstance(span.get("calls"), list) or "reward" not in span:
+            raise ValueError(shape)
+        calls, reward = span["calls"], span["reward"]
+        bad_reward = isinstance(reward, bool) or not isinstance(reward, int | float | None)
+        bad_reward = bad_reward or (reward is not None and not math.isfinite(reward))
+        if bad_reward or not all(isinstance(call, str) for call in calls):
+            raise ValueError(shape)
+        if unknown := sorted(set(calls) - made):
+            raise ValueError(f"{where}[{index}] names calls that no step of the trajectory made: {unknown}")
+        if twice := sorted(named_calls.intersection(calls)):
+            raise ValueError(
+                f"{where}[{index}] names calls an earlier span names, and a call lies in one span: {twice}"
+            )
+        named_calls.update(calls)
+        spans.append(Span(frozenset(calls), None if reward is None else float(reward)))
+    return tuple(spans)
 
 
 def _compute_trajectory_depths(trajectory_collection: dict) -> dict[str, int]:

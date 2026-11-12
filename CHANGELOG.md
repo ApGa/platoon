@@ -4,6 +4,65 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
+## 0.6.0 (unreleased)
+
+### New features
+
+- **A program can refuse an entry when the config loads.** `@pt.program(name, check=fn)` runs `fn(options, ctx)` for
+  each entry that names the program and each phase the command runs, and a `ValueError` it raises is a configuration
+  error that names the entry and the phase (`environments.0.program (train): ...`): `platoon train`, `eval`, `rollout`
+  and `config validate` exit 78 before anything runs, where the program would otherwise fail every rollout once
+  training had started. `pt.CheckContext` holds the entry as the phase runs it, the phase and the entry's rollout
+  config; `options` is the empty mapping until programs declare options (RFC 0016, section 3)
+  ([Episode programs](docs/tutorials/programs.md#reference)).
+- **The gateway can hold a function harness to its step budget.** `@pt.harness(name, budget_enforcement="gateway")` does
+  for a function harness what `[budget] enforce = "gateway"` does for a spec, for one that cannot honour `ctx.budget`
+  itself, such as one that runs another agent program over HTTP: once `out_of_steps` holds for one of its agents (its
+  `max_steps`, which the agents it mints share, or its `ctx.budget`, which its spawned children draw on under
+  `agents.budget: linear`), the gateway answers that agent's `policy` calls with the budget stop, whose call id starts
+  with `platoon-budget-`, unsampled and unrecorded, and a run that completes after the gateway stopped a call its cap
+  bounds, its own or one of an agent it minted, is graded `limit` with reason `budget`. A rollout that sets no step
+  budget is refused with a `harness_config` error, as a spec's is, rather than run unbounded. `aux` and `judge` calls
+  stay outside the budget, a harness that declares nothing is unchanged, and `platoon harness show` says who enforces
+  the budget (RFC 0009, option A) ([Budgets](docs/tutorials/function-harness.md#budgets)).
+- **A function harness's file options load beside the config.** `@pt.harness(name, path_options=("rubric",))` names
+  the options that hold paths of files the harness reads, as a service's `path_options` do: a relative one that a
+  config file gives in `harness_options` or `eval_overrides.harness_options` is made absolute against that file's
+  directory when the config loads, and one that names nothing there is a configuration error, so a config runs the
+  same from any directory. A value that is no local path stays as written, and so does a reference to a Python object
+  (`module:attr`), which such an option may hold in place of a file (RFC 0016, section 1)
+  ([Configs](docs/how-to/configs.md)).
+- **Each training row names the model calls it trains.** `TrainingSample.calls` (experimental) holds, for each call
+  whose sampled tokens a row trains on, its id (its step's `completion_id`) and the target tokens `[start, end)` they
+  fill, so that a credit estimator can give each call of a row an advantage of its own; kept groups keep them across
+  a resume. `keyed` reads them for an agent whose trajectory names spans (below) (RFC 0021) ([Write a credit
+  estimator](docs/extending/credit-estimators.md)).
+- **Each span of an agent can train on its own reward (experimental).** A program may name spans of an agent's
+  trajectory in its misc, `misc["spans"]`: a list of `{"calls": [...], "reward": ...}`, each some of the agent's model
+  calls, by their steps' `completion_id`, with a reward of its own on the scale of the agent's, or null when none
+  reached it. `credit: keyed` keeps its baseline over the agents' own rewards and trains each call of a scored span on
+  that span's reward less its agent's baseline shared equally by the agent's scored spans, and every other call of the
+  agent on nothing, which `credit/keyed/unscored_tokens` counts; an agent that names no spans trains as before. `keyed`
+  also logs `credit/token_advantage/abs_avg`, the mean absolute advantage of a group's action tokens, the size of what
+  they train with, which `credit/agent_advantage/abs_avg` no longer says once spans cut an agent's credit. An estimator
+  says whether it reads spans (`reads_spans`, experimental, beside `AgentRun.spans` and `Span`), and a training group
+  whose agents name spans stops the run under any credit that does not read them, `group` and an entry without `credit`
+  included, which would train every call on the agent's reward, while an evaluation's group, which trains nothing, runs;
+  `check_credit_estimator` gives an estimator that reads them agents that name spans (RFC 0021) ([Write a credit
+  estimator](docs/extending/credit-estimators.md)).
+- **The trajectory viewer renders any harness's tool use.** A step whose misc holds `tool_results` (each with its
+  `name`, `tool_call_id`, `outcome`, `output` and `ref`) or `inputs` (what its harness said the agent took in before
+  the call, each with its `ref`, `from` and `text`) is labelled, in the default `auto` mode, by its tools with their
+  counts, each that ended other than `completed` and how many inputs it holds, and its details show each result
+  beside the arguments of its tool call, and each input. A step with OpenHands events renders as before
+  ([Trajectory visualization](platoon/visualization/README.md#tool-use-rendering)).
+
+### Fixes
+
+- A spec with `[budget] enforce = "gateway"` whose root completes after the gateway stopped an agent it minted over
+  HTTP, at the cap the two share, is graded with reason `budget`, as one whose own call was stopped is. Only the
+  root's own stops counted.
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

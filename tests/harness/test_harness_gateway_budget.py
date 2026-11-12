@@ -1,8 +1,9 @@
 """A spec with ``[budget] enforce = "gateway"``: the gateway ends a harness that has no step limit of its own at the
-run's step budget, the episode is graded with reason ``budget``, and only the sampled calls train.  End to end on
-CPU through the rollout worker's own body, the real gateway (Qwen3-4B-Instruct tokenizer, scripted sampler) and
-platoon-bash told to take far more turns than the budget.  A harness in the task sandbox makes no judge calls, and
-no aux calls under a gateway budget, which counts only policy calls; one on the rollout host keeps every kind."""
+run's step budget, the episode is graded with reason ``budget``, also when the gateway stopped an agent the harness
+minted, and only the sampled calls train.  End to end on CPU through the rollout worker's own body, the real gateway
+(Qwen3-4B-Instruct tokenizer, scripted sampler) and platoon-bash told to take far more turns than the budget.  A
+harness in the task sandbox makes no judge calls, and no aux calls under a gateway budget, which counts only policy
+calls; one on the rollout host keeps every kind."""
 
 from __future__ import annotations
 
@@ -94,6 +95,60 @@ file = "{{state_dir}}/final.txt"
     return str(path)
 
 
+# A harness that makes no policy call of its own: it mints an agent, which calls the policy until the gateway stops it,
+# and writes the minted agent's reply ids as its final message.
+MINTING_PROBE = """\
+import json, os, sys, urllib.request
+
+
+def post(url, key, body):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.load(response)
+
+
+minted = post(sys.argv[1] + "/v1/platoon/agents", os.environ["PLATOON_API_KEY"], {"role": "helper"})
+ids = []
+for _ in range(8):
+    body = {"model": "policy", "messages": [{"role": "user", "content": "Go on."}]}
+    ids.append(post(minted["base_url"] + "/chat/completions", minted["api_key"], body)["id"])
+    if ids[-1].startswith("platoon-budget-"):
+        break
+with open(sys.argv[2], "w") as out:
+    out.write(" ".join(ids))
+"""
+
+
+def minting_probe(tmp_path: Path) -> str:
+    """The spec of a harness that runs :data:`MINTING_PROBE` under a gateway step budget of 2 calls."""
+
+    script = tmp_path / "minting.py"
+    script.write_text(MINTING_PROBE)
+    path = tmp_path / "minting-probe.toml"
+    path.write_text(
+        f"""name = "minting-probe"
+version = "1"
+max_steps = 2
+
+[budget]
+enforce = "gateway"
+
+[launch]
+argv = ["python3", "{{state_dir}}/minting.py", "{{base_url}}", "{{state_dir}}/final.txt"]
+env = {{ PLATOON_API_KEY = "{{api_key}}" }}
+assets = {{ "minting.py" = "{script}" }}
+
+[final_message]
+file = "{{state_dir}}/final.txt"
+"""
+    )
+    return str(path)
+
+
 @pytest.fixture(scope="module")
 def qwen_tokenizer():
     if not (SNAPSHOT / "tokenizer.json").exists():
@@ -175,6 +230,35 @@ async def test_a_budget_stop_is_graded_with_reason_budget(tmp_path, budget_gatew
     assert root["misc"]["outcome"]["reason"] == "budget" and root["reward"] == 1.0
     assert root["misc"]["budget"] == {"enforce": "gateway", "max_steps": 1, "stops": 1}
     assert len(root["steps"]) == 1 and "step budget of 1 model calls is used up" in root["finish_message"]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_of_an_agent_the_harness_minted_is_graded_with_reason_budget(tmp_path, budget_gateway):
+    """The agents a spec's harness mints share its cap: once the gateway stops one of them, the run, whose root made no
+    call of its own, is graded with reason ``budget``."""
+
+    from platoon.harness.rollout import EmbeddedGateway
+
+    FakeService.root = tmp_path / "sandboxes"
+    FakeService.sessions.clear()
+    gateway, sampler = budget_gateway
+    sampler.script[:] = ["One.", "Two."]
+
+    collection = await run_harness_rollout(
+        routed(minting_probe(tmp_path), service_kwargs={"sandbox": False}),
+        rollout_config(tmp_path),
+        gateway=EmbeddedGateway(gateway),
+        runner=runner(tmp_path),
+    )
+
+    trajectories = list(collection["trajectories"].values())
+    (root,) = [trajectory for trajectory in trajectories if trajectory["parent_info"] is None]
+    (minted,) = [trajectory for trajectory in trajectories if trajectory["parent_info"] is not None]
+    ids = root["finish_message"].split()
+    assert len(ids) == 3 and ids[-1].startswith("platoon-budget-") and len(sampler.prompts) == 2
+    assert (len(root["steps"]), len(minted["steps"])) == (0, 2)
+    assert root["misc"]["budget"]["stops"] == 0 and minted["misc"]["budget"]["stops"] == 1
+    assert root["misc"]["outcome"]["reason"] == "budget"
 
 
 @pytest.mark.asyncio

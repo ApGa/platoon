@@ -1320,6 +1320,8 @@ def harness_show(name: str, /) -> None:
         lines += _spec_options(harness)
     else:
         lines += [f"runtime: {harness.runtime}", f"executes_model_code: {harness.executes_model_code}"]
+        if harness.budget_enforcement != "harness":
+            lines.append(f"step budget: enforced by the {harness.budget_enforcement}")
         doc = inspect.getdoc(harness.fn)
         if doc:
             lines += ["", doc]

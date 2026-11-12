@@ -197,8 +197,8 @@ def _built_by_keywords(workflow_cls: Any, setup: WorkflowSetup) -> Any:
     ``entry_credit`` and the policies' views as its ``policy_views`` when an entry sets one, and, when its rollouts
     sample more than one policy (``agents``), the model infos of those but the agents' default as its
     ``sampled_policies``, with its ``agents`` and ``trained_policies``; and the agent roles' limited tools as its
-    ``role_tools`` when a role lists some.  ``GroupRolloutWorkflow.from_setup`` builds it so, as ``platoon train``
-    builds a class without ``from_setup``."""
+    ``role_tools`` when a role lists some.  ``platoon train`` builds a class without ``from_setup`` so, and
+    ``GroupRolloutWorkflow.from_setup`` builds it so, then keeps the setup's ``phase``."""
 
     workflow = workflow_cls(**_keywords(setup))
     if setup.entry_configs is not None:

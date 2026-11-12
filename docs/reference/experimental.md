@@ -50,8 +50,9 @@ group's output is read: its report (`OutputReport`, `report_of`) and its rows by
 And credit estimators (RFC 0021): how an environment entry's training groups turn rewards into advantages
 (`CreditEstimator`, or a subclass of `CreditEstimatorBase`), built per entry with a `CreditSetup`
 and checked at load (`CreditCheckContext`); its `assign` sees a `CreditGroup` of
-`MemberRollout` members, each agent an `AgentRun` (role, policy, own reward, rows), each row a
-`TrainingSample`, and the run's policies as `PolicyView` views, whose failed scoring
+`MemberRollout` members, each agent an `AgentRun` (role, policy, own reward, rows, and the
+`Span` spans its trajectory names), each row a `TrainingSample`, and the run's policies as
+`PolicyView` views, whose failed scoring
 (`ScoringFailed`) fails the group.  It is registered with
 `credit_estimator` or named as `module:Class`, and `platoon.testing.check_credit_estimator` checks it.
 `docs/extending/credit-estimators.md` is the guide.
@@ -129,8 +130,9 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`CreditCheckContext`](#platoon-experimental-creditcheckcontext) | What an estimator's load-time `check` sees, beside its options. |
 | [`CreditGroup`](#platoon-experimental-creditgroup) | One training group, as its estimator sees it: its task, its label (its value of the run's label column) and its environment entry, the entry's training settings (`settings`), the members that returned a result, in the group's order, the run's policies (`policies`, each as an estimator may read it), each policy's version when `assign` began (`versions`; it does not move during the call, although the policies may publish meanwhile), and where the group's own statistics go (`stats`: in a training group the `DeferredStats` that the step that consumes the group records, outside one the stats tracker; an estimator's metrics belong under `credit/`). |
 | [`MemberRollout`](#platoon-experimental-memberrollout) | One member of the group that returned a result: its place among them (`index`), every row of its rollout (`samples`), its agents (filled when the estimator asked for them, else empty), its root's processed reward and whether that is a completed root's scored outcome (`task_reward_valid`: an interrupted root's is not, and enters no baseline), and what the converter returned (`result`), to read: its trajectories' statistics and its root's reward components. Its `datums` are the member's rows; an estimator sets their advantages through `samples`. |
-| [`AgentRun`](#platoon-experimental-agentrun) | One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role (`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it samples, its depth in the tree, its reward and its rows. `reward` is its trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never trains an unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent did not use, whose reward still counts. |
-| [`TrainingSample`](#platoon-experimental-trainingsample) | One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree. It lives in the trainer process only: what reaches the training service is the datum. |
+| [`AgentRun`](#platoon-experimental-agentrun) | One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role (`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it samples, its depth in the tree, its reward, its rows and the spans its trajectory names. `reward` is its trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never trains an unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent did not use, whose reward still counts. `spans` is None when its trajectory names no spans; else it holds every span the trajectory names, scored or not (none when it names spans and has none), and each call of a scored span trains on its span's reward, every other call of the agent on nothing. |
+| [`Span`](#platoon-experimental-span) | Some of an agent's model calls that its program credits together (its trajectory's `misc["spans"]`): the calls, by id (their steps' `completion_id`, as `TrainingSample.calls` names them), and their reward, on the scale of the agent's own; None when the span was not scored, which is no reward of 0. |
+| [`TrainingSample`](#platoon-experimental-trainingsample) | One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree; and the model calls it trains. It lives in the trainer process only: what reaches the training service is the datum. |
 | [`PolicyView`](#platoon-experimental-policyview) | What an estimator may read of a policy: its id, the renderer and the tokenizer that turn its token ids into text, its version now, and its scores of other rows (`score`), for a policy that scores: a frozen teacher. |
 | [`ScoringFailed`](#platoon-experimental-scoringfailed) | A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token. An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under `credit/failures`) and trains nothing, and the run goes on. |
 | [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
@@ -1970,10 +1972,12 @@ class CreditEstimator(Protocol)
 What the trainer calls of a credit estimator: `assign(group)`, once per training group, awaited.
 
 `needs_agents`: True when it reads the group's agents (`MemberRollout.agents`) and the rows' tags; the rollout
-workers then tag each row with its agent (worker protocol 3).  Optional: `settle(group)`, synchronous, the one
-place where an estimator with state changes it; `state()` and `load_state(state)`, which give and take that
-state as JSON data; and `assign_timeout_seconds`, how long `assign` may take on one group
-(`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit).  An estimator that raises in any of them, or
+workers then tag each row with its agent (worker protocol 3).  Optional: `reads_spans`, True when it reads the
+spans its agents name (`AgentRun.spans`), which needs `needs_agents`: a group whose agents name spans stops the
+run under an estimator without it; `settle(group)`, synchronous, the one place where an estimator with state
+changes it; `state()` and `load_state(state)`, which give and take that state as JSON data; and
+`assign_timeout_seconds`, how long `assign` may take on one group (`DEFAULT_ASSIGN_TIMEOUT_SECONDS`
+without it; None: no limit).  An estimator that raises in any of them, or
 whose `assign` runs out of time, stops the run with an error that names it, its entry and the group; but a
 policy's failed scoring that its `assign` lets through (`ScoringFailed`) fails only the group.
 
@@ -2006,6 +2010,7 @@ An optional base class of credit estimators: the protocol's shape, typed options
 | Attribute | Type | Description |
 |---|---|---|
 | `needs_agents` | `ClassVar[bool]` | Whether it reads the group's agents and the rows' tags (CreditEstimator.needs_agents). |
+| `reads_spans` | `ClassVar[bool]` | Whether it reads the spans its agents name (AgentRun.spans), which needs needs_agents: a group whose agents name spans stops the run under an estimator that does not. |
 | `options_schema` | `ClassVar[Any]` | Its options' schema: a dataclass, a pydantic model, or a function of the options' mapping that returns them parsed and raises ValueError; None: it takes no options. `self.options` holds them parsed. |
 | `assign_timeout_seconds` | `float \| None` | How long `assign` may take on one group, in seconds, before the run stops with an error that names the estimator; None: no limit. An estimator that calls a service may set it, from its options say, in `__init__`. |
 
@@ -2135,12 +2140,14 @@ class AgentRun
 
 One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role
 (`policy` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it
-samples, its depth in the tree, its reward and its rows.  `reward` is its trajectory's processed reward, as the
-converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a
-child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score.  An
-estimator never trains an unscored agent's reward as 0, nor counts it in a baseline.  An agent whose rows the
-converter left out has no `samples`: an unscored one, and a scored child that was sampled out or that its parent
-did not use, whose reward still counts.
+samples, its depth in the tree, its reward, its rows and the spans its trajectory names.  `reward` is its
+trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the
+agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending
+verdict), whose 0 is no score.  An estimator never trains an unscored agent's reward as 0, nor counts it in a
+baseline.  An agent whose rows the converter left out has no `samples`: an unscored one, and a scored child that
+was sampled out or that its parent did not use, whose reward still counts.  `spans` is None when its trajectory
+names no spans; else it holds every span the trajectory names, scored or not (none when it names spans and has
+none), and each call of a scored span trains on its span's reward, every other call of the agent on nothing.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -2152,6 +2159,24 @@ did not use, whose reward still counts.
 | `depth` | `int` | required |  |
 | `reward` | `float \| None` | required |  |
 | `samples` | `list[TrainingSample]` | `[]` |  |
+| `spans` | `tuple[Span, ...] \| None` | `None` |  |
+
+<a id="platoon-experimental-span"></a>
+
+### `platoon.experimental.Span`
+
+```python
+class Span
+```
+
+Some of an agent's model calls that its program credits together (its trajectory's `misc["spans"]`): the
+calls, by id (their steps' `completion_id`, as `TrainingSample.calls` names them), and their reward, on the
+scale of the agent's own; None when the span was not scored, which is no reward of 0.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `calls` | `frozenset[str]` | required |  |
+| `reward` | `float \| None` | required |  |
 
 <a id="platoon-experimental-trainingsample"></a>
 
@@ -2163,8 +2188,8 @@ class TrainingSample
 
 One row to train (`datum`), with who produced it: the policy that sampled it and trains on it, the member of
 the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked
-for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree.  It lives in
-the trainer process only: what reaches the training service is the datum.
+for agents (`needs_agents`), the agent, its role, its trajectory and its depth in the agent tree; and the model
+calls it trains.  It lives in the trainer process only: what reaches the training service is the datum.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
@@ -2175,6 +2200,7 @@ the trainer process only: what reaches the training service is the datum.
 | `role` | `str \| None` | `None` |  |
 | `trajectory_id` | `str \| None` | `None` |  |
 | `depth` | `int \| None` | `None` |  |
+| `calls` | `tuple[tuple[str, int, int], ...]` | `()` | The model calls whose sampled tokens the row trains on, each as `(call_id, start, end)`: the call's id (its step's `completion_id`) and the target tokens `[start, end)` those tokens fill, in the order the converter merged them; a call the row keeps only as context, such as a message `filter_message_actions` masks, is not one. Empty when the conversion that made the row recorded none. An estimator that reads spans tells each call's span by them (`AgentRun.spans`). |
 | `advantages` | `torch.Tensor` | | The row's advantages, one per target token, as they are now: the converter loads every action token with its trajectory's processed reward, and the other positions with 0. Read-only. |
 | `mask` | `torch.Tensor` | | Which of the row's target tokens are actions, which train (`mask > 0`), one per target token. Read-only. |
 

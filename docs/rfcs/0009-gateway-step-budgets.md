@@ -1,6 +1,6 @@
 # RFC 0009: Step budgets enforced at the gateway
 
-Status: deferred. The harness layer bounds steps in the harness spec and grades context overflow as a policy failure; this RFC covers the harness-agnostic backstop that is still missing.
+Status: deferred. The harness layer bounds steps in the harness spec and grades context overflow as a policy failure, and option A holds specs and function harnesses that opt in to their step budgets at the gateway; this RFC covers the harness-agnostic backstop that is still missing.
 
 **Decision:** deferred. Harness specs pass the run's step budget to the harness (`{max_steps}`), and a context
 overflow is graded as a policy failure, which covers the harnesses platoon ships. A budget in the gateway has to
@@ -12,13 +12,30 @@ agent's `policy` calls capped at the run's step budget (`AgentSession.call_cap`)
 final assistant message without tool calls, which is neither sampled nor recorded, and the episode is graded with
 `reason="budget"`. The OpenHands CLI spec (`openhands@1.16.0`), which had no step setting, was the first to use it,
 until RFC 0016 replaced it with the `openhands` SDK harness, which stops at its own step limit. Agents the harness
-mints over HTTP share the root's cap, so the cap bounds their policy calls and the root's together, and a harness in
-a task sandbox under a cap may make only `policy` calls (its `aux` and `judge` calls are refused with 403), since code
-the policy runs there can read the agent's key and would otherwise sample past the cap. Without a cap such a harness
+mints over HTTP share the root's cap, so the cap bounds their policy calls and the root's together, a stop of theirs
+grades the episode with `reason="budget"` as the root's does, and a harness in a task sandbox under a cap may make
+only `policy` calls (its `aux` and `judge` calls are refused with 403), since code the policy runs there can read the
+agent's key and would otherwise sample past the cap. Without a cap such a harness
 is refused only its `judge` calls, which never train: nothing at the gateway counts its other calls then, so an
 `aux` call gets it nothing a `policy` call would not (the `openhands` condenser marks its summary calls `aux`). The
 objection below, that a step is not a call, matters less for a harness that makes one policy call per step; option B
 remains the general answer.
+
+**Implemented in part for function harnesses too:** option A, for those that opt in with
+`@pt.harness(name, budget_enforcement="gateway")`, such as a harness that runs another agent program over HTTP, which
+cannot read `ctx.budget`. The gateway answers a `policy` call of such a harness's agent with the budget stop once
+`out_of_steps` holds for the agent: its `max_steps` is its call cap, which the agents it mints over HTTP share, their
+policy calls counting with its own as they do under a spec's cap, and its `ctx.budget` is held as the harness would hold
+it, so that under `agents.budget: linear` the steps its spawned children took and the budgets they reserve count too.
+The calls of the agents it mints count toward its call cap only, not toward its `ctx.budget`. A rollout that sets no
+step budget is refused with a `harness_config` error, as a spec's is, since the gateway would have no cap to hold. A
+stop is neither sampled nor recorded, and its call id starts with `platoon-budget-`, which no sampled call's does, so a
+harness that reports the ids it is given can tell a stop apart. A run of such an agent that completes after the gateway
+stopped a call its cap bounds, its own or one of an agent it minted, is a `limit` run, graded with `reason="budget"`, as
+a spec's is. `aux` and `judge` calls stay as above: a function harness's agents run on the rollout host, so they may
+make `aux` calls, such as a condenser's, which no budget counts. One divergence from a cooperative harness: under
+`budget: linear`, a parent that calls before a spawn of its has returned, as one that keeps working beside its child
+does, is charged the child's reservation, which a harness that awaits each spawn never meets.
 
 ## Summary
 

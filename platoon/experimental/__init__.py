@@ -46,8 +46,9 @@ group's output is read: its report (:class:`OutputReport`, :func:`report_of`) an
 And credit estimators (RFC 0021): how an environment entry's training groups turn rewards into advantages
 (:class:`CreditEstimator`, or a subclass of :class:`CreditEstimatorBase`), built per entry with a :class:`CreditSetup`
 and checked at load (:class:`CreditCheckContext`); its ``assign`` sees a :class:`CreditGroup` of
-:class:`MemberRollout` members, each agent an :class:`AgentRun` (role, policy, own reward, rows), each row a
-:class:`TrainingSample`, and the run's policies as :class:`PolicyView` views, whose failed scoring
+:class:`MemberRollout` members, each agent an :class:`AgentRun` (role, policy, own reward, rows, and the
+:class:`Span` spans its trajectory names), each row a :class:`TrainingSample`, and the run's policies as
+:class:`PolicyView` views, whose failed scoring
 (:class:`ScoringFailed`) fails the group.  It is registered with
 :func:`credit_estimator` or named as ``module:Class``, and ``platoon.testing.check_credit_estimator`` checks it.
 ``docs/extending/credit-estimators.md`` is the guide.
@@ -80,6 +81,7 @@ from platoon.train.credit.api import (
     MemberRollout,
     PolicyView,
     ScoringFailed,
+    Span,
     TrainingSample,
 )
 from platoon.train.credit.registry import credit_estimator
@@ -199,6 +201,7 @@ __all__ = [
     "CreditGroup",
     "MemberRollout",
     "AgentRun",
+    "Span",
     "TrainingSample",
     "PolicyView",
     "ScoringFailed",

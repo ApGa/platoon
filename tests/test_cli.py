@@ -672,7 +672,7 @@ def test_harness_list_and_show_cover_function_harnesses(monkeypatch, capsys):
         """Answer from a script."""
 
     class FakeFunctionHarness:
-        ref, runtime, executes_model_code, fn = "scripted@1", "inline", False, scripted
+        ref, runtime, executes_model_code, budget_enforcement, fn = "scripted@1", "inline", False, "harness", scripted
         source = "tests:scripted"
 
     def get_harness(ref):

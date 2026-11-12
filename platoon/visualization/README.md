@@ -40,7 +40,7 @@ uv run -m platoon.visualization.cli replay --mode openhands --selectable-text /p
 
 For cleaner selection, press `d` to switch to details-only view before selecting text. Terminal selection is row-based, so details-only view avoids selecting tree text from the same rows.
 
-`--mode auto` is the default. It keeps the CodeAct-oriented view for `code` / `thought` / `output` steps and switches to OpenHands rendering when a step contains `action_events` or `observation_events`.
+`--mode auto` is the default. It keeps the CodeAct-oriented view for `code` / `thought` / `output` steps, switches to OpenHands rendering when a step contains `action_events` or `observation_events`, and renders a step's tool use when it contains `tool_results` or `inputs` (below).
 
 Show serialized `TrajectoryCollection` dumps:
 
@@ -61,6 +61,15 @@ The OpenHands mode:
 - Collapses repeated tool calls in one model turn, for example `emails.send_email x3`.
 - Surfaces observation errors in the tree label.
 - Shows final `claim_done` evaluation payloads from `misc.reward_misc.openreward/final_payload`.
+
+## Tool Use Rendering
+
+Any harness can show its tool use by annotating two fields onto a step (`ctx.annotate_step(tool_results=..., inputs=...)`), each a list:
+
+- `tool_results`: the results of the step's tool calls, in the order the harness recorded them, each with its `name`, `tool_call_id`, `outcome` (`completed`, or the harness's word for another end, such as `failed`), `output` and `ref` (where the result is recorded, if anywhere);
+- `inputs`: what the harness said the agent took in before the call, such as a message, each with its `ref`, `from` and `text`.
+
+Any of these may be null, which the viewer shows as unknown. In `auto` mode such a step is labelled by its tools, with their counts, each that ended other than `completed`, and how many inputs it holds, for example `tools: unlock x2, bash; bash failed; inputs: 2`. Its details show each result with the arguments the step's message gave its tool call (matched by `tool_call_id`), and each input. A step with OpenHands events renders as an OpenHands step.
 
 ## TUI Keys
 

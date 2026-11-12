@@ -509,7 +509,8 @@ class EnvironmentConfig:
     # rollout's datums centered on the group's completed-root baseline): ``group`` (that credit, as an estimator),
     # ``keyed`` (each agent centered on the mean reward of the group's agents of its key: task, policy, role, depth), a
     # name the entry's ``package`` registers with ``@credit_estimator``, or ``module:Class``. Its estimator runs once
-    # per group in the trainer, never in an evaluation. A named environment cannot set it. See
+    # per group in the trainer, never in an evaluation; a training group whose agents name spans stops the run under any
+    # credit but an estimator that reads them, such as ``keyed``. A named environment cannot set it. See
     # docs/how-to/train-and-eval.md.
     credit: str | None = None
     # Options of the entry's credit estimator, checked against its options when the config loads (keyed's: key,

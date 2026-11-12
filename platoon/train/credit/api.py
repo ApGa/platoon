@@ -4,9 +4,15 @@ A credit estimator (:class:`CreditEstimator`, or a subclass of :class:`CreditEst
 entry (``environments[].credit``, with its ``credit_options``) and built once per start, ``Class(setup, options)``
 (:class:`CreditSetup`).  Its ``assign`` runs once per training group, in the trainer process, after every member has
 settled: it sees the group (:class:`CreditGroup`) with every member (:class:`MemberRollout`), and, when it asks for
-them (``needs_agents``), every agent of every member (:class:`AgentRun`: its role, its policy, its own reward and its
-rows), and it sets the advantages of the rows (:class:`TrainingSample`), on their action tokens.  The error-token
-filter, the group's verdict and its output follow, as without an estimator.  An evaluation never runs one.
+them (``needs_agents``), every agent of every member (:class:`AgentRun`: its role, its policy, its own reward, the
+spans its trajectory names and its rows), and it sets the advantages of the rows (:class:`TrainingSample`), on their
+action tokens.  The error-token filter, the group's verdict and its output follow, as without an estimator.  An
+evaluation never runs one.
+
+A program may name spans of an agent's trajectory (:class:`Span`): some of its model calls, with a reward of their own,
+so that each span trains on its own reward and a call in no scored span trains nothing.  Only an estimator that reads
+them (``reads_spans``) may credit a training group whose agents name spans: under any other credit the run stops
+(:mod:`platoon.train.credit.runtime`), since that credit would train every call of the agent on the agent's reward.
 
 The ``assign`` calls of different groups run concurrently, each switching to the others at its awaits: what an
 estimator keeps of one group stays in the call's locals, or in the group.  An estimator with state to resume (a running
@@ -47,8 +53,8 @@ DEFAULT_ASSIGN_TIMEOUT_SECONDS = 600.0
 class TrainingSample:
     """One row to train (``datum``), with who produced it: the policy that sampled it and trains on it, the member of
     the group whose rollout it is (its place among the members that returned a result), and, when the estimator asked
-    for agents (``needs_agents``), the agent, its role, its trajectory and its depth in the agent tree.  It lives in
-    the trainer process only: what reaches the training service is the datum."""
+    for agents (``needs_agents``), the agent, its role, its trajectory and its depth in the agent tree; and the model
+    calls it trains.  It lives in the trainer process only: what reaches the training service is the datum."""
 
     datum: tinker.Datum
     policy: PolicyId
@@ -57,6 +63,12 @@ class TrainingSample:
     role: str | None = None
     trajectory_id: str | None = None
     depth: int | None = None
+    # The model calls whose sampled tokens the row trains on, each as ``(call_id, start, end)``: the call's id (its
+    # step's ``completion_id``) and the target tokens ``[start, end)`` those tokens fill, in the order the converter
+    # merged them; a call the row keeps only as context, such as a message ``filter_message_actions`` masks, is not
+    # one.  Empty when the conversion that made the row recorded none.  An estimator that reads spans tells each call's
+    # span by them (``AgentRun.spans``).
+    calls: tuple[tuple[str, int, int], ...] = ()
 
     @property
     def advantages(self) -> torch.Tensor:
@@ -99,16 +111,28 @@ class TrainingSample:
         self.datum.loss_fn_inputs["advantages"] = TensorData.from_torch(advantages)
 
 
+@dataclass(frozen=True)
+class Span:
+    """Some of an agent's model calls that its program credits together (its trajectory's ``misc["spans"]``): the
+    calls, by id (their steps' ``completion_id``, as :attr:`TrainingSample.calls` names them), and their reward, on the
+    scale of the agent's own; None when the span was not scored, which is no reward of 0."""
+
+    calls: frozenset[str]
+    reward: float | None
+
+
 @dataclass
 class AgentRun:
     """One agent of one member's rollout: its trajectory, its parent's trajectory (None for the root), its role
     (``policy`` for the root unless its program says otherwise; a child's is the role it was minted with), the policy it
-    samples, its depth in the tree, its reward and its rows.  ``reward`` is its trajectory's processed reward, as the
-    converter loaded it onto its action tokens; None when it was not scored: the agent was interrupted, or it is a
-    child whose verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score.  An
-    estimator never trains an unscored agent's reward as 0, nor counts it in a baseline.  An agent whose rows the
-    converter left out has no ``samples``: an unscored one, and a scored child that was sampled out or that its parent
-    did not use, whose reward still counts."""
+    samples, its depth in the tree, its reward, its rows and the spans its trajectory names.  ``reward`` is its
+    trajectory's processed reward, as the converter loaded it onto its action tokens; None when it was not scored: the
+    agent was interrupted, or it is a child whose verifier gave no verdict (a judge error, an unparseable or a pending
+    verdict), whose 0 is no score.  An estimator never trains an unscored agent's reward as 0, nor counts it in a
+    baseline.  An agent whose rows the converter left out has no ``samples``: an unscored one, and a scored child that
+    was sampled out or that its parent did not use, whose reward still counts.  ``spans`` is None when its trajectory
+    names no spans; else it holds every span the trajectory names, scored or not (none when it names spans and has
+    none), and each call of a scored span trains on its span's reward, every other call of the agent on nothing."""
 
     agent_id: str
     trajectory_id: str
@@ -118,6 +142,7 @@ class AgentRun:
     depth: int
     reward: float | None
     samples: list[TrainingSample] = field(default_factory=list)
+    spans: tuple[Span, ...] | None = None
 
 
 @dataclass
@@ -245,10 +270,12 @@ class CreditEstimator(Protocol):
     """What the trainer calls of a credit estimator: ``assign(group)``, once per training group, awaited.
 
     ``needs_agents``: True when it reads the group's agents (``MemberRollout.agents``) and the rows' tags; the rollout
-    workers then tag each row with its agent (worker protocol 3).  Optional: ``settle(group)``, synchronous, the one
-    place where an estimator with state changes it; ``state()`` and ``load_state(state)``, which give and take that
-    state as JSON data; and ``assign_timeout_seconds``, how long ``assign`` may take on one group
-    (:data:`DEFAULT_ASSIGN_TIMEOUT_SECONDS` without it; None: no limit).  An estimator that raises in any of them, or
+    workers then tag each row with its agent (worker protocol 3).  Optional: ``reads_spans``, True when it reads the
+    spans its agents name (``AgentRun.spans``), which needs ``needs_agents``: a group whose agents name spans stops the
+    run under an estimator without it; ``settle(group)``, synchronous, the one place where an estimator with state
+    changes it; ``state()`` and ``load_state(state)``, which give and take that state as JSON data; and
+    ``assign_timeout_seconds``, how long ``assign`` may take on one group (:data:`DEFAULT_ASSIGN_TIMEOUT_SECONDS`
+    without it; None: no limit).  An estimator that raises in any of them, or
     whose ``assign`` runs out of time, stops the run with an error that names it, its entry and the group; but a
     policy's failed scoring that its ``assign`` lets through (:class:`ScoringFailed`) fails only the group."""
 
@@ -268,6 +295,9 @@ class CreditEstimatorBase:
 
     # Whether it reads the group's agents and the rows' tags (CreditEstimator.needs_agents).
     needs_agents: ClassVar[bool] = False
+    # Whether it reads the spans its agents name (AgentRun.spans), which needs needs_agents: a group whose agents name
+    # spans stops the run under an estimator that does not.
+    reads_spans: ClassVar[bool] = False
     # Its options' schema: a dataclass, a pydantic model, or a function of the options' mapping that returns them parsed
     # and raises ValueError; None: it takes no options.  ``self.options`` holds them parsed.
     options_schema: ClassVar[Any] = None

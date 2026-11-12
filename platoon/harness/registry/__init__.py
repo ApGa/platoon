@@ -320,6 +320,20 @@ def get_harness(ref: str) -> Harness:
     return _resolve(ref)
 
 
+def harness_path_options(ref: str) -> tuple[str, ...]:
+    """The options of harness ``ref`` that hold paths of files it reads (``@pt.harness(path_options=...)``), read when
+    a config loads: none for a spec, whose options are its ``[options]``, for a core harness, which takes no file, and
+    for a reference that does not resolve, which the run reports when it resolves the config's components."""
+
+    if ref.endswith(".toml") or extensions.owner(ref) == extensions.RESERVED_OWNER:
+        return ()
+    try:
+        harness = get_harness(ref)
+    except (ValueError, OSError, ImportError, AttributeError):
+        return ()
+    return harness.path_options if isinstance(harness, FunctionHarness) else ()
+
+
 def spec_origin(spec: HarnessSpec) -> Origin:
     """Where a spec came from: core for a built-in, the distribution of the entry point that added it, or nothing
     for a spec named by its path."""
@@ -388,5 +402,6 @@ __all__ = [
     "get_harness_spec",
     "harness_load_failures",
     "harness_origin",
+    "harness_path_options",
     "spec_origin",
 ]

@@ -79,6 +79,7 @@ def _rollout(root: float, child: float, *, tagged: bool = True, message: bool = 
     ]
     return TrajectoryCollectionResult(
         datums=[*root_rows, _datum(child)],
+        datum_calls=tuple(((f"call-{row}", 0, 2),) for row in range(len(root_rows) + 1)),
         task_reward=root,
         trajectory_stats=stats,
         root_rewards_dict={},
@@ -363,9 +364,10 @@ def test_a_tagged_output_is_kept_whole_by_a_checkpoint():
     assert isinstance(decoded, PolicyGroupOutput)
     assert replace(decoded.report, group_stats=None) == replace(output.report, group_stats=None)
     assert decoded.report.group_stats.to_json() == output.report.group_stats.to_json()
-    assert [(s.policy, s.member, s.agent_id, s.role, s.trajectory_id, s.depth) for s in decoded.samples] == [
-        (s.policy, s.member, s.agent_id, s.role, s.trajectory_id, s.depth) for s in output.samples
+    assert [(s.policy, s.member, s.agent_id, s.role, s.trajectory_id, s.depth, s.calls) for s in decoded.samples] == [
+        (s.policy, s.member, s.agent_id, s.role, s.trajectory_id, s.depth, s.calls) for s in output.samples
     ]
+    assert all(sample.calls for sample in decoded.samples)
     assert _action_values(rows_by_policy(decoded, MAIN)[MAIN]) == _action_values(rows_by_policy(output, MAIN)[MAIN])
 
 

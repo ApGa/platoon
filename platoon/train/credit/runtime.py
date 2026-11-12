@@ -5,7 +5,8 @@ checkpoint (:func:`credit_states`, :func:`load_credit_states`).  An estimator th
 ``assign`` does not return in time, stops the run with a :class:`CreditEstimatorError` that names it, its entry and
 the group: a group it could not credit is never trained otherwise, nor counted as a failed rollout.  The one exception
 is a policy's scoring that failed (:class:`~platoon.train.credit.api.ScoringFailed`: a teacher's service that raised
-or did not answer in time), which :func:`assign_credit` lets through: the group fails, and the run goes on.
+or did not answer in time), which :func:`assign_credit` lets through: the group fails, and the run goes on.  A training
+group whose agents name spans that its credit does not read stops the run too (:func:`refuse_unread_spans`).
 
 This module is part of the training code's contract (``tests/train/test_layers.py``): the rollout source, the runner
 and the checkpoint saves, which are generic code, call the estimators through it.  It imports neither Tinker nor
@@ -17,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -30,7 +31,8 @@ CREDIT_KEY = "credit"
 
 
 class CreditEstimatorError(RuntimeError):
-    """A credit estimator that raised, or whose ``assign`` did not return in time: the run stops with it."""
+    """A credit estimator that raised, or whose ``assign`` did not return in time, or a training group whose agents name
+    spans that its credit does not read: the run stops with it."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,28 @@ async def assign_credit(estimator: Any, group: CreditGroup) -> Credit:
         what = f"assign(group) {what}, on task {group.task_id}"
         raise CreditEstimatorError(f"{_named(estimator, group.entry)}: {what}") from exc
     return Credit(estimator, group, samples)
+
+
+def refuse_unread_spans(estimator: Any, entry: str | None, task_id: str | None, results: Sequence[Any]) -> None:
+    """Stop the run, with a :class:`CreditEstimatorError`, when an agent of the group of task ``task_id`` names spans
+    (``AgentTag.spans``, among its members' tags, ``results``) and the group's credit does not read them: its entry's
+    ``estimator`` does not say ``reads_spans``, or the entry has none (None: the workflow's own credit).  That credit
+    would train every call of the agent on the agent's own reward, which its spans say it did not earn whole.  The
+    workflow asks it of its training groups alone: an evaluation's group trains nothing."""
+
+    if getattr(estimator, "reads_spans", False):
+        return
+    for result in results:
+        for tag in result.agents or ():
+            if tag.spans is not None:
+                if estimator is not None:
+                    credit = _named(estimator, entry)
+                else:
+                    credit = "the workflow's own credit" + (f" of environments[{entry}]" if entry is not None else "")
+                raise CreditEstimatorError(
+                    f"{credit} reads no spans, and agent {tag.agent_id}'s trajectory names spans (misc['spans']), on "
+                    f"task {task_id}: credit the entry with an estimator that reads them (reads_spans), such as keyed"
+                )
 
 
 def settle_credit(output: Any) -> None:

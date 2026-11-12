@@ -3,10 +3,10 @@
 It is made of named checks (:data:`CHECKS`), which :func:`check_credit_estimator` runs one after the other; its
 ``AssertionError`` lists each check that failed, by name, with what it saw:
 
-- ``protocol``: it resolves, it is an estimator class (an async ``assign(group)``, a bool ``needs_agents``, a
-  synchronous ``settle`` if any, both or neither of ``state()`` and ``load_state(state)``), ``Class(setup, options)``
-  builds it, and its load-time ``check``, given a loaded config of one environment entry (:func:`fixture_config`),
-  returns or refuses with a ``ValueError``;
+- ``protocol``: it resolves, it is an estimator class (an async ``assign(group)``, a bool ``needs_agents``, a bool
+  ``reads_spans`` if any, True only beside ``needs_agents``, a synchronous ``settle`` if any, both or neither of
+  ``state()`` and ``load_state(state)``), ``Class(setup, options)`` builds it, and its load-time ``check``, given a
+  loaded config of one environment entry (:func:`fixture_config`), returns or refuses with a ``ValueError``;
 - ``options``: its schema takes the options given, and a dataclass's or a pydantic model's refuses an unknown key;
 - ``action_tokens``: over :data:`GROUPS` fixture groups, ``assign`` sets advantages on action tokens only: every row
   keeps its length, its type and its values where its mask is 0, and every advantage is finite;
@@ -18,9 +18,11 @@ It is made of named checks (:data:`CHECKS`), which :func:`check_credit_estimator
 
 The fixture's groups are of four members, each a root agent (role ``policy``) that delegated to one subagent (role
 ``helper``, depth 1), each agent with one or two rows of eight target tokens, the action tokens holding the agent's
-reward as the converter loads it; in each group a root was interrupted (no reward, no rows) and a subagent's rows were
-left out (its reward counts).  For an estimator that does not read agents (``needs_agents`` False), the members carry
-no agents and the rows no tags.
+reward as the converter loads it, each row naming its two model calls; in each group a root was interrupted (no
+reward, no rows) and a subagent's rows were left out (its reward counts).  For an estimator that does not read agents
+(``needs_agents`` False), the members carry no agents and the rows no tags.  For one that reads spans
+(``reads_spans``), each agent names two: a scored one, holding its reward and the first call of each of its rows, and
+an unscored one, holding the second call of its first row; the second call of its second row lies in no span.
 
 The experimental credit API (``platoon.experimental``) can change in a minor release, and this check changes with it.
 """
@@ -41,8 +43,10 @@ SETTLED = 3
 # The fixture's entry, and a key no options schema takes.
 _ENTRY = "fixture"
 _UNKNOWN_OPTION = "conformance_check_unknown_option"
-# A row's target tokens, and which of them are actions.
+# A row's target tokens, and which of them are actions; and the target tokens [start, end) of each of its two model
+# calls, which fill its action tokens.
 _MASKS = ((0, 0, 1, 1, 1, 0, 1, 1), (0, 1, 1, 0, 0, 1, 1, 0))
+_CALLS = (((2, 5), (6, 8)), ((1, 3), (5, 7)))
 
 
 def check_credit_estimator(estimator: type | str, *, options: Mapping[str, Any] | None = None) -> None:
@@ -143,7 +147,7 @@ def check_action_tokens(cls: Any, parsed: Any) -> list[str]:
     estimator = _instance(cls, parsed)
     problems = []
     for seed in range(GROUPS):
-        group = fixture_group(seed, tagged=cls.needs_agents)
+        group = fixture_group(seed, tagged=cls.needs_agents, spans=_reads_spans(cls))
         before = [sample.advantages.clone() for sample in group.samples()]
         try:
             asyncio.run(estimator.assign(group))
@@ -173,7 +177,7 @@ def check_resumes(cls: Any, parsed: Any) -> list[str]:
     running, resumed = _instance(cls, parsed), _instance(cls, parsed)
     try:
         for seed in range(SETTLED):
-            _credit(running, fixture_group(seed, tagged=cls.needs_agents))
+            _credit(running, fixture_group(seed, tagged=cls.needs_agents, spans=_reads_spans(cls)))
         if stateful:
             try:
                 state = json.loads(json.dumps(running.state()))
@@ -182,7 +186,7 @@ def check_resumes(cls: Any, parsed: Any) -> list[str]:
             resumed.load_state(state)
         advantages = []
         for estimator in (running, resumed):
-            group = fixture_group(SETTLED, tagged=cls.needs_agents)
+            group = fixture_group(SETTLED, tagged=cls.needs_agents, spans=_reads_spans(cls))
             before = json.dumps(estimator.state()) if stateful else None
             asyncio.run(estimator.assign(group))
             if stateful and json.dumps(estimator.state()) != before:  # compared as text: a state may share its lists
@@ -229,6 +233,10 @@ def fixture_config() -> Any:
     )
 
 
+def _reads_spans(cls: Any) -> bool:
+    return bool(getattr(cls, "reads_spans", False))
+
+
 def _instance(cls: Any, parsed: Any) -> Any:
     from platoon.train.config_defs import WorkflowConfig
     from platoon.train.credit.api import CreditSetup
@@ -240,16 +248,16 @@ def _instance(cls: Any, parsed: Any) -> Any:
 # --- the fixture -----------------------------------------------------------------------------------------------------
 
 
-def fixture_group(seed: int, *, tagged: bool) -> Any:
+def fixture_group(seed: int, *, tagged: bool, spans: bool = False) -> Any:
     """Fixture group ``seed`` (the module's docstring): its rewards vary with ``seed``; ``tagged`` gives its members
-    their agents and its rows their tags."""
+    their agents and its rows their tags, and ``spans`` its agents their spans."""
 
     from platoon.train.config_defs import WorkflowConfig
     from platoon.train.credit.api import CreditGroup, PolicyView
     from platoon.train.policy.spec import MAIN
     from platoon.utils.stats_tracker import DeferredStats
 
-    members = [_member(seed, index, tagged=tagged) for index in range(4)]
+    members = [_member(seed, index, tagged=tagged, spans=spans) for index in range(4)]
     return CreditGroup(
         task_id=f"task-{seed}",
         label=None,
@@ -262,11 +270,11 @@ def fixture_group(seed: int, *, tagged: bool) -> Any:
     )
 
 
-def _member(seed: int, index: int, *, tagged: bool) -> Any:
+def _member(seed: int, index: int, *, tagged: bool, spans: bool = False) -> Any:
     """Member ``index`` of fixture group ``seed``: a root and one subagent; the group's member ``seed % 4`` has an
     interrupted root, and its member ``(seed + 1) % 4`` a subagent whose rows were left out."""
 
-    from platoon.train.credit.api import AgentRun, MemberRollout, TrainingSample
+    from platoon.train.credit.api import AgentRun, MemberRollout, Span, TrainingSample
     from platoon.train.policy.spec import MAIN
     from platoon.utils.tinker_data_processing import TrajectoryCollectionResult
 
@@ -277,11 +285,17 @@ def _member(seed: int, index: int, *, tagged: bool) -> Any:
         AgentRun(f"root-{index}", f"t{index}", None, "policy", MAIN, 0, root_reward),
         AgentRun(f"helper-{index}", f"t{index}.1", f"t{index}", "helper", MAIN, 1, child_reward),
     ]
+    if spans:
+        for agent in agents:
+            ((first, *_), (second, *_)), ((third, *_), _) = _calls(agent.agent_id, 0), _calls(agent.agent_id, 1)
+            agent.spans = (Span(frozenset({first, third}), agent.reward), Span(frozenset({second}), None))
     rows = {agents[0].trajectory_id: 0 if interrupted else 2, agents[1].trajectory_id: 0 if unsampled else 1}
     samples = []
     for agent in agents:
         for row in range(rows[agent.trajectory_id]):
-            sample = TrainingSample(_datum(agent.reward or 0.0, _MASKS[row]), MAIN, index)
+            sample = TrainingSample(
+                _datum(agent.reward or 0.0, _MASKS[row]), MAIN, index, calls=_calls(agent.agent_id, row)
+            )
             if tagged:
                 sample.agent_id, sample.role = agent.agent_id, agent.role
                 sample.trajectory_id, sample.depth = agent.trajectory_id, agent.depth
@@ -289,12 +303,19 @@ def _member(seed: int, index: int, *, tagged: bool) -> Any:
             samples.append(sample)
     result = TrajectoryCollectionResult(
         datums=[sample.datum for sample in samples],
+        datum_calls=tuple(sample.calls for sample in samples),
         task_reward=root_reward if root_reward is not None else 0.0,
         trajectory_stats=[],
         root_rewards_dict={},
         task_reward_valid=not interrupted,
     )
     return MemberRollout(index, samples, agents if tagged else [], result.task_reward, not interrupted, result)
+
+
+def _calls(agent_id: str, row: int) -> tuple[tuple[str, int, int], ...]:
+    """The two model calls of ``agent_id``'s row ``row``, as ``TrainingSample.calls`` names them."""
+
+    return tuple((f"{agent_id}-{row}-{index}", start, end) for index, (start, end) in enumerate(_CALLS[row]))
 
 
 def _datum(reward: float, mask: tuple[int, ...]) -> Any:

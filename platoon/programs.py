@@ -13,6 +13,9 @@ async def solve_then_check(ep: pt.EpisodeContext) -> pt.Outcome:
     ep.add_finalizer(my_reward_shaping)              # runs on the built TrajectoryCollection
     return await ep.grade()
 ```
+
+A program may refuse an entry it cannot run when the config loads, with ``check=`` (RFC 0016, section 3), rather than
+in every rollout once training has started.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     from platoon.harness.agent import AgentResult, ModelEndpoint
     from platoon.harness.inline import InlineRuntime
     from platoon.harness.verify import SubagentBehaviorJudge
+    from platoon.options import CheckContext
     from platoon.task import Task
     from platoon.train.components import EnvironmentRoute
     from platoon.trajectory import TrajectoryCollection
@@ -148,6 +152,9 @@ class EpisodeContext(Protocol):
 
 # An episode program: ``async def program(ep: EpisodeContext) -> Outcome``.
 EpisodeProgram = Callable[[EpisodeContext], Awaitable["Outcome"]]
+# A program's load-time check: ``check(options, ctx)``, which raises ``ValueError`` saying why the program cannot run
+# the entry (``ctx``: ``pt.CheckContext``).
+ProgramCheck = Callable[[Mapping[str, Any], "CheckContext"], None]
 # The attribute the decorator sets on the function it registers.
 PROGRAM_ATTRIBUTE = "__platoon_program__"
 
@@ -157,12 +164,14 @@ class RegisteredProgram:
     """An episode program as configs name it: ``name@version``, and its function.
 
     A ``module:attr`` reference to a function that ``@pt.program`` did not register resolves to a record named
-    by that reference, with no version.
+    by that reference, with no version and no check.
     """
 
     name: str
     version: str
     fn: EpisodeProgram = field(repr=False, compare=False)
+    # Its load-time check (``@pt.program(check=...)``), None without one.
+    check: ProgramCheck | None = field(default=None, repr=False, compare=False)
 
     @property
     def ref(self) -> str:
@@ -179,7 +188,9 @@ _lock = threading.Lock()
 _programs: dict[str, RegisteredProgram] = {}
 
 
-def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], EpisodeProgram]:
+def program(
+    name: str, *, version: str = "1", check: ProgramCheck | None = None
+) -> Callable[[EpisodeProgram], EpisodeProgram]:
     """Register the decorated ``async def fn(ep: EpisodeContext) -> Outcome`` as episode program ``name@version``.
 
     An environment config runs it with ``program: name`` (or ``name@version`` when several versions are
@@ -187,16 +198,24 @@ def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], Epis
     ``package`` imports its module.  The name follows platoon's naming rule (``<owner>-<name>``, lower case;
     ``platoon-*``, ``single`` and ``gym`` are core's).  Registering the same function again (a re-imported module)
     is allowed; another function under a registered ``name@version`` is an error.
+
+    ``check(options, ctx)`` raises ``ValueError`` saying why the program cannot run an entry: it runs when the config
+    loads, for each entry that names the program and each phase the command runs (``ctx``, a ``pt.CheckContext``), so
+    that ``platoon train``, ``eval``, ``rollout`` and ``config validate`` refuse the config (exit 78), naming the entry
+    and the phase, before anything runs.  It reads the config only, and must be quick.  ``options`` is the empty
+    mapping: a program declares no options yet (RFC 0016, section 1).
     """
 
     extensions.check_name(name, what="program")
     version = extensions.check_version(version, what=f"program {name!r}")
+    if check is not None and not callable(check):
+        raise TypeError(f"@program({name!r}, check=...) takes a callable check(options, ctx), got {check!r}")
 
     def decorate(fn: EpisodeProgram) -> EpisodeProgram:
         if not inspect.iscoroutinefunction(fn):
             raise TypeError(f"@program({name!r}) needs an async function, got {fn!r}")
         extensions.check_registration("program", name, module=getattr(fn, "__module__", None))
-        record = RegisteredProgram(name=name, version=version, fn=fn)
+        record = RegisteredProgram(name=name, version=version, fn=fn, check=check)
         register_program(record)
         setattr(fn, PROGRAM_ATTRIBUTE, record)
         return fn
@@ -412,6 +431,7 @@ class Episode:
                 harness_ref=self.harness_ref or "harness",
                 on_harness_exit=self.route.on_harness_exit,
                 gateway_errors=self.root.gateway_errors,
+                budget_exhausted=self.root.budget_exhausted,
             )
             if failed is not None:
                 return failed
@@ -461,6 +481,7 @@ __all__ = [
     "EpisodeProgram",
     "Finalizer",
     "PROGRAM_ATTRIBUTE",
+    "ProgramCheck",
     "RegisteredProgram",
     "SNAPSHOT_REASON",
     "accept_entry_point",

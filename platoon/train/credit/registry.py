@@ -122,13 +122,19 @@ def resolve_credit_estimator(ref: str) -> type:
 
 def estimator_problem(cls: Any) -> str | None:
     """Why ``cls`` is no credit estimator class, or None when it is one: a class whose ``assign(group)`` is a coroutine
-    function and whose ``needs_agents`` is a bool, whose ``settle``, if any, is synchronous, and that has both or
-    neither of ``state()`` and ``load_state(state)``."""
+    function and whose ``needs_agents`` is a bool, whose ``reads_spans``, if any, is a bool, True only beside
+    ``needs_agents``, whose ``settle``, if any, is synchronous, and that has both or neither of ``state()`` and
+    ``load_state(state)``."""
 
     if not isinstance(cls, type) or not inspect.iscoroutinefunction(getattr(cls, "assign", None)):
         return "a class with async assign(group)"
     if not isinstance(getattr(cls, "needs_agents", None), bool):
         return "its needs_agents is no bool (True when it reads the group's agents)"
+    reads_spans = getattr(cls, "reads_spans", False)
+    if not isinstance(reads_spans, bool):
+        return "its reads_spans is no bool (True when it reads the spans its agents name)"
+    if reads_spans and not cls.needs_agents:
+        return "it reads spans (reads_spans) but not agents (needs_agents), and spans come on its agents"
     settle = getattr(cls, "settle", None)
     if settle is not None and (not callable(settle) or inspect.iscoroutinefunction(settle)):
         return "its settle(group) is no synchronous method: the run settles a group with no await"
