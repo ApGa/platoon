@@ -64,6 +64,12 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   root's own stops counted.
 - An evaluation in a run that trains several policies runs its groups. Every one failed, refused for having no credit
   estimator: a training group needs one to tell each row's policy, but an evaluation trains nothing and never has one.
+- The TextCraft extension's tools (`platoon-textcraft`) name the JSON type of each parameter in their schemas, which a
+  model is shown: an object for `craft`'s `ingredients`, and an array for its `target` and for `get_info`'s `items`.
+  These named none, so with a model whose tool calls write every value as text, such as Qwen3.5's XML calls, a
+  tool-call parser that types each value by its schema, such as the chat-template renderer's `qwen3_coder`, left these
+  as text: `craft` refused every call, and `get_info` answered for each character of its list. The game still takes
+  any value and checks it with the same messages.
 
 ## 0.5.0 (2026-10-29)
 

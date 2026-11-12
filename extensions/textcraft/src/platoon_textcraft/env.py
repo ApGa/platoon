@@ -35,7 +35,7 @@ from typing import Any, ClassVar
 
 import openreward.environments as ors
 from openreward.environments import Environment, Split, TextBlock, ToolOutput, tool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from platoon_textcraft.recipe_loader import RecipeDatabase
 
@@ -84,13 +84,22 @@ def parse_craft_targets(goal: str | None) -> dict[str, int] | None:
     return targets or None
 
 
+# These parameters take any value, since the game checks each argument itself, with its own messages, which the Harbor
+# export's game repeats. Their schemas still name the JSON type each wants: a model is shown it, and a parser of tool
+# calls that write every value as text, as Qwen3.5's XML calls do, reads the value as that type.
 class CraftParams(BaseModel):
-    ingredients: Any = Field(description="Dict of {item_name: count} to consume.")
-    target: Any = Field(description="(item_name, total_count); total_count must be divisible by the recipe's yield.")
+    ingredients: Any = Field(
+        description="Dict of {item_name: count} to consume.",
+        json_schema_extra=TypeAdapter(dict[str, int]).json_schema(),
+    )
+    target: Any = Field(
+        description="(item_name, total_count); total_count must be divisible by the recipe's yield.",
+        json_schema_extra=TypeAdapter(tuple[str, int]).json_schema(),
+    )
 
 
 class GetInfoParams(BaseModel):
-    items: Any = Field(description="List of item names.")
+    items: Any = Field(description="List of item names.", json_schema_extra=TypeAdapter(list[str]).json_schema())
 
 
 class FinishParams(BaseModel):
