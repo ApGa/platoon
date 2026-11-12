@@ -2,9 +2,9 @@
 
 What each release of platoon changes. Platoon's version is below 1.0: a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
-release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
+release, require a range such as `platoon[tinker,ors]>=0.6,<0.7`.
 
-## 0.6.0 (unreleased)
+## 0.6.0 (2026-11-13)
 
 ### New features
 
@@ -112,9 +112,28 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
 ### Install and upgrade
 
+```bash
+pip install -U 'platoon[tinker,ors]>=0.6,<0.7'
+# with the TextCraft extension, name it too:
+pip install -U 'platoon[tinker,ors]>=0.6,<0.7' 'platoon-textcraft[platoon]'
+# with platoon-harness, for teams of agents:
+pip install -U 'platoon[tinker,ors,platoon-harness]>=0.6,<0.7'
+```
+
+- **To upgrade a project that pins one minor release**, move its range to 0.6, such as `platoon[tinker,ors]>=0.6,<0.7`.
+  Platoon 0.6 refuses the components of an installed extension whose requirement on platoon excludes it, such as
+  `platoon>=0.5,<0.6`, with an error that names both versions, until a release of the extension admits 0.6;
+  meanwhile, `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` loads them anyway
+  ([Compatibility and provenance](docs/extending/index.md#compatibility-and-provenance)).
 - **Replace what 0.6.0 removed** (above): import from the new module paths, which platoon 0.5.0 already offered beside
   the old ones, and rename a workflow's override of `_admit_group` or `_admission_semaphore`. Code that ran on 0.5
   without a `PlatoonDeprecationWarning` used none of them.
+- **The TextCraft extension's release for platoon 0.6 is `platoon-textcraft` 0.5.0**, whose `platoon` extra requires
+  `platoon[ors]>=0.6,<0.7`. It carries the fix to its tools' parameter types (Fixes, above). The release for platoon
+  0.5 stays 0.4.0: there, keep the extension within 0.4 (`platoon-textcraft>=0.4,<0.5`), since platoon 0.5 refuses the
+  components of 0.5.0, also when it is installed without its extra. An upgrade of platoon alone leaves 0.4.0
+  installed, which pip does not flag and platoon 0.6 refuses: upgrade the two together, as above
+  ([The TextCraft extension](docs/getting-started/install.md#the-textcraft-extension)).
 
 ## 0.5.0 (2026-10-29)
 

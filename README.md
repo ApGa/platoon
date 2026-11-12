@@ -62,7 +62,7 @@ cd platoon
 uv sync --extra tinker --extra ors
 ```
 
-Below 1.0, a minor release may change the API, so pin one (`platoon[tinker,ors]>=0.5,<0.6`);
+Below 1.0, a minor release may change the API, so pin one (`platoon[tinker,ors]>=0.6,<0.7`);
 [CHANGELOG.md](CHANGELOG.md) has the release notes.
 
 `platoon train`, `platoon eval` and `platoon rollout` need `TINKER_API_KEY` to sample the policy, and the Tinker
