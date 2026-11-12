@@ -178,13 +178,16 @@ def _load_with_bases(path: Path, chain: tuple[Path, ...]) -> tuple[dict[str, Any
 # A value that names a URL rather than a local path: ``scheme://...`` (``hf://``, ``harbor://``, ``git+https://``).
 _URL = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _GIT_ADDRESS = re.compile(r"^[\w.-]+@[\w.-]+:")  # git's scp-like address of a repository: git@host:org/repo
+_PYTHON_REFERENCE = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_][\w.]*$")  # a Python object: module:attr
 
 
 def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path | None = None) -> list[str]:
     """Make the relative input paths of ``data``'s ``environments`` entries absolute against the directory ``base``,
-    in place, and return the problems: a harness ``.toml`` spec path, and the options each entry's service declares
-    as naming files (``path_options``, :class:`platoon.envs.service.PathOption`); and the ``trainer_options`` that
-    the trainer the file names declares as naming files (every core trainer's, in a file that names none:
+    in place, and return the problems: a harness ``.toml`` spec path, the options each entry's function harness
+    declares as naming files (``@pt.harness(path_options=...)``, in ``harness_options`` and in
+    ``eval_overrides.harness_options``), and the options each entry's service declares as naming files
+    (``path_options``, :class:`platoon.envs.service.PathOption`); and the ``trainer_options`` that the trainer the file
+    names declares as naming files (every core trainer's, in a file that names none:
     :func:`~platoon.train.trainer.registry.trainer_path_options`).
 
     With ``source``, the config file ``data`` was read from (``base`` is its directory), each such path must name
@@ -192,7 +195,8 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
     the path relative to the working directory when that one exists, which is what such a path named before.  Without
     a ``source`` (overrides, a named environment's entry: relative to the working directory) nothing is checked; the
     service reports a file it cannot read.  Absolute paths, ``~`` expanded, and values that are not local paths are
-    left as they are.
+    left as they are: a mapping, a URL, ``git+...`` or a git address, and in a harness's options a reference to a
+    Python object (``module:attr``) too.
     """
 
     from platoon.envs.service import PathOption, service_path_options
@@ -221,6 +225,7 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
                 resolver.harness(ref, f"{where}.harness") if isinstance(ref, str) else ref: weight
                 for ref, weight in harness.items()
             }
+        _resolve_harness_options(entry, where, resolver)
         options = entry.get("service_kwargs")
         service = _entry_service(entry)
         if not isinstance(options, dict) or service is None:
@@ -252,6 +257,40 @@ def resolve_input_paths(data: Any, base: str | os.PathLike[str], *, source: Path
             else:
                 options[name] = resolver.path(value, at, rule)
     return resolver.problems
+
+
+def _resolve_harness_options(entry: dict[str, Any], where: str, resolver: _InputPaths) -> None:
+    """Resolve the options of ``entry`` that its harnesses declare as naming files
+    (:func:`~platoon.harness.registry.harness_path_options`), in its ``harness_options`` and its
+    ``eval_overrides.harness_options`` (:func:`resolve_input_paths`): a reference to a Python object (``module:attr``),
+    which such an option may hold in place of a file, stays as written.  The entry's ``package`` is imported first, as
+    a run imports it, since it may register the harness."""
+
+    from platoon.envs.service import PathOption
+    from platoon.harness.registry import harness_path_options
+
+    harness = entry.get("harness")
+    refs = [harness] if isinstance(harness, str) else list(harness) if isinstance(harness, dict) else []
+    overrides = entry.get("eval_overrides")
+    written = {
+        "harness_options": entry.get("harness_options"),
+        "eval_overrides.harness_options": overrides.get("harness_options") if isinstance(overrides, dict) else None,
+    }
+    written = {at: options for at, options in written.items() if isinstance(options, dict) and options}
+    package = entry.get("package")
+    if written and isinstance(package, str) and package:
+        try:
+            importlib.import_module(package)
+        except Exception:  # the run reports a package that does not import, naming its entry
+            pass
+    names = (
+        {option for ref in refs if isinstance(ref, str) for option in harness_path_options(ref)} if written else set()
+    )
+    for at, options in written.items():
+        for option in sorted(names & options.keys()):
+            value = options[option]
+            if value is not None and not (isinstance(value, str) and _PYTHON_REFERENCE.match(value)):
+                options[option] = resolver.path(value, f"{where}.{at}.{option}", PathOption())
 
 
 def _resolve_each(value: Any, parts: list[str], at: str, resolver: _InputPaths, rule: Any) -> Any:

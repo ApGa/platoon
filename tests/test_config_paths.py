@@ -1,17 +1,19 @@
 """Input paths resolve against the config file that names them (RFC 0018, section 5): a harness ``.toml`` spec and
-the options a service declares as naming files, made absolute per file before the files merge, with no fallback to
-the working directory; overrides and outputs stay relative to the working directory, and the loaded data holds every
-path absolute."""
+the options a function harness or a service declares as naming files, made absolute per file before the files merge,
+with no fallback to the working directory; overrides and outputs stay relative to the working directory, and the
+loaded data holds every path absolute."""
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
+import platoon as pt
 from platoon.envs.service import PathOption, service_path_options
 from platoon.utils.config import ConfigError, load_yaml_config, resolve_config, write_run_record
 
@@ -330,6 +332,108 @@ def test_harness_spec_paths_resolve_in_a_reference_and_in_a_weighted_mapping(tmp
 
     assert data["environments"][0]["harness"] == str(configs / "a.toml")
     assert data["environments"][1]["harness"] == {str(configs / "b.toml"): 1, "platoon-react": 2}
+
+
+@pt.harness("pathtest-crew", path_options=("crew",))
+async def crew_harness(ctx: pt.AgentContext) -> pt.AgentResult:
+    """Reads the file its ``crew`` option names."""
+
+    return pt.AgentResult("completed")
+
+
+def test_a_harness_file_option_resolves_beside_its_config(tmp_path, monkeypatch):
+    configs = tmp_path / "project" / "configs"
+    configs.mkdir(parents=True)
+    (configs / "crew.toml").write_text("")
+    (configs / "eval-crew.toml").write_text("")
+    rows = {"rows": ["hi"]}
+    config = _write(
+        configs / "env.yaml",
+        {
+            "environments": [
+                {
+                    "service": "table",
+                    "service_kwargs": rows,
+                    "harness": "pathtest-crew",
+                    "harness_options": {"crew": "crew.toml", "note": "crew.toml"},
+                    "eval_overrides": {"harness_options": {"crew": "eval-crew.toml"}},
+                },
+                {
+                    "service": "table",
+                    "service_kwargs": rows,
+                    "harness": "pathtest-crew",
+                    "harness_options": {"crew": "acme.crews:mesh"},
+                },
+            ]
+        },
+    )
+    monkeypatch.chdir(tmp_path)  # neither the project nor the configs directory
+
+    first, second = resolve_config(config).data["environments"]
+
+    assert first["harness_options"] == {"crew": str(configs / "crew.toml"), "note": "crew.toml"}  # only its option
+    assert first["eval_overrides"]["harness_options"] == {"crew": str(configs / "eval-crew.toml")}
+    assert second["harness_options"] == {"crew": "acme.crews:mesh"}  # a Python object, not a path
+
+
+PACKAGED_HARNESS = """\
+import platoon as pt
+
+
+@pt.harness("pathtest-packaged", path_options=("crew",))
+async def packaged(ctx: pt.AgentContext) -> pt.AgentResult:
+    return pt.AgentResult("completed")
+"""
+
+
+def test_a_harness_that_only_the_entrys_package_registers_has_its_file_option_resolved(tmp_path, monkeypatch):
+    """Loading imports the entry's ``package`` before it asks the harness for its file options, as a run imports it
+    before it resolves the harness."""
+
+    source, configs = tmp_path / "src", tmp_path / "configs"
+    _dirs(source, configs)
+    (source / "pathtest_packaged.py").write_text(PACKAGED_HARNESS)
+    monkeypatch.syspath_prepend(str(source))
+    (configs / "crew.toml").write_text("")
+    entry = {
+        "service": "table",
+        "service_kwargs": {"rows": ["hi"]},
+        "package": "pathtest_packaged",
+        "harness": "pathtest-packaged",
+        "harness_options": {"crew": "crew.toml"},
+    }
+    config = _write(configs / "env.yaml", {"environments": [entry]})
+    monkeypatch.chdir(tmp_path)
+    assert "pathtest_packaged" not in sys.modules
+
+    (loaded,) = resolve_config(config).data["environments"]
+
+    assert loaded["harness_options"] == {"crew": str(configs / "crew.toml")}
+
+
+def test_a_service_path_that_reads_as_a_python_object_resolves_beside_its_config(tmp_path, monkeypatch):
+    """Only a harness's file option may hold a Python object in place of a file: a service's ``tasks:v2`` is a
+    directory beside the config."""
+
+    configs = tmp_path / "configs"
+    _dirs(configs / "tasks:v2")
+    entry = {"service": "harbor", "service_kwargs": {"dataset_dir": "tasks:v2"}}
+    config = _write(configs / "env.yaml", {"environments": [entry]})
+    monkeypatch.chdir(tmp_path)
+
+    assert _kwargs(resolve_config(config).data)["dataset_dir"] == str(configs / "tasks:v2")
+
+
+def test_a_harness_file_option_that_names_nothing_beside_its_config_is_an_error(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    environment = {"service": "table", "service_kwargs": {"rows": ["hi"]}, "harness": "pathtest-crew"}
+    config = _write(configs / "env.yaml", {"environments": [{**environment, "harness_options": {"crew": "crew.toml"}}]})
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(
+        ConfigError, match=r"environments\.0\.harness_options\.crew: crew\.toml names .*, which does not"
+    ):
+        resolve_config(config)
 
 
 def test_a_named_environments_service_decides_which_options_are_paths(tmp_path, monkeypatch):

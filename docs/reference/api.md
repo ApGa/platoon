@@ -63,6 +63,7 @@ def harness(
     runtime: Runtime = "inline",
     executes_model_code: bool = False,
     budget_enforcement: BudgetEnforcement = "harness",
+    path_options: Sequence[str] = (),
 ) -> Callable[[AgentFn], AgentFn]
 ```
 
@@ -78,7 +79,10 @@ HTTP: once `out_of_steps` holds for the agent, counting the `policy` calls of th
 with its own, a `policy` call gets the budget stop, never sampled, and a run that then completes is graded
 `limit`, with reason `budget` (RFC 0009, option A).  `aux` and `judge` calls stay outside the budget.  A
 rollout whose root has no step budget (`rollout_config.max_steps` or the task's) is refused, with a
-`harness_config` error, rather than run unbounded.  The decorator returns the function unchanged:
+`harness_config` error, rather than run unbounded.  `path_options`
+names the options that hold paths of files the harness reads: a relative one that a config file gives is made
+absolute against the file's directory when the config loads, as a service's `path_options` are (RFC 0016,
+section 1).  The decorator returns the function unchanged:
 
     @pt.harness("my-agent", version="2")
     async def my_agent(ctx: pt.AgentContext) -> pt.AgentResult:
@@ -103,6 +107,7 @@ A harness implemented by an async Python function (`platoon.harness.agent.AgentF
 | `executes_model_code` | `bool` | required | The harness runs code the model wrote. |
 | `fn` | `AgentFn` | required | The decorated function. |
 | `budget_enforcement` | `BudgetEnforcement` | `"harness"` | Who stops each of its agents at its step budget: `harness`, the function itself (`ctx.budget`, `out_of_steps`), or `gateway`, the model gateway (RFC 0009, option A). |
+| `path_options` | `tuple[str, ...]` | `()` | The options that hold paths of files the harness reads, which load beside the config file that gives them. |
 | `ref` | `str` | | `name@version`, the key environment configs and trajectories use. Read-only. |
 | `source` | `str` | | `module:qualname` of the function. Read-only. |
 

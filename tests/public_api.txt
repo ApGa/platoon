@@ -92,6 +92,7 @@ platoon.FunctionHarness.budget_enforcement: field BudgetEnforcement = "harness"
 platoon.FunctionHarness.executes_model_code: field bool
 platoon.FunctionHarness.fn: field AgentFn
 platoon.FunctionHarness.name: field str
+platoon.FunctionHarness.path_options: field tuple[str, ...] = ()
 platoon.FunctionHarness.ref: property str
 platoon.FunctionHarness.runtime: field Runtime
 platoon.FunctionHarness.source: property str
@@ -624,7 +625,7 @@ platoon.gym.StepEnv.step: async def step(action: str) -> tuple[str, float, bool]
 platoon.gym.as_environment: def as_environment(env_factory: Callable[[], StepEnv], *, name: str, tasks: Mapping[str, Sequence[Mapping[str, Any]]] | None = None) -> type
 platoon.gym.gym_program: async def gym_program(ep: EpisodeContext) -> Outcome
 platoon.gym.loop: def loop(env_factory: Callable[[], StepEnv], *, max_turns: int | None = None, system: str | None = None) -> AgentFn
-platoon.harness: def harness(name: str, *, version: str = "1", runtime: Runtime = "inline", executes_model_code: bool = False, budget_enforcement: BudgetEnforcement = "harness") -> Callable[[AgentFn], AgentFn]
+platoon.harness: def harness(name: str, *, version: str = "1", runtime: Runtime = "inline", executes_model_code: bool = False, budget_enforcement: BudgetEnforcement = "harness", path_options: Sequence[str] = ()) -> Callable[[AgentFn], AgentFn]
 platoon.program: def program(name: str, *, version: str = "1", check: ProgramCheck | None = None) -> Callable[[EpisodeProgram], EpisodeProgram]
 platoon.testing.Completion: @dataclass(frozen=True) class Completion
 platoon.testing.Completion.delay: field float = 0.0

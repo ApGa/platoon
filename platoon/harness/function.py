@@ -23,7 +23,7 @@ from __future__ import annotations
 import inspect
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal, get_args
 
@@ -54,6 +54,8 @@ class FunctionHarness:
     # Who stops each of its agents at its step budget: ``harness``, the function itself (``ctx.budget``,
     # ``out_of_steps``), or ``gateway``, the model gateway (RFC 0009, option A).
     budget_enforcement: BudgetEnforcement = "harness"
+    # The options that hold paths of files the harness reads, which load beside the config file that gives them.
+    path_options: tuple[str, ...] = ()
 
     @property
     def ref(self) -> str:
@@ -77,6 +79,7 @@ def harness(
     runtime: Runtime = "inline",
     executes_model_code: bool = False,
     budget_enforcement: BudgetEnforcement = "harness",
+    path_options: Sequence[str] = (),
 ) -> Callable[[AgentFn], AgentFn]:
     """Register the decorated ``async def fn(ctx: AgentContext) -> AgentResult`` as harness ``name@version``.
 
@@ -90,7 +93,10 @@ def harness(
     with its own, a ``policy`` call gets the budget stop, never sampled, and a run that then completes is graded
     ``limit``, with reason ``budget`` (RFC 0009, option A).  ``aux`` and ``judge`` calls stay outside the budget.  A
     rollout whose root has no step budget (``rollout_config.max_steps`` or the task's) is refused, with a
-    ``harness_config`` error, rather than run unbounded.  The decorator returns the function unchanged::
+    ``harness_config`` error, rather than run unbounded.  ``path_options``
+    names the options that hold paths of files the harness reads: a relative one that a config file gives is made
+    absolute against the file's directory when the config loads, as a service's ``path_options`` are (RFC 0016,
+    section 1).  The decorator returns the function unchanged::
 
         @pt.harness("my-agent", version="2")
         async def my_agent(ctx: pt.AgentContext) -> pt.AgentResult:
@@ -107,6 +113,8 @@ def harness(
             f"Harness {name!r}: budget_enforcement must be one of {get_args(BudgetEnforcement)}, "
             f"got {budget_enforcement!r}"
         )
+    if isinstance(path_options, str) or not all(isinstance(option, str) and option for option in path_options):
+        raise ValueError(f"Harness {name!r}: path_options must be a sequence of option names, got {path_options!r}")
 
     def decorate(fn: AgentFn) -> AgentFn:
         if not inspect.iscoroutinefunction(fn):
@@ -120,6 +128,7 @@ def harness(
                 executes_model_code=bool(executes_model_code),
                 fn=fn,
                 budget_enforcement=budget_enforcement,
+                path_options=tuple(path_options),
             )
         )
         setattr(fn, HARNESS_ATTRIBUTE, _function_harnesses[f"{name}@{version}"])

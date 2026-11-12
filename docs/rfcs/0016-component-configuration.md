@@ -7,7 +7,7 @@
 | Authors | Apurva Gandhi (@ApGa) |
 | Builds on | [RFC 0013](0013-extension-model.md) (the extension model: this RFC is its milestone M5 and the callbacks of its section 12), the config loader (`platoon/utils/config.py`), environment entries (`platoon/train/components.py`), named environments (`platoon/envs/named.py`), the TOML harness spec format (`platoon/harness/spec.py`), the hooks (`platoon/hooks.py`), [RFC 0008](0008-config-and-cli.md) (config and CLI) |
 | Discussion | The pull request that added this RFC, and the pull request of M1, which revises it with the decisions of 2026-10-17 (open questions 1 to 4, 6 and 7) |
-| Implementation | M1 (strict loading), in the pull request that revises this RFC; a `trainer_config` that does not resolve is already a configuration error (section 8), from RFC 0013's follow-ups. M2 in part: `check=` on episode programs, before their `options=` (section 3) |
+| Implementation | M1 (strict loading), in the pull request that revises this RFC; a `trainer_config` that does not resolve is already a configuration error (section 8), from RFC 0013's follow-ups. M2 in part: `check=` on episode programs, before their `options=` (section 3), and a function harness's `path_options` (section 1) |
 
 ## Summary
 
@@ -138,6 +138,12 @@ async def best_of_n(ep: pt.EpisodeContext[BestOfNOptions]) -> pt.Outcome:
   component's defaults, and `lock.json` records the options each component ran with, defaults included, beside the
   component ([RFC 0013, section 7](0013-extension-model.md#7-provenance)): per entry, and per phase where
   `eval_overrides` changes them (section 2).
+- **Options that name files** (amended). A function harness lists them, `@pt.harness(name, path_options=("rubric",))`,
+  as a service lists its own in `path_options` and a trainer's options class does: a relative path that a config file
+  gives in `harness_options` or `eval_overrides.harness_options` is made absolute against that file's directory when the
+  config loads (RFC 0018, section 5), and a value that is no local path, such as a reference to a Python object
+  (`module:attr`), stays as written. A schema says what an option holds, not whether it names a file, so `path_options`
+  stays beside `options=` when M2 lands.
 
 **TOML harness specs.** A spec declares its options under `[options]`, one table per option, and its launch
 templates render them. This is the `openhands` spec that M2 adds in place of the three OpenHands specs of the

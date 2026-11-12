@@ -25,6 +25,13 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   budget is refused with a `harness_config` error, as a spec's is, rather than run unbounded. `aux` and `judge` calls
   stay outside the budget, a harness that declares nothing is unchanged, and `platoon harness show` says who enforces
   the budget (RFC 0009, option A) ([Budgets](docs/tutorials/function-harness.md#budgets)).
+- **A function harness's file options load beside the config.** `@pt.harness(name, path_options=("rubric",))` names
+  the options that hold paths of files the harness reads, as a service's `path_options` do: a relative one that a
+  config file gives in `harness_options` or `eval_overrides.harness_options` is made absolute against that file's
+  directory when the config loads, and one that names nothing there is a configuration error, so a config runs the
+  same from any directory. A value that is no local path stays as written, and so does a reference to a Python object
+  (`module:attr`), which such an option may hold in place of a file (RFC 0016, section 1)
+  ([Configs](docs/how-to/configs.md)).
 
 ### Fixes
 
