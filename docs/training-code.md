@@ -60,7 +60,7 @@ Each package is one stage of a run; the modules at the top set a run up.
 | `config_defs.py`, `components.py`, `entry_settings.py`, `auto.py`, `labels.py`, `exclusion.py`, `identity.py` | the config's schema, each environment's components and settings, the label column, excluded tasks, one run per run directory |
 | `dataloader.py`, `dataset_order.py`, `startup.py`, `reaping.py`, `leases.py` | the training tasks in batches and their order, what a run readies before its first rollout, what dead processes left, rollout leases |
 | `sampler_api.py`, `samplers.py`, `sampler_runtime.py`, `sampling.py`, `admission_api.py`, `admissions.py`, `task_stats.py`, `task_records.py` | task selection (RFC 0019): which task each group runs, which groups count, and the per-task statistics |
-| [`tinker/`](../platoon/train/tinker/) | the policy client ([`proxy.py`](../platoon/train/tinker/proxy.py)), its renderers and the rollout timing; and the shims of the module paths that platoon 0.5.0 moved, which platoon 0.6.0 removes |
+| [`tinker/`](../platoon/train/tinker/) | the policy client ([`proxy.py`](../platoon/train/tinker/proxy.py)), its renderers and the rollout timing; the module paths that platoon 0.5.0 moved out of it, which platoon 0.6.0 removed, say what replaces them |
 
 The [dependency rule](../tests/train/test_layers.py) keeps the layers apart: generic code (`policy/`, `objectives/`,
 `dispatch/`, `checkpoints/`, `evaluation/`, `workers/`, `supervised/`, the trainer API, lifecycle and registry with the

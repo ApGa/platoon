@@ -267,7 +267,7 @@ def _decode_datums(data: Mapping[str, Any]) -> list[tinker.Datum]:
 register_codec(list, "datums", _encode_datums, _decode_datums)
 
 
-def _encode_datum(datum: tinker.Datum) -> dict[str, Any]:
+def encode_datum(datum: tinker.Datum) -> dict[str, Any]:
     """A datum as JSON data that reads back exactly (:func:`decode_datum`): its model input, and every loss input."""
 
     return {
@@ -276,19 +276,13 @@ def _encode_datum(datum: tinker.Datum) -> dict[str, Any]:
     }
 
 
-def _decode_datum(data: Mapping[str, Any]) -> tinker.Datum:
+def decode_datum(data: Mapping[str, Any]) -> tinker.Datum:
     """The datum :func:`encode_datum` wrote."""
 
     return tinker.Datum(
         model_input=tinker.ModelInput.model_validate(data["model_input"]),
         loss_fn_inputs={str(name): _decode_tensor(value) for name, value in data["loss_fn_inputs"].items()},
     )
-
-
-# A datum as a codec keeps it (register_codec), and reads it back.  The private names are the module's in platoon
-# 0.4.0, which its old path still reaches.
-encode_datum = _encode_datum
-decode_datum = _decode_datum
 
 
 def _encode_tensor(value: tinker.TensorData) -> dict[str, Any]:

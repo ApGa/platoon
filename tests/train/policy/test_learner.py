@@ -385,7 +385,7 @@ def _datum(advantage: float, **inputs: torch.Tensor) -> tinker.Datum:
 def test_the_step_updates_the_leader_policy_under_the_loss_its_spec_took_when_the_trainer_was_built(monkeypatch):
     """Its objective is the policy-gradient loss of the leader's spec, with that spec's config, not the config's as it
     is now; its metrics are ``compute_training_metrics`` as the objective's module names it at each call, where a
-    patch of it, as through platoon 0.4.0's ``platoon.train.tinker.rl``, lands."""
+    patch of it lands."""
 
     loss_fn_config = {"clip_low_threshold": 0.8, "clip_high_threshold": 1.2}
     policy = _main(loss_fn="ppo", loss_fn_config=loss_fn_config)

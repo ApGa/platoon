@@ -7,10 +7,7 @@ protocol, which imports tinker and torch.  By the time the entrypoint's own
 ``main()`` runs, much of the stack is already loaded.
 
 So this module is stdlib-only, imports nothing from platoon, and is called from
-the top of ``platoon/train/workers/__init__.py``, and of
-``platoon/train/tinker/__init__.py``, which the entrypoint's module name before
-platoon 0.5.0 (``platoon.train.tinker.workers.entrypoint``, still runnable until
-0.6.0) executes first.  It is a **no-op in the
+the top of ``platoon/train/workers/__init__.py``.  It is a **no-op in the
 trainer**: it applies only when the process is recognisably a rollout worker,
 either because the supervisor set ``PLATOON_TINKER_ROLLOUT_WORKER=1`` in the
 child environment or because ``__main__`` is the worker entrypoint itself (a
@@ -86,9 +83,7 @@ WORKER_ENV_MARKER = "PLATOON_TINKER_ROLLOUT_WORKER"
 STARTUP_BUDGET_ENV = "PLATOON_ROLLOUT_WORKER_STARTUP_BUDGET"
 DIAG_PATH_ENV = "PLATOON_ROLLOUT_WORKER_DIAG"
 ENTRYPOINT_MODULE = "platoon.train.workers.entrypoint"
-#: The entrypoint's module, and its module before platoon 0.5.0, a shim that runs it until platoon 0.6.0.
-_ENTRYPOINT_MODULES = (ENTRYPOINT_MODULE, "platoon.train.tinker.workers.entrypoint")
-_ENTRYPOINT_SUFFIX = tuple(os.path.join(*module.split(".")) + ".py" for module in _ENTRYPOINT_MODULES)
+_ENTRYPOINT_SUFFIX = os.path.join(*ENTRYPOINT_MODULE.split(".")) + ".py"
 
 THREAD_PIN_VARIABLES = (
     "OMP_NUM_THREADS",
@@ -110,9 +105,9 @@ def in_rollout_worker_process() -> bool:
     # -- ``sys.argv[0]`` is still ``"-m"``.  ``sys.orig_argv`` is the command
     # line as the interpreter received it and is already correct here.
     original = list(getattr(sys, "orig_argv", ()) or ())
-    if any(module in original for module in _ENTRYPOINT_MODULES):
+    if ENTRYPOINT_MODULE in original:
         for index, argument in enumerate(original[:-1]):
-            if argument == "-m" and original[index + 1] in _ENTRYPOINT_MODULES:
+            if argument == "-m" and original[index + 1] == ENTRYPOINT_MODULE:
                 return True
     argv0 = sys.argv[0] if sys.argv else ""
     return bool(argv0) and os.path.abspath(argv0).endswith(_ENTRYPOINT_SUFFIX)

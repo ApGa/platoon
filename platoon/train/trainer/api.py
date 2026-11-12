@@ -20,7 +20,7 @@ from platoon.train.policy.spec import AgentBindings, PolicyId, PolicySpec, Stepp
 from platoon.train.trainer import signals, waiting
 
 # A start's stats logger is made of this module's name (TrainerBase._new_stats_logger), so that a patch of it reaches
-# the stats logger a start opens, also one made through the old path platoon.train.tinker.rl, as in platoon 0.4.0.
+# the stats logger a start opens.
 from platoon.utils.stats_logger import StatsLogger
 
 if TYPE_CHECKING:

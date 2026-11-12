@@ -47,8 +47,8 @@ Words the training code uses throughout:
   (``train.label_by``; by default, its entry).
 
 The names below import from here without loading tinker or torch until one is used.  ``platoon.train.tinker`` holds the
-policy client (``proxy``), its renderers and the rollout timing, and the shims of the module paths that platoon 0.5.0
-moved out of it, which platoon 0.6.0 removes.
+policy client (``proxy``), its renderers and the rollout timing; the module paths that platoon 0.5.0 moved out of it,
+which platoon 0.6.0 removed, say what replaces them (``platoon.train.tinker.REMOVED``).
 """
 
 from typing import TYPE_CHECKING, Any

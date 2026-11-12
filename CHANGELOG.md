@@ -81,6 +81,41 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   as text: `craft` refused every call, and `get_info` answered for each character of its list. The game still takes
   any value and checks it with the same messages.
 
+### Removed
+
+- **Breaking: the forms that platoon 0.5.0 deprecated are gone.** Each fails with a message that names what replaces it
+  and says that platoon 0.6.0 removed it, such as `platoon.train.tinker.rl: platoon 0.6.0 removed it; use
+  platoon.train for PlatoonTinkerRLTrainer and Watchdog, ...`
+  ([Troubleshooting](docs/how-to/troubleshooting.md)). Each form, with what replaces it:
+  - the module paths that platoon 0.5.0 moved out of `platoon.train.tinker`, and the names that it and its old packages
+    `.workers` and `.workflows` exported, whose import raises an `ImportError`, as does a config's `module:attr` that
+    names one: their new modules, which [docs/training-code.md](docs/training-code.md) maps.
+    `platoon.train.tinker`'s names (`PlatoonTinkerRLTrainer`, `Watchdog`, the config classes, the batch
+    transforms): `platoon.train`; `.rl`: `platoon.train`, and the modules of `platoon.train.trainer`, `.policy`,
+    `.step`, `.dispatch`, `.checkpoints` and `.evaluation`; `.config_defs`, `.dataset_order`, `.task_records`:
+    `platoon.train.config_defs`, `.dataset_order`, `.task_records`; `.batch_transforms`, `.staleness`, `.censoring`:
+    `platoon.train.step.batch_transforms`, `.staleness`, `.metrics`; `.dispatcher`, `.permits`:
+    `platoon.train.dispatch.dispatcher` (and `platoon.train.checkpoints.dispatch_state`),
+    `platoon.train.dispatch.permits`; `.kept_groups`, `.checkpoint_pruning`, `.evaluation_record`:
+    `platoon.train.checkpoints.kept_groups`, `.pruning`, `platoon.train.evaluation.record`; `.workflows`,
+    `.workflows.group_rollout_workflow`: `platoon.train.workflow`; `.workflows.base`: `platoon.train.workflow.protocol`;
+    `.start_limit`: `platoon.train.workflow.start_limit`; `.workers` and its modules: `platoon.train.workers` and its
+    modules; `.worker_env`: `platoon.train.workers.env`. `platoon.train.tinker` keeps the policy client (`proxy`), its
+    renderers, `key_refusal` and `rollout_metrics`;
+  - `python -m platoon.train.tinker.train` and `python -m platoon.train.tinker.workers.entrypoint`, which exit 78:
+    `python -m platoon.train.launch` and `python -m platoon.train.workers.entrypoint`;
+  - a `GroupRolloutWorkflow` subclass that defines `_admit_group` or `_admission_semaphore`, which the workflow has not
+    called since 0.5.0, and which is now a `TypeError` when the class is defined, rather than a warning:
+    `_enter_startup_gate` and `_startup_semaphore`.
+
+  No config key was deprecated for removal in 0.6.0.
+
+### Install and upgrade
+
+- **Replace what 0.6.0 removed** (above): import from the new module paths, which platoon 0.5.0 already offered beside
+  the old ones, and rename a workflow's override of `_admit_group` or `_admission_semaphore`. Code that ran on 0.5
+  without a `PlatoonDeprecationWarning` used none of them.
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

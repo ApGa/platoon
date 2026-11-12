@@ -46,7 +46,6 @@ from platoon.train.policy.set import PolicySet
 from platoon.train.policy.spec import PolicyId, agent_bindings, policy_specs
 from platoon.train.sampler_runtime import TaskSampling
 from platoon.train.startup import RolloutStartup
-from platoon.train.step import independent as _independent  # noqa: F401 - loaded with the trainer, for the old paths
 from platoon.train.step.batch_transforms import BatchTransform, build_default_batch_transforms
 from platoon.train.tinker.proxy import ModelInfo
 from platoon.train.trainer.api import StepPlan, TaskSources, TrainerBase, TrainerNeeds, TrainerSetup, Workflows
@@ -57,10 +56,8 @@ from platoon.train.trainer.run import StepClock, TrainerRun
 from platoon.train.trainer.signals import TerminateTrainLoop, TrainInterrupted, Watchdog
 from platoon.train.trainer.state import TrainLoopSharedState
 from platoon.train.workflow import output as _group_output  # noqa: F401 - registers GroupOutput's kept-group codec
-from platoon.train.workflow.group import GroupRolloutWorkflow  # noqa: F401 - the platoon.train.tinker.rl shim reads it
 from platoon.train.workflow.protocol import RolloutWorkflow, capabilities_of
 from platoon.train.workflow.start_limit import StartLimit
-from platoon.utils.stats_tracker import DeferredStats  # noqa: F401 - tinker.rl's shim reads DeferredStats
 
 logger = logging.getLogger(__name__)
 

@@ -851,12 +851,8 @@ The key keeps its field, which still works. The loader reports every config that
 name it once on stderr, `lock.json` records it, `platoon config validate --strict` fails on it, and the generated
 config reference marks it. A Python name warns where it is used, with
 `warnings.warn(message, PlatoonDeprecationWarning, stacklevel=2)`. Say in the release's notes what each deprecation
-replaces, and before a minor release remove the forms it is due to remove: `grep -rn 'removed_in="0.6.0"' platoon`
-lists them for 0.6.0. The module paths that platoon 0.5.0 moved go in 0.6.0 too: their shims are the modules under
-`platoon/train/tinker` that call `_moved` (`grep -rln '_moved(' platoon/train/tinker`), and
-`platoon/train/tinker/_moved.py`, whose `REMOVED_IN` names that release; so does the warning of a
-`GroupRolloutWorkflow` subclass that defines a method of its startup gate under its name before 0.5.0
-(`_RENAMED_METHODS` in `platoon/train/workflow/group.py`).
+replaces, and before a minor release remove the forms it is due to remove: `grep -rn 'removed_in="0.7.0"' platoon`
+lists the keys for 0.7.0, and `grep -rn 'PlatoonDeprecationWarning' platoon` the Python names that warn.
 
 Removing a form is a breaking change, in a commit marked as one (`!` and a `BREAKING CHANGE:` footer, [RFC 0017,
 section 2](docs/rfcs/0017-public-surface-and-conformance.md#2-the-version-policy)). Drop the key's field and the code
@@ -873,8 +869,9 @@ UNKNOWN_KEY_HINTS: ClassVar[dict[str, str]] = {
 
 A value that a key no longer takes goes in the class's `UNKNOWN_VALUE_HINTS` (`{key: {value: hint}}`), an option
 of an environment service in the service class's `UNKNOWN_KEY_HINTS`, which an entry's `service_kwargs` are checked
-against, and a removed command or variable fails with the same words. List each removed form with what replaces it in
-the changelog.
+against, and a removed command or variable fails with the same words. So does a removed module path, imported (an
+`ImportError`) or run with `python -m` (exit 78): `REMOVED` in `platoon/train/tinker/__init__.py` names those that
+platoon 0.6.0 removed, with what replaces each. List each removed form with what replaces it in the changelog.
 
 ### Set up publishing once
 

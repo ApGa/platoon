@@ -49,7 +49,6 @@ settings through ``self.config``.
 import asyncio
 import logging
 import os
-import warnings
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -60,7 +59,7 @@ import tinker
 import torch
 from tinker import TensorData
 
-from platoon.deprecations import PlatoonDeprecationWarning
+from platoon.deprecations import removed_hint
 from platoon.options import Phase
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN, row_entry
@@ -105,12 +104,12 @@ logger = logging.getLogger(__name__)
 _LEASE_METHODS = ("arun_episode", "_run_group_rollouts", "_run_group_member")
 _CREDIT_METHODS = ("compute_baselines", "assign_advantages")
 # The startup gate's methods under their names before platoon 0.5.0, which the workflow no longer calls: a subclass that
-# overrides one is warned of, until platoon 0.6.0 (``__init_subclass__``).
-_RENAMED_METHODS = {"_admit_group": "_enter_startup_gate", "_admission_semaphore": "_startup_semaphore"}
+# defines one is refused (``__init_subclass__``).
+_REMOVED_METHODS = {"_admit_group": "_enter_startup_gate", "_admission_semaphore": "_startup_semaphore"}
 
 
-# The workload helpers of ``workers.workload`` (which the rollout worker calls too) under the names that
-# ``platoon.train.tinker.workflows.group_rollout_workflow`` and tests import from this module.
+# The workload helpers of ``workers.workload`` (which the rollout worker calls too) under the names that tests import
+# from this module.
 # ``as_member_outcomes`` calls ``_add_datum_funnel`` by this name, so that a patch of it reaches the call.
 _workload_from_raw_rollout = workload_from_raw_rollout
 _add_datum_funnel = add_datum_funnel
@@ -246,18 +245,13 @@ class GroupRolloutWorkflow:
         """The ``runs_rollouts_on_lease`` and ``applies_credit`` flags of a subclass whose own body does not set them:
         each that of the class that sets it nearest in its method resolution order, unless one of its methods
         (:data:`_LEASE_METHODS`, :data:`_CREDIT_METHODS`) comes from a class other than this one that the declaring
-        class does not derive from (the subclass itself, a mixin, another branch of a diamond): False.  And a warning
-        for each method the subclass defines under a name the workflow no longer calls (:data:`_RENAMED_METHODS`)."""
+        class does not derive from (the subclass itself, a mixin, another branch of a diamond): False.  A subclass that
+        defines a method under a name the workflow no longer calls (:data:`_REMOVED_METHODS`) is a ``TypeError``."""
 
         super().__init_subclass__(**kwargs)
-        for old, new in _RENAMED_METHODS.items():
+        for old, new in _REMOVED_METHODS.items():
             if old in cls.__dict__:
-                warnings.warn(
-                    f"{cls.__qualname__}.{old} is never called: platoon 0.5.0 renamed GroupRolloutWorkflow.{old} to "
-                    f"{new}, so override {new} instead (platoon 0.6.0 removes this warning)",
-                    PlatoonDeprecationWarning,
-                    stacklevel=2,
-                )
+                raise TypeError(f"{cls.__qualname__}.{old}: {removed_hint('0.6.0', f'GroupRolloutWorkflow.{new}')}")
         for flag, methods in (("runs_rollouts_on_lease", _LEASE_METHODS), ("applies_credit", _CREDIT_METHODS)):
             if flag not in cls.__dict__ and _overrides(cls, flag, methods):
                 setattr(cls, flag, False)
