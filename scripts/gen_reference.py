@@ -706,7 +706,9 @@ CREDIT_ESTIMATOR_TEXT: dict[str, str] = {
     "mean), value for value. An entry without `credit` gets the same credit from the workflow itself.",
     "keyed": "Each agent's rows centered on the mean reward of the group's agents that share its key, any of `task`, "
     "`policy`, `role` and `depth`: under `[task, role]` the root agents on the roots' mean and the subagents on the "
-    "subagents'. Reads agents: the rollout workers tag each row with its agent.",
+    "subagents'. An agent whose trajectory names spans trains each call of each of its scored spans on that span's "
+    "reward less its baseline shared equally by its scored spans, and its other calls on nothing. Reads agents: the "
+    "rollout workers tag each row with its agent.",
     "reverse_kl": "On-policy distillation: a frozen teacher (a `policies:` entry with `trainable: false`) scores every "
     "token the student sampled, and each action token's advantage is `-kl_coef * (student logprob - teacher "
     "logprob)`, plus `reward_coef` times the row's reward centered on its member's baseline. The teacher must share "

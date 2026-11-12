@@ -32,6 +32,24 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   same from any directory. A value that is no local path stays as written, and so does a reference to a Python object
   (`module:attr`), which such an option may hold in place of a file (RFC 0016, section 1)
   ([Configs](docs/how-to/configs.md)).
+- **Each training row names the model calls it trains.** `TrainingSample.calls` (experimental) holds, for each call
+  whose sampled tokens a row trains on, its id (its step's `completion_id`) and the target tokens `[start, end)` they
+  fill, so that a credit estimator can give each call of a row an advantage of its own; kept groups keep them across
+  a resume. `keyed` reads them for an agent whose trajectory names spans (below) (RFC 0021) ([Write a credit
+  estimator](docs/extending/credit-estimators.md)).
+- **Each span of an agent can train on its own reward (experimental).** A program may name spans of an agent's
+  trajectory in its misc, `misc["spans"]`: a list of `{"calls": [...], "reward": ...}`, each some of the agent's model
+  calls, by their steps' `completion_id`, with a reward of its own on the scale of the agent's, or null when none
+  reached it. `credit: keyed` keeps its baseline over the agents' own rewards and trains each call of a scored span on
+  that span's reward less its agent's baseline shared equally by the agent's scored spans, and every other call of the
+  agent on nothing, which `credit/keyed/unscored_tokens` counts; an agent that names no spans trains as before. `keyed`
+  also logs `credit/token_advantage/abs_avg`, the mean absolute advantage of a group's action tokens, the size of what
+  they train with, which `credit/agent_advantage/abs_avg` no longer says once spans cut an agent's credit. An estimator
+  says whether it reads spans (`reads_spans`, experimental, beside `AgentRun.spans` and `Span`), and a training group
+  whose agents name spans stops the run under any credit that does not read them, `group` and an entry without `credit`
+  included, which would train every call on the agent's reward, while an evaluation's group, which trains nothing, runs;
+  `check_credit_estimator` gives an estimator that reads them agents that name spans (RFC 0021) ([Write a credit
+  estimator](docs/extending/credit-estimators.md)).
 
 ### Fixes
 

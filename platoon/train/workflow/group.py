@@ -61,6 +61,7 @@ import torch
 from tinker import TensorData
 
 from platoon.deprecations import PlatoonDeprecationWarning
+from platoon.options import Phase
 from platoon.task import Task
 from platoon.train.components import ENVIRONMENT_COLUMN, row_entry
 from platoon.train.config_defs import RolloutConfig, WorkflowConfig
@@ -72,7 +73,7 @@ from platoon.train.credit.group import (
     group_baselines,
     group_verdict,
 )
-from platoon.train.credit.runtime import Credit, assign_credit
+from platoon.train.credit.runtime import Credit, assign_credit, refuse_unread_spans
 from platoon.train.labels import task_label
 from platoon.train.policy.spec import AgentBindings
 from platoon.train.startup import WorkerPreload
@@ -85,7 +86,7 @@ from platoon.train.workers.supervisor import RolloutWorkerSupervisor
 from platoon.train.workers.workload import add_datum_funnel, workload_from_raw_rollout
 from platoon.train.workflow import crediting, members, requests, telemetry
 from platoon.train.workflow import output as group_output
-from platoon.train.workflow.context import _group_config, _group_entry, _group_stats
+from platoon.train.workflow.context import _group_config, _group_entry, _group_stats, current_entry
 from platoon.train.workflow.output import GroupOutput, MemberOutcome, PolicyGroupOutput, _member, _trained_keys
 from platoon.train.workflow.protocol import StaleFilterSetting, WorkflowSetup, _built_by_keywords
 from platoon.train.workflow.settings import GroupSettings
@@ -201,6 +202,10 @@ class GroupRolloutWorkflow:
     # The run's policies as its estimators read them, by id, which ``platoon train`` sets with ``entry_credit``: the
     # credit group's policies and versions.  Empty without: the group's policy is then main, from ``model_info``.
     policy_views: Mapping[str, PolicyView] = MappingProxyType({})
+    # The phase whose groups it runs, ``train`` or ``eval`` (``WorkflowSetup.phase``, which ``from_setup`` keeps): an
+    # evaluation's groups train nothing, so no credit of theirs is refused for the spans their agents name
+    # (``_assign_credit``).  A train script sets ``eval`` on its evaluation's workflow, as ``platoon train`` does.
+    phase: Phase = "train"
     # In a run whose agents sample several policies, which ``platoon train`` sets after construction: the model info
     # of each sampled policy but the agents' default (``agents.default``), whose is ``model_info``, by id; which agent
     # samples which policy; and the policies the run trains, whose agents alone make datums.  Empty and None in a run
@@ -326,9 +331,12 @@ class GroupRolloutWorkflow:
     @classmethod
     def from_setup(cls, setup: WorkflowSetup) -> Self:
         """The workflow of one phase of a run, as ``platoon train`` builds it: with the keyword arguments the setup
-        stands for, and the environment entries' own settings (``entry_configs``) when they set any."""
+        stands for, the environment entries' own settings (``entry_configs``) when they set any, and the setup's
+        ``phase``."""
 
-        return _built_by_keywords(cls, setup)
+        workflow = _built_by_keywords(cls, setup)
+        workflow.phase = setup.phase
+        return workflow
 
     @property
     def config(self) -> WorkflowConfig:
@@ -589,9 +597,14 @@ class GroupRolloutWorkflow:
         ``data``: by its entry's estimator when the entry sets one (``_entry_estimator``, awaited over the group it
         sees, ``_credit_group``, by :func:`~platoon.train.credit.runtime.assign_credit`), whose credit it returns;
         else each member's datums centered on its baseline (:meth:`assign_advantages`), at once, as the workflow
-        always credited them, and None."""
+        always credited them, and None.  Either way, a group of the training workflow (``phase``) whose agents name
+        spans that its credit does not read stops the run first
+        (:func:`~platoon.train.credit.runtime.refuse_unread_spans`); an evaluation's group trains nothing, and is not
+        refused."""
 
         estimator = self._entry_estimator() if self.entry_credit else None
+        if self.phase == "train":
+            refuse_unread_spans(estimator, current_entry(), data.get("task_id"), valid_results)
         if estimator is None:
             if len(self.trained_policies) > 1:
                 raise RuntimeError(

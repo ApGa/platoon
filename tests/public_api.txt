@@ -202,6 +202,7 @@ platoon.experimental.AgentRun.policy: field PolicyId
 platoon.experimental.AgentRun.reward: field float | None
 platoon.experimental.AgentRun.role: field str
 platoon.experimental.AgentRun.samples: field list[TrainingSample] = <factory list>
+platoon.experimental.AgentRun.spans: field tuple[Span, ...] | None = None
 platoon.experimental.AgentRun.trajectory_id: field str
 platoon.experimental.CheckpointParticipant: class CheckpointParticipant(Protocol)
 platoon.experimental.CheckpointParticipant.checkpoint_state: async def checkpoint_state(name: str) -> Mapping[str, Any]
@@ -221,6 +222,7 @@ platoon.experimental.CreditEstimatorBase.assign_timeout_seconds: constant float 
 platoon.experimental.CreditEstimatorBase.check: staticmethod def check(options: Any, ctx: CreditCheckContext) -> None
 platoon.experimental.CreditEstimatorBase.needs_agents: constant bool = False
 platoon.experimental.CreditEstimatorBase.options_schema: constant NoneType = None
+platoon.experimental.CreditEstimatorBase.reads_spans: constant bool = False
 platoon.experimental.CreditGroup: @dataclass class CreditGroup
 platoon.experimental.CreditGroup.agents: def agents() -> list[AgentRun]
 platoon.experimental.CreditGroup.entry: field str | None
@@ -426,6 +428,9 @@ platoon.experimental.ShareLedger.lock: attribute asyncio.Lock
 platoon.experimental.ShareLedger.take: async def take(policy: PolicyId, n: int, *, stop: asyncio.Event | None = None) -> list[SettledGroup]
 platoon.experimental.Slot: @dataclass(frozen=True) class Slot
 platoon.experimental.Slot.entry: field str
+platoon.experimental.Span: @dataclass(frozen=True) class Span
+platoon.experimental.Span.calls: field frozenset[str]
+platoon.experimental.Span.reward: field float | None
 platoon.experimental.StepEnd: @dataclass(eq=False) class StepEnd
 platoon.experimental.StepEnd.consumed: field Mapping[tuple[int, int], str]
 platoon.experimental.StepEnd.for_test: classmethod def for_test(*, kind: Literal['launch', 'step'] = "step", step: int = 0, step_updates: Mapping[str, int] | None = None, consumed: Mapping[tuple[int, int], str] | None = None, tracker: StatsTracker | None = None, published: Mapping[str, int] | None = None, learner: Any = None, policy: str | None = None) -> StepEnd
@@ -567,6 +572,7 @@ platoon.experimental.TrainerSetup.workflow_builder: field Callable[[PolicySet], 
 platoon.experimental.TrainingSample: @dataclass(eq=False) class TrainingSample
 platoon.experimental.TrainingSample.advantages: property torch.Tensor
 platoon.experimental.TrainingSample.agent_id: field str | None = None
+platoon.experimental.TrainingSample.calls: field tuple[tuple[str, int, int], ...] = ()
 platoon.experimental.TrainingSample.datum: field tinker.Datum
 platoon.experimental.TrainingSample.depth: field int | None = None
 platoon.experimental.TrainingSample.mask: property torch.Tensor

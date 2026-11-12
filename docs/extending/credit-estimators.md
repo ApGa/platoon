@@ -27,7 +27,8 @@ environments:
 ## The estimator
 
 An estimator is a class with `needs_agents`, a bool, and `async assign(group)`, awaited once per training group in the
-trainer process, after every member has settled. `group` is a `CreditGroup`:
+trainer process, after every member has settled; one that reads its agents' spans also sets `reads_spans = True`.
+`group` is a `CreditGroup`:
 
 - `members`: the members that returned a result, in the group's order, each a `MemberRollout`: its `samples` (every
   row of its rollout), its root's `task_reward` and whether that is a completed root's scored outcome
@@ -42,15 +43,27 @@ agents, its `agent_id`, `role`, `trajectory_id` and `depth`. `sample.advantages`
 advantages and which of its target tokens are actions; `sample.set_advantage(value)` sets one value on its action
 tokens, and `sample.set_advantages(values)` one value per target token, set on the action tokens only. A row the
 estimator leaves alone keeps what the converter loaded: its trajectory's processed reward on every action token.
+`sample.calls` names the model calls the row trains, each as `(call_id, start, end)`: the call's id, its step's
+`completion_id`, and the target tokens `[start, end)` its sampled tokens fill, so an estimator can give each call of a
+row an advantage of its own with `set_advantages`; it is empty for a row whose conversion recorded none.
 
 An agent is an `AgentRun`: its `agent_id`, `trajectory_id`, its parent's trajectory (`parent_id`, none for the root),
 its `role` (the root's is `policy`; a subagent's is the role its harness minted it with, `subagent` for
-`ctx.agents.spawn`), its `policy`, its `depth`, its `reward` and its rows (`samples`). Its reward is its trajectory's
-processed reward, or none when it was not scored: the agent was interrupted, or it is a child whose verifier gave no
-verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never trains an
-unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no
+`ctx.agents.spawn`), its `policy`, its `depth`, its `reward`, its rows (`samples`) and its `spans`. Its reward is its
+trajectory's processed reward, or none when it was not scored: the agent was interrupted, or it is a child whose
+verifier gave no verdict (a judge error, an unparseable or a pending verdict), whose 0 is no score. An estimator never
+trains an unscored agent's reward as 0, nor counts it in a baseline. An agent whose rows the converter left out has no
 `samples`: an unscored one, and a scored child that was sampled out or that its parent did not use, whose reward still
 counts.
+
+A program may credit parts of an agent's work apart, by naming spans of its trajectory in the trajectory's misc,
+`misc["spans"]`: a list of `{"calls": [call id, ...], "reward": number or null}`, each some of the agent's model calls,
+by their steps' `completion_id`, with a reward of its own on the scale of the agent's (no reward processor touches it),
+or null when none reached it. A call is a step of the trajectory and lies in one span at most, and a reward is finite:
+the conversion refuses spans that are not so. The agent's `spans` holds them, each a `Span` (its `calls`, a frozenset of
+ids, and its `reward`): none when its trajectory names no spans, and an empty tuple when it names spans and has none.
+Spans mean that each call of a scored span trains on its span's reward, and every other call of the agent trains
+nothing: an estimator finds each call's tokens in its rows by `sample.calls`.
 
 It is built once per start of the process and entry, `Class(setup, options)`: `setup` is a `CreditSetup` (its name as
 the config gives it, its entry, the entry's training settings, the run's policies by id, and `policy_views`, each
@@ -71,7 +84,11 @@ version when `assign` began.
 
 1. **Agents only when it reads them.** `needs_agents = True` has the rollout workers tag every row with the agent
    that produced it (worker protocol 3) and fills each member's `agents`; leave it False otherwise, and the rows and
-   requests stay as they are without an estimator.
+   requests stay as they are without an estimator. `reads_spans = True`, which needs `needs_agents`, says that it
+   trains each agent that names spans as its spans say: a training group whose agents name spans stops the run, with
+   a `CreditEstimatorError` that names the estimator, its entry, the agent and the task, under an estimator that does
+   not say it (`group` among them), and under the workflow's own credit, since either would train every call on the
+   agent's reward; an evaluation's group trains nothing, and runs. `keyed` reads spans.
 2. **Final advantages.** A group is credited once. A checkpoint that keeps a settled group keeps its advantages, and
    the resume trains it with them; no estimator sees it again.
 3. **State only in `settle`.** An estimator whose credit depends on the groups before (a running baseline) changes
@@ -129,8 +146,10 @@ def test_the_running_baseline_keeps_the_contract():
     check_credit_estimator("acme_credit.running:RunningBaseline", options={"rate": 0.05})
 ```
 
-Its checks are `protocol` (it is an estimator class, it builds, and its `check`, given a loaded config of one entry,
-returns or raises `ValueError`), `options` (and a typed schema refuses an unknown key), `action_tokens` (advantages set
+For an estimator that reads spans, each fixture agent names a scored span and an unscored one, and one of its calls
+lies in no span. Its checks are `protocol` (it is an estimator class, its `reads_spans`, if any, a bool that is True
+only beside `needs_agents`, it builds, and its `check`, given a loaded config of one entry, returns or raises
+`ValueError`), `options` (and a typed schema refuses an unknown key), `action_tokens` (advantages set
 on action tokens only: every row keeps its length, its type and its values where its mask is 0, and every advantage is
 finite) and `resumes` (an estimator that credited and settled three groups, and a new one that took up its state,
 credit the next group alike; and an estimator with `state()` keeps it as it was through `assign` alone). Passing the

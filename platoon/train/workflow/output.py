@@ -402,6 +402,7 @@ def _encode_policy_group_output(output: PolicyGroupOutput) -> dict[str, Any]:
                 "role": sample.role,
                 "trajectory_id": sample.trajectory_id,
                 "depth": sample.depth,
+                "calls": [list(call) for call in sample.calls],
             }
             for sample in output.samples
         ],
@@ -436,6 +437,7 @@ def _decode_policy_group_output(data: Mapping[str, Any]) -> PolicyGroupOutput:
                 role=sample["role"],
                 trajectory_id=sample["trajectory_id"],
                 depth=sample["depth"],
+                calls=tuple((str(call_id), int(start), int(end)) for call_id, start, end in sample.get("calls", ())),
             )
             for sample in data["samples"]
         ),

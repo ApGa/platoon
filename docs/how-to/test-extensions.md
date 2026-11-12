@@ -374,9 +374,11 @@ def test_my_estimator_keeps_the_contract():
 It builds the estimator (a class, a registered name, or `module:Class`) with `options` checked against its schema, and
 credits fixture groups of four members, each a root (role `policy`) that delegated to one subagent (role `helper`),
 with an interrupted root and a subagent whose rows were left out; an estimator that does not read agents gets them
-without agents or tags. It raises one `AssertionError` that names every check that failed: `protocol` (it is an
-estimator class: an async `assign`, a bool `needs_agents`, a synchronous `settle` if any, both or neither of `state()`
-and `load_state()`; it builds, and its `check`, given a loaded config of one entry, returns or raises `ValueError`),
+without agents or tags, and one that reads spans gets agents that name a scored span, an unscored one and a call in
+neither. It raises one `AssertionError` that names every check that failed: `protocol` (it is an estimator class: an
+async `assign`, a bool `needs_agents`, a bool `reads_spans` if any, True only beside `needs_agents`, a synchronous
+`settle` if any, both or neither of `state()` and `load_state()`; it builds, and its `check`, given a loaded config of
+one entry, returns or raises `ValueError`),
 `options` (and a typed schema refuses an unknown key), `action_tokens` (every row keeps its length, its type and its
 values off the action tokens, and every advantage is finite) and `resumes` (an estimator that credited and settled
 three groups, and a new one that took up its state as JSON, credit the next group alike, and `assign` alone leaves

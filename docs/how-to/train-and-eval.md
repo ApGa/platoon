@@ -782,7 +782,7 @@ environments:
 | Estimator | What it does | Options |
 |---|---|---|
 | `group` | The workflow's own credit, as an estimator: each member's datums centered on its baseline from the group's completed root rewards, value for value | none |
-| `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key: under `[task, role]` the roots on the roots' mean and the subagents on the subagents', where `group` centers every agent on its rollout's root baseline | `key`: one or more of `task`, `policy`, `role` and `depth` (default `[task, policy, role]`); `leave_one_out` (default false): the mean of the other agents of its key, an agent alone in its key getting 0 |
+| `keyed` | Each agent's rows centered on the mean reward of the group's agents that share its key: under `[task, role]` the roots on the roots' mean and the subagents on the subagents', where `group` centers every agent on its rollout's root baseline. An agent whose trajectory names spans trains each scored span on its own reward less a share of the agent's baseline (below) | `key`: one or more of `task`, `policy`, `role` and `depth` (default `[task, policy, role]`); `leave_one_out` (default false): the mean of the other agents of its key, an agent alone in its key getting 0 and its spans, when they hold all of its credit, training against each other to a sum of 0 |
 | `reverse_kl` | On-policy distillation: a frozen teacher scores every token the student sampled, and each action token's advantage is the negative reverse KL between them ([Distill a frozen teacher](#distill-a-frozen-teacher-experimental)) | `teacher` (required): a frozen policy of `policies:`; `kl_coef` (default 1); `reward_coef` (default 0): the weight of the row's reward centered on its member's baseline |
 | a name an entry's `package` registers with `@credit_estimator`, or `module:Class` | yours ([Write a credit estimator](../extending/credit-estimators.md); [`examples/credit-by-role`](../../examples/credit-by-role/README.md) is one of about 40 lines) | its own |
 
@@ -802,6 +802,17 @@ fails its group, with an error that says why. An estimator that raises, or whose
 scoring that fails (a teacher's service that raised or did not answer within its `sample_timeout_seconds`) fails only
 the group it was crediting, whose verdict is then `failed` and which trains nothing, counted under `credit/failures`.
 
+**Spans.** A program may credit parts of an agent's work apart, by naming spans of the agent's trajectory in its misc
+(`misc["spans"]`: some of its model calls each, with a reward of their own). `keyed` keeps its baseline over the
+agents' own rewards, and trains each call of an agent's scored span on that span's reward less the agent's baseline
+shared equally by its scored spans, and every other call of the agent on nothing: so a span that holds all of an
+agent's credit trains as the agent would, and an agent's advantage does not depend on how many spans its credit was
+cut into. An agent whose trajectory names no spans trains as before. A training group whose agents name spans stops
+the run under any credit that does not read them (an estimator without `reads_spans`, such as `group`, or an entry
+without `credit`), with an error that names the agent, since that credit would train every call on the agent's reward.
+An evaluation's group trains nothing, so it runs whatever its agents name (a train script that builds its
+evaluation's `GroupRolloutWorkflow` itself sets its `phase` to `eval`, as `platoon train` does).
+
 **What loads.** The estimator resolves when the config loads (core's names, then names the entries' packages register,
 then `module:Class`), its options are checked against its schema and its `check` runs: an unknown name, an option it
 does not take or a refused check stops `platoon train` and `platoon config validate` with exit code 78. So does an
@@ -816,8 +827,11 @@ keeps its advantages, and the resume trains it with them. An estimator with stat
 as each group is filed, and each full checkpoint saves it with the groups it keeps (`loop_state.credit`), so a resume
 takes up both; a resume whose entry names another estimator than the one that saved the state starts it afresh, with a
 warning. Credit metrics go with the group, recorded in the step that trains it: `keyed` logs
-`credit/keyed/baselines` (the keys a group's agents fell into) and `credit/agent_advantage/abs_avg`, beside the
-`credit/baseline/*` of the workflow's own credit.
+`credit/keyed/baselines` (the keys a group's agents fell into), `credit/agent_advantage/abs_avg` (over its scored
+agents' own advantages) and `credit/token_advantage/abs_avg` (over its action tokens, those that train nothing
+included: the size of what they train with, which the agents' no longer says once spans cut an agent's credit), and
+for a group whose scored agents name spans `credit/keyed/unscored_tokens` (their action tokens in no scored span, which
+train nothing but still count in the loss's normalization), beside the `credit/baseline/*` of the workflow's own credit.
 
 ## Distill a frozen teacher (experimental)
 

@@ -95,14 +95,21 @@ def member_rollout(index: int, result: TrajectoryCollectionResult, policy: Polic
     (:func:`agent_runs`)."""
 
     task_reward, valid = result.task_reward, result.task_reward_valid
+    # Each row's model calls, when the conversion recorded them for the rows as they are.
+    calls = result.datum_calls if len(result.datum_calls) == len(result.datums) else [()] * len(result.datums)
     if not tagged:
-        samples = [TrainingSample(datum, policy, index) for datum in result.datums]
+        samples = [
+            TrainingSample(datum, policy, index, calls=datum_calls)
+            for datum, datum_calls in zip(result.datums, calls, strict=True)
+        ]
         return MemberRollout(index, samples, [], task_reward, valid, result)
     agents = agent_runs(result, policy)
     samples = []
-    for datum, trajectory in zip(result.datums, result.datum_trajectories or (), strict=True):
+    for datum, trajectory, datum_calls in zip(result.datums, result.datum_trajectories or (), calls, strict=True):
         agent = agents[trajectory]
-        sample = TrainingSample(datum, agent.policy, index, agent.agent_id, agent.role, trajectory, agent.depth)
+        sample = TrainingSample(
+            datum, agent.policy, index, agent.agent_id, agent.role, trajectory, agent.depth, calls=datum_calls
+        )
         agent.samples.append(sample)
         samples.append(sample)
     return MemberRollout(index, samples, list(agents.values()), task_reward, valid, result)
@@ -111,8 +118,9 @@ def member_rollout(index: int, result: TrajectoryCollectionResult, policy: Polic
 def agent_runs(result: TrajectoryCollectionResult, policy: PolicyId) -> dict[str, AgentRun]:
     """Every agent of a member's tree, by trajectory, from the tags its rollout's conversion gave it (worker protocol
     3: ``agents``, and each row's trajectory, ``datum_trajectories``), each of the policy its tag names (``policy``
-    for a tag that names none: a run of one policy).  A ``ValueError`` for rows without tags, or with tags of no
-    agent of the tree: an estimator that reads agents never credits a row by guesswork."""
+    for a tag that names none: a run of one policy), with the spans its trajectory names.  A ``ValueError`` for rows
+    without tags, or with tags of no agent of the tree: an estimator that reads agents never credits a row by
+    guesswork."""
 
     trajectories = result.datum_trajectories
     if result.agents is None or trajectories is None or len(trajectories) != len(result.datums):
@@ -123,7 +131,14 @@ def agent_runs(result: TrajectoryCollectionResult, policy: PolicyId) -> dict[str
         )
     agents = {
         tag.trajectory_id: AgentRun(
-            tag.agent_id, tag.trajectory_id, tag.parent_id, tag.role, tag.policy or policy, tag.depth, tag.reward
+            tag.agent_id,
+            tag.trajectory_id,
+            tag.parent_id,
+            tag.role,
+            tag.policy or policy,
+            tag.depth,
+            tag.reward,
+            spans=tag.spans,
         )
         for tag in result.agents
     }

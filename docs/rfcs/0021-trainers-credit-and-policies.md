@@ -402,6 +402,7 @@ class TrainingSample:
     role: str | None = None
     trajectory_id: str | None = None
     depth: int | None = None
+    calls: tuple[tuple[str, int, int], ...] = ()   # each trained call's id and the target tokens [start, end) it fills
     def set_advantage(self, value: float) -> None: ...            # on the action tokens
     def set_advantages(self, values: "torch.Tensor") -> None: ...  # one value per target token
 
@@ -415,6 +416,13 @@ class AgentRun:
     depth: int
     reward: float | None                     # None: unscored, never trained as 0
     samples: list[TrainingSample]            # empty for a policy no learner trains (a frozen judge)
+    spans: tuple["Span", ...] | None = None  # None: its trajectory names no spans; (): it names spans, and none
+
+
+@dataclass(frozen=True)
+class Span:
+    calls: frozenset[str]                    # the calls it holds, by TrainingSample.calls' ids
+    reward: float | None                     # on the agent's scale; None: unscored, never trained as 0
 
 
 @dataclass
@@ -436,12 +444,13 @@ class CreditEstimator(Protocol):
     async def assign(self, group: CreditGroup) -> None: ...
     # Optional: settle(group) -> None, synchronous. A stateful estimator changes its state here and only here; the
     # run calls it in the same section, with no await, that files the group (section 11).
+    # Optional: reads_spans: ClassVar[bool], True only beside needs_agents: it reads AgentRun.spans.
 ```
 
 | Name | What it does | For |
 |---|---|---|
 | `group` | today's credit: the completed-root group mean, or leave-one-out, on each member's datums | S8 |
-| `keyed` | baselines keyed by any of `task`, `policy`, `role`, `depth`, with optional leave-one-out (the subset of RFC 0001's `BaselineSpec` that has a user) | S6, S7 |
+| `keyed` | baselines keyed by any of `task`, `policy`, `role`, `depth`, with optional leave-one-out (the subset of RFC 0001's `BaselineSpec` that has a user); each span of an agent that names spans on its own reward (below) | S6, S7 |
 | `reverse_kl` | per-token `-coef × (logp_student − logp_teacher)` from a frozen teacher's `score`, plus an optional reward term | S2 |
 | `gae` | advantages and value targets from a critic, after a spike shows Tinker can train one | S5 |
 
@@ -456,6 +465,29 @@ class CreditEstimator(Protocol):
   trainable scorer (S5's critic) answers at its version during the call. It may not assume that different policies'
   rows train in the same step, at the same versions, or at all, so it must hold no state that waits for another
   policy's update.
+- **Spans** (amended). A program may credit parts of an agent's work apart: it names spans of the agent's trajectory,
+  `misc["spans"]`, a list of `{"calls": [call id, ...], "reward": number or null}`, each some of the agent's model
+  calls, by their steps' `completion_id`, with a reward of its own on the scale of the agent's processed reward (no
+  reward processor touches it), null when none reached it. The converter puts them on the agent's tag, refusing a reward
+  that is not finite, a call that no step of the trajectory made and a call that two spans name, and an estimator sees
+  them as `AgentRun.spans`: None when the trajectory names no spans, `()` when it names spans and has none. An agent
+  whose trajectory names spans trains each call of its scored spans on its span's reward, and every other call on
+  nothing. `keyed` reads them (`reads_spans`): its pool is unchanged, each scored agent one entry with its own reward,
+  and each scored span trains on `v - b / k`, its reward less the agent's baseline shared equally by the agent's `k`
+  scored spans, on the target tokens its calls fill (`TrainingSample.calls`). One span holding all of an agent's credit
+  then trains as the agent would, and spans holding all of it sum to the agent's advantage however many there are (to 0
+  for an agent alone in its key under `leave_one_out`, its own baseline, whose spans train against each other); pooling
+  spans as entries of their own would train an agent that cut the same credit into more spans below one that cut it into
+  fewer. Tokens in no scored span train nothing but still count in the loss's normalization
+  (`credit/keyed/unscored_tokens` counts them), and a row of such an agent with action tokens and no recorded calls
+  stops the run. `keyed` also logs `credit/token_advantage/abs_avg`, the mean absolute advantage of the group's action
+  tokens, the size of what they train with, which `credit/agent_advantage/abs_avg` no longer says once spans cut an
+  agent's credit. Only an estimator that reads spans may credit a training group whose agents name them: under any
+  other, `group` and the workflow's own credit included, which would train every call on the agent's reward, the run
+  stops with an error that names the credit, the entry, the agent and the task; a rollout whose trajectory names spans
+  is tagged whatever its credit asked, so that the trainer sees them. An evaluation's group trains nothing, so it is
+  never refused: the evaluation's workflow knows its phase (`WorkflowSetup.phase`). Kept groups keep the advantages, and
+  no estimator needs state across groups.
 
 ### 7. Objectives and learners (`platoon/train/objectives/`, `policy/learner.py`)
 
@@ -1023,7 +1055,7 @@ files of single-policy runs; no change to persisted class paths.
 | several objectives in one `optim_step` | gradient accumulation across different built-in losses is UNVERIFIED | a conformance test (S3's `mix`) |
 | the critic (`gae`, a value objective) | Tinker has no value head | a spike (open question 16) |
 | cross-tokenizer distillation | needs other losses | a user |
-| RFC 0001's full agent graph, edges, reward events and per-call token spans | only the datum tags have a user | the first per-step credit user |
+| RFC 0001's full agent graph, edges and reward events | only the datum tags have a user, and per-step credit needs only spans so far (section 6) | a credit user that spans do not serve |
 | entry-point groups for credit estimators and objectives | `module:Class` and registered names work | an outside package that needs a short name |
 | one trainer process per policy | credit needs the whole episode, and commits need one writer | — |
 | multi-policy `platoon eval` and `platoon rollout` | evaluation during training covers it first | a user |
