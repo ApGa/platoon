@@ -58,7 +58,7 @@ for the tests.
 3. Install platoon with its development dependencies, exactly as CI does:
 
    ```bash
-   uv sync --dev --extra tinker --extra ors
+   uv sync --dev --extra tinker --extra ors --extra platoon-harness
    ```
 
    | Part | What it adds |
@@ -66,6 +66,7 @@ for the tests.
    | `--dev` | The `dev` dependency group: pytest, pytest-asyncio, pytest-xdist (which runs the tests in parallel), ruff, pre-commit, mypy, the MCP client the tool-plane tests use, and the OpenAI SDK and litellm, which the gateway tests drive it with |
    | `--extra tinker` | The Tinker SDK (pinned) and tinker-cookbook 0.3; the gateway, the trainer and `platoon.testing` need them |
    | `--extra ors` | The openreward SDK that ORS environments are written against, number search among them |
+   | `--extra platoon-harness` | platoon-harness's SDK, which the `platoon-harness` harness and program run teams of agents with, at the release `uv.lock` names |
    | `--extra hpc` (optional) | hpc-sandbox, for the `singularity` and `enroot` sandbox providers, at the release `uv.lock` names |
 
 4. Install the git hooks: the `pre-commit` hook runs the same lint checks as CI on every commit, and the
@@ -89,6 +90,7 @@ for the tests.
    openhands@1.54.0.post1  spec      platoon 0.5.0  platoon/harness/builtin/specs/openhands.toml
    platoon-bash@1          spec      platoon 0.5.0  platoon/harness/builtin/specs/platoon-bash.toml
    platoon-codeact@1       function  platoon 0.5.0  platoon.harness.builtin.codeact.harness:codeact
+   platoon-harness@1       function  platoon 0.5.0  platoon.harness.builtin.platoon_harness:team_harness
    platoon-noop@1          function  platoon 0.5.0  platoon.harness.builtin.oracle:noop
    platoon-oracle@1        function  platoon 0.5.0  platoon.harness.builtin.oracle:oracle
    platoon-react@1         function  platoon 0.5.0  platoon.harness.builtin.react:react
@@ -98,7 +100,8 @@ for the tests.
 
 ## Run the tests
 
-CI runs core's suite in two passes, from the repository root, after `uv sync --dev --extra tinker --extra ors`. The
+CI runs core's suite in two passes, from the repository root, after
+`uv sync --dev --extra tinker --extra ors --extra platoon-harness`. The
 first spreads the test files over [pytest-xdist](https://pytest-xdist.readthedocs.io/) workers, one per CPU; the
 second runs the tests marked `serial`, which cannot share the machine, in one process:
 
@@ -109,7 +112,8 @@ uv run pytest tests/ -v -m serial
 
 It runs them on each Python platoon supports, 3.12, 3.13 and 3.14: the `test` job installs its Python with
 `uv python install ${{ matrix.python }}` and sets `UV_PYTHON` to it, which `uv sync` and `uv run` follow. To run the
-suite on another of them, set `UV_PYTHON` for both, as in `UV_PYTHON=3.14 uv sync --dev --extra tinker --extra ors`.
+suite on another of them, set `UV_PYTHON` for both, as in
+`UV_PYTHON=3.14 uv sync --dev --extra tinker --extra ors --extra platoon-harness`.
 
 Core's tests need no extension installed, and assume none is: `uv sync` at the root installs platoon alone. Each
 pass ends with a summary line that counts passed and skipped tests. Skips are expected (see below); failures and
@@ -128,11 +132,12 @@ platoon` and `uv run --package platoon-textcraft pytest extensions/textcraft/tes
 recipes (`recipes/<name>`) check that their configs resolve and validate, with every extension installed:
 
 ```bash
-uv sync --all-packages --dev --extra tinker --extra ors --extra platoon
+uv sync --all-packages --dev --extra tinker --extra ors --extra platoon-harness --extra platoon
 uv run --no-sync pytest recipes/ -v
 ```
 
-Run `uv sync --dev --extra tinker --extra ors` again before core's tests: it uninstalls the extensions.
+Run `uv sync --dev --extra tinker --extra ors --extra platoon-harness` again before core's tests: it uninstalls the
+extensions.
 
 | Option | What it does |
 |---|---|
@@ -181,6 +186,8 @@ Most of the suite is self-contained. A few groups of tests need files you may no
 | `tests/renderers`, `tests/train/tinker/test_gateway_tools_routing.py` | The tokenizers and chat templates of the Qwen3.6 and Qwen3.8 snapshots named in `tests/renderers/renderer_cases.py` | The Hugging Face cache, or `PLATOON_TEST_HF_HUB` (another hub cache directory that holds them) and `QWEN36_PRESERVE_THINKING_SNAPSHOT` |
 | Parts of `tests/sandbox/test_sandbox_hpc.py`, and the test of `tests/envs/test_harbor_providers.py` that checks the root filesystem layouts a run refuses against the provider | hpc-sandbox | `uv sync --dev --extra tinker --extra ors --extra hpc` |
 | One test each in `tests/gateway/test_gateway_mcp.py` and `tests/envs/test_ors_concurrency.py` | The OpenHands SDK and fastmcp clients | Run them in an environment that has both, or set `PLATOON_CLIENT_VENV` to that environment's directory |
+| `tests/harness/builtin/teams/` | platoon-harness's SDK | `uv sync --dev --extra tinker --extra ors --extra platoon-harness` |
+| `tests/harness/builtin/teams/test_teams_pi.py`, `tests/harness/builtin/teams/test_teams_openhands.py`, and the isolated agent's test in `tests/harness/builtin/teams/test_teams_identity.py` | pi 1.5.0 and its Node; `openhands-sdk` 1.59.0, which platoon-harness's `openhands` extra holds and which never enters platoon's lock; bubblewrap that can confine | pi on `PATH`; the environment that [Train a team of agents](docs/how-to/teams.md#install) builds outside the lock, with `--group dev` added to its `uv pip install`, and the OpenHands test run with its Python (`.venv-teams/bin/python -m pytest tests/harness/builtin/teams/test_teams_openhands.py`); `bwrap` on `PATH` and unprivileged user namespaces |
 | `tests/integration/test_harbor_stacks_docker.py` | Docker with its compose plugin, and the network: it pulls and builds images and runs stacks of containers | Set `PLATOON_TEST_DOCKER_STACKS=1`; CI's `docker-stacks` job sets it to `require`, which fails the module where Docker cannot run stacks |
 | `tests/envs/test_harbor_root_verifier_singularity.py` | Singularity or Apptainer, hpc-sandbox, and a node where `--fakeroot` works (your user has subordinate ids): it starts real sandboxes | Set `PLATOON_TEST_SINGULARITY_IMAGE` to an image with `sh`, `find`, `chown` and `setpriv` or `su` (a local `.sif`, or a `docker://` reference the node can pull), and run it on such a node, never a login node; `HPC_SANDBOX_SCRATCH` puts the sandboxes on node-local disk |
 
@@ -369,7 +376,7 @@ repository runs none of them. `test` runs on Python 3.12, 3.13 and 3.14, and the
 |---|---|---|
 | `pr-title` | On pull requests only | The title, or the subject of a single commit, is not a Conventional Commit in the form above |
 | `lint` | `uvx pre-commit run --all-files --show-diff-on-failure` | A hook fails or changes a file |
-| `test` | `uv sync --dev --extra tinker --extra ors`, then the test commands above, once per Python | A test fails on any of them |
+| `test` | `uv sync --dev --extra tinker --extra ors --extra platoon-harness`, then the test commands above, once per Python | A test fails on any of them |
 
 **The pull request itself.** The [pull request template](.github/pull_request_template.md) asks for each of
 these:
@@ -761,8 +768,9 @@ extensions/<name>/
 - **Lint.** The extension's `pyproject.toml` has a `[tool.ruff]` of its own, with `src = ["src"]`, so its package
   sorts as first-party.
 
-Configs that reproduce a published experiment are a recipe, not an extension: `recipes/<name>/`, with a README and a
-CPU check that every config resolves ([`recipes/README.md`](recipes/README.md)).
+Configs that carry a published experiment over to platoon, or run one of platoon's features on a published
+experiment's setting, are a recipe, not an extension: `recipes/<name>/`, with a README and a CPU check that every
+config resolves ([`recipes/README.md`](recipes/README.md)).
 
 ## When a change needs an RFC
 
@@ -901,10 +909,10 @@ the changelog.
 
 1. On a branch, set `version` in `pyproject.toml`, run `uv lock` in the repository root (one lock covers core and
    the extensions, and records platoon's version), and date the version's section in [CHANGELOG.md](CHANGELOG.md):
-   its heading, such as `## 0.2.1 (unreleased)`, becomes `## 0.2.1 (2026-10-19)`. Where the docs mark what is new
-   with "the next release" (`grep -rn "the next release" docs`), name this version instead. A minor release, such
-   as 0.3.0, also moves every range that names the previous one: the extensions' and the examples' requirement on
-   platoon, which would otherwise refuse the new release, and the docs and tests that show it
+   its heading, such as `## 0.2.1 (unreleased)`, becomes `## 0.2.1 (2026-10-19)`. Where the docs and the recipes mark
+   what is new with "the next release" (`grep -rn "the next release" docs recipes`), name this version instead. A
+   minor release, such as 0.3.0, also moves every range that names the previous one: the extensions' and the
+   examples' requirement on platoon, which would otherwise refuse the new release, and the docs and tests that show it
    (`grep -rn "0\.2, < 0\.3\|0\.2,<0\.3" --exclude=uv.lock .`). Open a pull request, such as
    `chore: Release 0.2.1`, and merge it once CI and the release workflow's checks pass.
 2. Tag the merge commit and push the tag:

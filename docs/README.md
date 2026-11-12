@@ -46,6 +46,8 @@ example under [`examples/`](../examples/), and every example has a CPU test in
 - [How Harbor tasks are graded](how-to/harbor-grading.md): the steps of a grade, what keeps an agent from forging its
   reward, and which reported reward trains.
 - [Run on a cluster](how-to/clusters.md): PBS and Slurm job patterns.
+- [Train a team of agents](how-to/teams.md): run and train a team of agents through platoon-harness, with the
+  `platoon-harness` harness and program.
 - [Test an environment, a harness or a program on CPU](how-to/test-extensions.md): `platoon.testing`'s scripted
   policy, `run_episode`, the toy tokenizer and the pytest plugin.
 - [Troubleshooting](how-to/troubleshooting.md): common errors and what to do about them.

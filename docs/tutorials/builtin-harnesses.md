@@ -2,8 +2,9 @@
 
 **Goal.** Pick the built-in harness that fits an environment, and configure it. Platoon ships three harnesses of
 its own, `platoon-react`, `platoon-codeact` and `platoon-bash`, specs for two third-party agents, `mini-swe-agent`
-and `openhands` (the OpenHands SDK agent, configured by options), and two harnesses that check a dataset rather than
-a policy, `platoon-oracle` and `platoon-noop`. Each is a name you put in an environment's `harness`.
+and `openhands` (the OpenHands SDK agent, configured by options), two harnesses that check a dataset rather than
+a policy, `platoon-oracle` and `platoon-noop`, and `platoon-harness`, which runs a team of agents through
+platoon-harness. Each is a name you put in an environment's `harness`.
 
 ## Prerequisites
 
@@ -21,6 +22,7 @@ a policy, `platoon-oracle` and `platoon-noop`. Each is a name you put in an envi
 | `platoon-bash` | TOML spec | native tool calls | `bash`, plus the environment's tools over MCP | a process in the task sandbox, or locally | the task is files in a sandbox (Harbor tasks); smoke tests; a template for your own spec |
 | `mini-swe-agent@2.4.6` | TOML spec, third party | `bash` commands | `bash` only | the task sandbox | software-engineering tasks in Harbor sandboxes |
 | `openhands@1.54.0.post1` | TOML spec, third party: the OpenHands SDK agent with platoon's thin runner | native tool calls | terminal, file editor, task tracker | the task sandbox, from a toolchain built once per site | training or evaluating an OpenHands agent on Harbor tasks; its options choose replay, timeout, retries and a condenser ([below](#openhands)) |
+| `platoon-harness` | function, runs model code, with its own episode program | each agent of the team as its own harness does | platoon-harness's team tools and the environment's tools: each agent's harness runs sealed, without its own | a platoon-harness session per rollout, its agents' harnesses on the rollout host | a team of agents, such as pi and OpenHands agents that message each other and spawn their own, should train together ([below](#platoon-harness)) |
 | `platoon-oracle`, `platoon-noop` | function, no model calls | runs the task's reference solution; does nothing | none | the rollout process | checking a dataset: a sound task scores 1 with the oracle and 0 with the no-op |
 
 List them:
@@ -35,6 +37,7 @@ mini-swe-agent@2.4.6    spec      platoon 0.5.0  platoon/harness/builtin/specs/m
 openhands@1.54.0.post1  spec      platoon 0.5.0  platoon/harness/builtin/specs/openhands.toml
 platoon-bash@1          spec      platoon 0.5.0  platoon/harness/builtin/specs/platoon-bash.toml
 platoon-codeact@1       function  platoon 0.5.0  platoon.harness.builtin.codeact.harness:codeact
+platoon-harness@1       function  platoon 0.5.0  platoon.harness.builtin.platoon_harness:team_harness
 platoon-noop@1          function  platoon 0.5.0  platoon.harness.builtin.oracle:noop
 platoon-oracle@1        function  platoon 0.5.0  platoon.harness.builtin.oracle:oracle
 platoon-react@1         function  platoon 0.5.0  platoon.harness.builtin.react:react
@@ -304,6 +307,13 @@ budget. Above it, a turn near the trigger can be cut short: cut in its reasoning
 answer and the episode goes on; cut in its visible text, that text becomes the agent's final message and the episode
 ends.
 
+## `platoon-harness`
+
+A team of agents that [platoon-harness](https://github.com/ApGa/platoon-harness) runs, rolled out as one episode: an
+entry names it with `program: platoon-harness` and a team file in `harness_options.team`, and each agent of the team
+calls the policy on a platoon agent of its own. It needs the `platoon-harness` extra.
+[Train a team of agents](../how-to/teams.md) says how to install, check and configure it.
+
 ## Which one?
 
 1. The task lives in a sandbox (files, a repository, tests): `platoon-bash`, `mini-swe-agent` for software
@@ -311,7 +321,8 @@ ends.
 2. The environment's tools are the whole interface and the model calls tools well: `platoon-react`.
 3. The model should compute between tool calls, batch many calls, or delegate to subagents, and running its code
    on the rollout host is acceptable: `platoon-codeact`.
-4. None fits: [write a function harness](function-harness.md). A different CodeAct decision step can reuse the
+4. Several agents, each on a harness such as pi or OpenHands, should work and train as one team: `platoon-harness`.
+5. None fits: [write a function harness](function-harness.md). A different CodeAct decision step can reuse the
    pieces in `platoon.harness.builtin.codeact`: its prompt builder, cell functions and cell executor.
 
 Several harnesses can share one environment: `harness: {platoon-react: 1, platoon-codeact: 1}` draws one per task,

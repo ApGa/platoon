@@ -69,7 +69,7 @@ Any harness can show its tool use by annotating two fields onto a step (`ctx.ann
 - `tool_results`: the results of the step's tool calls, in the order the harness recorded them, each with its `name`, `tool_call_id`, `outcome` (`completed`, or the harness's word for another end, such as `failed`), `output` and `ref` (where the result is recorded, if anywhere);
 - `inputs`: what the harness said the agent took in before the call, such as a message, each with its `ref`, `from` and `text`.
 
-Any of these may be null, which the viewer shows as unknown. In `auto` mode such a step is labelled by its tools, with their counts, each that ended other than `completed`, and how many inputs it holds, for example `tools: unlock x2, bash; bash failed; inputs: 2`. Its details show each result with the arguments the step's message gave its tool call (matched by `tool_call_id`), and each input. A step with OpenHands events renders as an OpenHands step.
+Any of these may be null, which the viewer shows as unknown. In `auto` mode such a step is labelled by its tools, with their counts, each that ended other than `completed`, and how many inputs it holds, for example `tools: unlock x2, bash; bash failed; inputs: 2`. Its details show each result with the arguments the step's message gave its tool call (matched by `tool_call_id`), and each input. A step with OpenHands events renders as an OpenHands step. The `platoon-harness` harness fills both fields from its sessions' records ([Train a team of agents](../../docs/how-to/teams.md#read-a-rollout)).
 
 ## TUI Keys
 

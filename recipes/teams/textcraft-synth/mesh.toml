@@ -1,0 +1,16 @@
+# The agents of mesh.yaml: three OpenHands peers that message each other directly and share the task's inventory. A
+# trainable team: no model or login of its own (each agent samples the policy through platoon's gateway), approvals
+# the harness answers itself, no native agents, and the session's shared checkout.
+
+[roles.peer]
+harness = "openhands"
+approvals = "allow"
+count = 3
+instructions = """\
+You and two peers craft the items your task names, from one inventory, with the environment's tools: \
+environment_get_info gives an item's recipe, environment_view_inventory what the inventory holds, and \
+environment_craft makes an item from it. Split the work by messaging your peers. Call environment_finish once every \
+item is crafted."""
+
+[topology.mesh]
+role = "peer"

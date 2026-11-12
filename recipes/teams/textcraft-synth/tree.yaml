@@ -1,0 +1,31 @@
+# RAO's recursive arm on TextCraft-Synth (recipes/rao/textcraft-synth/recursive.yaml), run as a team through the
+# platoon-harness harness: every agent of the tree is an OpenHands agent of the team in tree.toml, which delegates
+# crafting subgoals to agents of its own role, each a platoon subagent. The tree, the step budget, the subagents'
+# rewards and the credit are the recursive arm's: 25 steps for every agent, at most 6 levels deep, each subagent graded
+# on its own targets, leave-one-out baselines over the group's roots and depth levels weighted inversely to their
+# trajectory counts.
+#
+#   platoon train recipes/teams/textcraft-synth/tree.yaml [key=value ...]
+#
+# It differs from the recursive arm only in the harness, the program and their options, and the run's names.
+
+extends: [../../rao/textcraft-synth/recursive.yaml, common.yaml]
+
+environments:
+  - env: textcraft-synth@1          # the environment, the val split and platoon-delegation, version 1
+    harness: platoon-harness
+    program: platoon-harness
+    harness_options:
+      team: tree.toml
+    agents:
+      max_depth: 6
+      budget: depth_aware
+      child_max_steps: 25
+      child_grading: env              # each subagent graded on its own targets
+    dataset_kwargs: {split_name: train-medium}
+    eval_dataset_kwargs: {limit: 100}
+
+stats:
+  trial_name: qwen3-4b-instruct-2507-team-tree-lora32
+  wandb:
+    tags: [teams, textcraft-synth, tinker, tree, openhands]

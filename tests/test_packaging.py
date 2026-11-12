@@ -180,6 +180,26 @@ def test_the_hpc_extra_takes_the_minor_release_a_checkout_locks():
     assert not any(Version(older) in requirement.specifier for older in ("0.2.0", "0.4.0", "0.5.0"))
 
 
+def test_the_platoon_harness_extra_takes_the_minor_release_a_checkout_locks():
+    """The platoon-harness extra takes platoon-harness alone, within the minor release the lock names, as a minor
+    release of it may change the SDK's API; its install hint names the extra as PyPI installs it."""
+
+    from platoon.harness.builtin.platoon_harness import INSTALL
+
+    [line] = PROJECT["optional-dependencies"]["platoon-harness"]
+    requirement = Requirement(line)
+    found = [package for package in LOCK["package"] if package["name"] == "platoon-harness"]
+    assert len(found) == 1, "uv.lock does not name platoon-harness once: run uv lock"
+    [locked] = found
+    version = Version(locked["version"])
+
+    assert requirement.name == "platoon-harness" and not (requirement.extras or requirement.url or requirement.marker)
+    assert locked["source"] == PYPI
+    minor = f"{version.major}.{version.minor}"
+    assert requirement.specifier == SpecifierSet(f">={minor},<{version.major}.{version.minor + 1}")
+    assert "pip install 'platoon[platoon-harness]'" in INSTALL and "--extra platoon-harness" in INSTALL
+
+
 def test_the_lock_covers_every_extension():
     """Every first-party extension is a member of the workspace, which the one lock covers: an extension's requirements
     change with ``uv lock`` at the root, and none keeps a lock of its own."""

@@ -45,7 +45,7 @@ jobs:
         run: uv python install ${{ matrix.python }}
 
       - name: Install dependencies
-        run: uv sync --dev --extra tinker --extra ors
+        run: uv sync --dev --extra tinker --extra ors --extra platoon-harness
 
       - name: Run tests
         run: uv run pytest tests/ -v -n auto --dist loadfile -m "not serial"
@@ -90,7 +90,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install platoon and the first-party extensions
-        run: uv sync --all-packages --dev --extra tinker --extra ors --extra platoon
+        run: uv sync --all-packages --dev --extra tinker --extra ors --extra platoon-harness --extra platoon
 
       - name: Check the recipes
         run: uv run --no-sync pytest recipes/ -v

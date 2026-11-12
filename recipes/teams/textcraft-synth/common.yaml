@@ -1,0 +1,10 @@
+# What the teams recipes share: the RAO recipe's TextCraft-Synth setting (recipes/rao/textcraft-synth/common.yaml), the
+# same model, tasks, batches, sampling, loss and optimizer, with runs and logs of their own. tree.yaml and mesh.yaml
+# extend this file, and each adds its environment entry, its team, its step budget and its credit.
+
+extends: ../../rao/textcraft-synth/common.yaml
+
+stats:
+  experiment_name: teams-textcraft-synth
+  wandb:
+    project: teams-textcraft-synth

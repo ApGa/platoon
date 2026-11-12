@@ -28,7 +28,7 @@ compute on the next.
 | `platoon viz tail\|replay\|show-dump ...` | Open the trajectory viewer on event files or saved trajectories |
 | `platoon config show\|validate CONFIG` | Print the merged config or check it |
 | `platoon harness list\|show NAME` | The harnesses (`platoon-codeact`, `platoon-react`, `platoon-bash`, `mini-swe-agent`, and the installed packages') |
-| `platoon program list\|show NAME` | The episode programs (`single`, `gym`, and the installed packages') |
+| `platoon program list\|show NAME` | The episode programs (`single`, `gym`, `platoon-harness`, and the installed packages') |
 | `platoon env list [CONFIG]\|show NAME` | The environment service schemes, the named environments, and the environments a config selects |
 | `platoon extensions list\|show NAME\|check` | The installed packages' components with their versions, one of them in detail, and what is wrong with them |
 | `platoon sandbox reap RUN_DIR` | Reap the sandboxes a run left running when its process was killed ([Long runs](#long-runs)) |

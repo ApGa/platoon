@@ -106,7 +106,7 @@ platoon train my_run.yaml
 [evaluating a hosted model](how-to/evaluate-hosted-models.md),
 [models and tool calling](how-to/models-and-tool-calling.md),
 [sandboxes and Harbor tasks](how-to/sandboxes-and-harbor.md), [how Harbor tasks are graded](how-to/harbor-grading.md),
-[clusters](how-to/clusters.md),
+[clusters](how-to/clusters.md), [training a team of agents](how-to/teams.md),
 [testing an environment, a harness or a program on CPU](how-to/test-extensions.md),
 [troubleshooting](how-to/troubleshooting.md).
 

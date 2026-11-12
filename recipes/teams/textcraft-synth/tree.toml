@@ -1,0 +1,20 @@
+# The agents of tree.yaml: one OpenHands crafter, which may hand a part of its crafting to crafters of its own, each a
+# platoon subagent with its own targets, and finishes once its task's items are crafted, which closes the session. A
+# trainable team: no model or login of its own (each agent samples the policy through platoon's gateway), approvals the
+# harness answers itself, no native agents, and the session's shared checkout.
+
+[roles.crafter]
+harness = "openhands"
+approvals = "allow"
+may_spawn = ["crafter"]
+stays = false
+instructions = """\
+Craft the items your task names with the environment's tools: environment_get_info gives an item's recipe, \
+environment_view_inventory what you hold, and environment_craft makes an item from what you hold. You may hand a part \
+of the crafting to a crafter of your own: spawn it with a goal of the form `Craft the following items: 2x stick, 1x \
+oak_planks`, and it works on the same inventory and reports back when it is done. Call environment_finish once every \
+item of your task is crafted."""
+
+[topology.tree]
+role = "crafter"
+max_depth = 6

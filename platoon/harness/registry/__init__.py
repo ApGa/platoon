@@ -48,6 +48,7 @@ BUILTIN_FUNCTION_MODULES = (
     "platoon.harness.builtin.codeact",
     "platoon.harness.builtin.react",
     "platoon.harness.builtin.oracle",
+    "platoon.harness.builtin.platoon_harness",
 )
 
 Harness = HarnessSpec | FunctionHarness
@@ -322,10 +323,10 @@ def get_harness(ref: str) -> Harness:
 
 def harness_path_options(ref: str) -> tuple[str, ...]:
     """The options of harness ``ref`` that hold paths of files it reads (``@pt.harness(path_options=...)``), read when
-    a config loads: none for a spec, whose options are its ``[options]``, for a core harness, which takes no file, and
-    for a reference that does not resolve, which the run reports when it resolves the config's components."""
+    a config loads: none for a spec, whose options are its ``[options]``, and for a reference that does not resolve,
+    which the run reports when it resolves the config's components."""
 
-    if ref.endswith(".toml") or extensions.owner(ref) == extensions.RESERVED_OWNER:
+    if ref.endswith(".toml"):
         return ()
     try:
         harness = get_harness(ref)
