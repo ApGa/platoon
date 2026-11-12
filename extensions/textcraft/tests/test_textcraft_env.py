@@ -1,5 +1,6 @@
-"""TextCraft's environments without platoon: ``platoon_textcraft.env`` imports neither platoon nor IPython, and serves
-the task files the package ships (``data/``, pinned by ``data/SHA256SUMS``), with their splits."""
+"""TextCraft's environments without platoon: ``platoon_textcraft.env`` imports neither platoon nor IPython, serves the
+task files the package ships (``data/``, pinned by ``data/SHA256SUMS``), with their splits, and names the JSON type of
+each tool parameter."""
 
 from __future__ import annotations
 
@@ -38,3 +39,24 @@ def test_the_environments_serve_their_splits():
     assert (len(original.list_tasks("train")), len(original.list_tasks("val"))) == (1000, 100)
     # Every task keeps its gold trajectory: the Harbor export builds each task's reference solution from it.
     assert all(spec["misc"]["gold_trajectory"] for spec in (*synth.list_tasks("train"), *synth.list_tasks("val")))
+
+
+def test_every_tool_parameter_names_its_json_type():
+    """The game checks each argument itself, so the parameters take any value, but each one's schema names the JSON
+    type it wants: a parser of tool calls that write every value as text, as Qwen3.5's XML calls do, reads a value as
+    that type, and leaves one whose schema names no type as text, such as ``'["stick"]'`` for ``items``."""
+
+    models = {"craft": env.CraftParams, "get_info": env.GetInfoParams, "finish": env.FinishParams}
+
+    types = {
+        (tool, name): field.get("type")
+        for tool, model in models.items()
+        for name, field in model.model_json_schema()["properties"].items()
+    }
+
+    assert types == {
+        ("craft", "ingredients"): "object",
+        ("craft", "target"): "array",
+        ("get_info", "items"): "array",
+        ("finish", "message"): "string",
+    }
