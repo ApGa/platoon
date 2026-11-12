@@ -50,6 +50,12 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   included, which would train every call on the agent's reward, while an evaluation's group, which trains nothing, runs;
   `check_credit_estimator` gives an estimator that reads them agents that name spans (RFC 0021) ([Write a credit
   estimator](docs/extending/credit-estimators.md)).
+- **The trajectory viewer renders any harness's tool use.** A step whose misc holds `tool_results` (each with its
+  `name`, `tool_call_id`, `outcome`, `output` and `ref`) or `inputs` (what its harness said the agent took in before
+  the call, each with its `ref`, `from` and `text`) is labelled, in the default `auto` mode, by its tools with their
+  counts, each that ended other than `completed` and how many inputs it holds, and its details show each result
+  beside the arguments of its tool call, and each input. A step with OpenHands events renders as before
+  ([Trajectory visualization](platoon/visualization/README.md#tool-use-rendering)).
 
 ### Fixes
 

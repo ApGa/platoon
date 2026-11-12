@@ -278,10 +278,15 @@ def _is_verifier_misc(misc: Any) -> bool:
     )
 
 
+# A step's tool use, as any harness may annotate it: ``tool_results``, in the order the harness recorded them, each
+# with its ``name``, ``tool_call_id``, ``outcome`` (``completed`` or the harness's word for another end), ``output``
+# and ``ref``, and ``inputs``, what the harness said the agent took in before the call, each with its ``ref``, ``from``
+# and ``text``.  Any of these may be null: unknown.
+_TOOL_USE_KEYS = ("tool_results", "inputs")
 # Step fields the viewer renders specially.  Harnesses on the gateway annotate them onto a step's misc
-# (``ctx.annotate_step``: CodeAct's thought, code, output and error; OpenHands' action and observation events),
-# where legacy steps carried them at the top level.
-_STEP_DISPLAY_KEYS = ("thought", "code", "output", "error", "action_events", "observation_events")
+# (``ctx.annotate_step``: CodeAct's thought, code, output and error; OpenHands' action and observation events; any
+# harness's tool use), where legacy steps carried them at the top level.
+_STEP_DISPLAY_KEYS = ("thought", "code", "output", "error", "action_events", "observation_events", *_TOOL_USE_KEYS)
 
 
 def _display_step(step: Any) -> Any:
@@ -304,6 +309,19 @@ def _should_render_openhands(mode: str, data: Any) -> bool:
     if mode == "openhands":
         return _is_openhands_step_payload(data)
     return mode == "auto" and _is_openhands_step_payload(data)
+
+
+def _is_tool_use_step_payload(data: Any) -> bool:
+    """A step that carries tool use and no OpenHands events, which render as OpenHands steps do."""
+    return (
+        isinstance(data, dict)
+        and any(isinstance(data.get(key), list) for key in _TOOL_USE_KEYS)
+        and not _is_openhands_step_payload(data)
+    )
+
+
+def _should_render_tool_use(mode: str, data: Any) -> bool:
+    return mode == "auto" and _is_tool_use_step_payload(data)
 
 
 def _as_dict_list(value: Any, nested_key: str | None = None) -> List[Dict[str, Any]]:
@@ -602,15 +620,46 @@ def _tool_batch_summary(events: List[Dict[str, Any]]) -> str | None:
     if len(names) == 1:
         return _openhands_event_summary(events[0])
 
+    return "tools: " + _counted(names)
+
+
+def _counted(names: List[str]) -> str:
+    """``names`` in the order each first appears, each repeated one with its count: ``send_email x3, search``."""
     counts: Dict[str, int] = {}
-    order: List[str] = []
     for name in names:
-        if name not in counts:
-            order.append(name)
-            counts[name] = 0
-        counts[name] += 1
-    parts = [f"{name} x{counts[name]}" if counts[name] > 1 else name for name in order]
-    return "tools: " + _shorten_text(", ".join(parts), 180)
+        counts[name] = counts.get(name, 0) + 1
+    return _shorten_text(", ".join(f"{name} x{count}" if count > 1 else name for name, count in counts.items()), 180)
+
+
+def _tool_results(step: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _as_dict_list(step.get("tool_results"))
+
+
+def _inputs(step: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _as_dict_list(step.get("inputs"))
+
+
+def _tool_result_name(result: Dict[str, Any]) -> str:
+    return _nonempty_text(result.get("name")) or "tool"
+
+
+def _tool_use_summary(step: Dict[str, Any]) -> str | None:
+    """A tool-use step's label: the tools whose results it holds, with their counts, each that ended other than
+    ``completed``, and how many inputs the agent took in before it."""
+    results, inputs = _tool_results(step), _inputs(step)
+    parts: List[str] = []
+    if results:
+        parts.append("tools: " + _counted([_tool_result_name(result) for result in results]))
+    ended = [
+        f"{_tool_result_name(result)} {result['outcome']}"
+        for result in results
+        if _nonempty_text(result.get("outcome")) and result["outcome"] != "completed"
+    ]
+    if ended:
+        parts.append(_counted(ended))
+    if inputs:
+        parts.append(f"inputs: {len(inputs)}")
+    return "; ".join(parts) if parts else None
 
 
 def _reward_misc(step: Dict[str, Any]) -> Dict[str, Any]:
@@ -1186,6 +1235,10 @@ class SearchPanel(Static):
                 if isinstance(payload, dict):
                     if _is_openhands_step_payload(payload):
                         context = _openhands_search_text(payload)
+                        if context:
+                            return _shorten_text(context, 120)
+                    if _is_tool_use_step_payload(payload):
+                        context = _tool_use_summary(payload)
                         if context:
                             return _shorten_text(context, 120)
                     # Extract relevant context based on type
@@ -2024,6 +2077,10 @@ class SplitDivider(Static):
                     openhands_summary = _openhands_step_summary(step)
                     if openhands_summary:
                         summary_parts.append(openhands_summary)
+                elif _should_render_tool_use(getattr(self, "mode", "auto"), step):
+                    tool_use_summary = _tool_use_summary(step)
+                    if tool_use_summary:
+                        summary_parts.append(tool_use_summary)
                 if not summary_parts:
                     if "code" in step and isinstance(step["code"], str):
                         code_lines = step["code"].splitlines()
@@ -3269,10 +3326,61 @@ class DetailsPanel(Static):
             cards.append(_panel(lines or Text("<empty>"), title=f"{index}. {_openhands_event_summary(event)}"))
         return _panel(Group(*cards), title=title) if cards else _panel(Text("<empty>"), title=title)
 
+    def _render_tool_use_step(self, data: Dict[str, Any]) -> Any:
+        """A tool-use step: its label, each tool result with the arguments its step's message gave the call, each
+        input, and its other fields."""
+        panels: List[Any] = [_panel(Text(_tool_use_summary(data) or "no tool results or inputs"), title="summary")]
+        message = data.get("misc", {}).get("message") if isinstance(data.get("misc"), dict) else None
+        asked = {
+            call.get("id"): (call.get("function") or {}).get("arguments")
+            for call in _as_dict_list(message.get("tool_calls") if isinstance(message, dict) else None)
+        }
+        cards: List[Any] = []
+        for index, result in enumerate(_tool_results(data), start=1):
+            sections: List[Any] = []
+            arguments = asked.get(result.get("tool_call_id")) if result.get("tool_call_id") is not None else None
+            if arguments not in (None, "", {}):
+                sections.extend(self._render_openhands_argument_panels(result.get("name"), arguments))
+            output = result.get("output")
+            sections.append(
+                _panel(
+                    Text(output, no_wrap=False, overflow="fold")
+                    if isinstance(output, str)
+                    else Text("<unknown>", style="dim"),
+                    title="output",
+                )
+            )
+            title = " · ".join(
+                [f"{index}. {_tool_result_name(result)}"]
+                + [str(result[key]) for key in ("outcome", "ref") if _nonempty_text(result.get(key))]
+            )
+            cards.append(_panel(Group(*sections), title=title))
+        if cards:
+            panels.append(_panel(Group(*cards), title="tool results"))
+        cards = []
+        for index, given in enumerate(_inputs(data), start=1):
+            text = given.get("text")
+            title = " · ".join(
+                [f"{index}. {given.get('ref') or 'input'}"]
+                + ([f"from {given['from']}"] if _nonempty_text(given.get("from")) else [])
+            )
+            body = (
+                Text(text, no_wrap=False, overflow="fold") if isinstance(text, str) else Text("<unknown>", style="dim")
+            )
+            cards.append(_panel(body, title=title))
+        if cards:
+            panels.append(_panel(Group(*cards), title="inputs"))
+        for key, value in data.items():
+            if key not in _TOOL_USE_KEYS:
+                panels.append(self._render_key_value(key, value))
+        return Group(*panels)
+
     def _render_data(self, data: Any) -> Any:
         if isinstance(data, dict):
             if self._is_openhands_step(data):
                 return self._render_openhands_step(data)
+            if _should_render_tool_use(self.mode, data):
+                return self._render_tool_use_step(data)
             # Render as a set of panels for each field to keep things readable
             panels: List[Any] = []
             for key, value in data.items():
