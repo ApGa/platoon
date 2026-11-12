@@ -238,6 +238,12 @@ returns `reward/success` would undo the shaping.
   raises gives one with failure kind `finalizer:<Type>`, and the rollout's trajectories are rebuilt untrainable.
 - **Deadlines.** When the root hits the rollout's `timeout`, `run()` returns `AgentResult("timeout")`: subagents
   that already finished keep their grades, and those still running are cancelled.
+- **Load-time checks.** `@pt.program(name, check=fn)` refuses an entry the program cannot run when the config
+  loads, rather than in every rollout: `fn(options, ctx)` raises `ValueError` saying why, and `platoon train`, `eval`,
+  `rollout` and `config validate` exit 78 naming the entry and the phase. It runs for each entry that names the
+  program and each phase the command runs; `ctx` (`pt.CheckContext`) holds the entry as that phase runs it, the phase
+  and the entry's rollout config, and `options` is the empty mapping. A check reads the config only, and must be
+  quick.
 - **Built-in programs.** `single` (the default) and `gym`, which scores a `pt.gym.loop` harness by the return it
   recorded.
 - **Registration.** `@pt.program(name)` registers when its module is imported, so name that module in the

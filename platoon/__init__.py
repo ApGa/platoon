@@ -38,6 +38,7 @@ _EXPORTS = {
         ),
         "platoon.harness.agent",
     ),
+    "CheckContext": "platoon.options",
     "EnvironmentEntry": "platoon.envs.named",
     "FunctionHarness": "platoon.harness.function",
     "PlatoonDeprecationWarning": "platoon.deprecations",
@@ -62,6 +63,7 @@ __all__ = [
     "Budget",
     "CallKind",
     "ChatReply",
+    "CheckContext",
     "EnvSession",
     "EnvironmentEntry",
     "EnvironmentService",
@@ -138,6 +140,7 @@ if TYPE_CHECKING:
     from platoon.harness.function import FunctionHarness
     from platoon.harness.function import harness as harness
     from platoon.harness.registry import get_harness
+    from platoon.options import CheckContext
     from platoon.programs import EpisodeContext, EpisodeProgram, program
     from platoon.task import Task
     from platoon.trajectory import Trajectory, TrajectoryCollection

@@ -42,6 +42,10 @@ platoon.ChatReply.message: field Mapping[str, Any]
 platoon.ChatReply.reasoning: property str | None
 platoon.ChatReply.text: property str
 platoon.ChatReply.tool_calls: property Sequence[Mapping[str, Any]]
+platoon.CheckContext: @dataclass(frozen=True) class CheckContext
+platoon.CheckContext.environment: field EnvironmentConfig
+platoon.CheckContext.phase: field Phase
+platoon.CheckContext.rollout: field RolloutConfig | None
 platoon.EnvSession: class EnvSession(Protocol)
 platoon.EnvSession.call_tool: async def call_tool(name: str, arguments: dict[str, Any]) -> ToolResult
 platoon.EnvSession.close: async def close() -> None
@@ -620,7 +624,7 @@ platoon.gym.as_environment: def as_environment(env_factory: Callable[[], StepEnv
 platoon.gym.gym_program: async def gym_program(ep: EpisodeContext) -> Outcome
 platoon.gym.loop: def loop(env_factory: Callable[[], StepEnv], *, max_turns: int | None = None, system: str | None = None) -> AgentFn
 platoon.harness: def harness(name: str, *, version: str = "1", runtime: Runtime = "inline", executes_model_code: bool = False) -> Callable[[AgentFn], AgentFn]
-platoon.program: def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], EpisodeProgram]
+platoon.program: def program(name: str, *, version: str = "1", check: ProgramCheck | None = None) -> Callable[[EpisodeProgram], EpisodeProgram]
 platoon.testing.Completion: @dataclass(frozen=True) class Completion
 platoon.testing.Completion.delay: field float = 0.0
 platoon.testing.Completion.logprob: field float | None = None

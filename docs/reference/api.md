@@ -30,6 +30,7 @@ This page is generated from the docstrings of the names `platoon` exports by `sc
 | [`pt.CallKind`](#pt-callkind) | What a model call is for: `policy` (the agent's turns: trained, and one step of its budget), `aux` (calls the harness makes for itself: trained, outside the budget) or `judge` (recorded for audit, never trained). |
 | [`pt.ToolAccess`](#pt-toolaccess) | What an agent may do with the env's tools: everything, everything but the terminal (submit/finish) tool, or only tools that declare themselves read-only. |
 | [`pt.program`](#pt-program) | Register the decorated `async def fn(ep: EpisodeContext) -> Outcome` as episode program `name@version`. |
+| [`pt.CheckContext`](#pt-checkcontext) | What an episode program's load-time `check(options, ctx)` sees of the config (RFC 0016, section 3): the entry, as one phase runs it, and the entry's rollout config for that phase. A check reads these and nothing else; whether a server answers, or a file exists where the run executes, is for the program to find out when it runs. |
 | [`pt.EpisodeContext`](#pt-episodecontext) | One rollout of one task, as a program sees it. |
 | [`pt.EpisodeProgram`](#pt-episodeprogram) | An episode program: `async def program(ep: EpisodeContext) -> Outcome`. |
 | [`pt.EnvironmentService`](#pt-environmentservice) | A source of tasks that opens sessions for rollouts. |
@@ -423,7 +424,12 @@ An episode program decides how one task's rollout runs its agents and grades the
 ### `pt.program`
 
 ```python
-def program(name: str, *, version: str = "1") -> Callable[[EpisodeProgram], EpisodeProgram]
+def program(
+    name: str,
+    *,
+    version: str = "1",
+    check: ProgramCheck | None = None,
+) -> Callable[[EpisodeProgram], EpisodeProgram]
 ```
 
 Register the decorated `async def fn(ep: EpisodeContext) -> Outcome` as episode program `name@version`.
@@ -433,6 +439,30 @@ registered): through an installed `platoon.programs` entry point named `name`, o
 `package` imports its module.  The name follows platoon's naming rule (`<owner>-<name>`, lower case;
 `platoon-*`, `single` and `gym` are core's).  Registering the same function again (a re-imported module)
 is allowed; another function under a registered `name@version` is an error.
+
+`check(options, ctx)` raises `ValueError` saying why the program cannot run an entry: it runs when the config
+loads, for each entry that names the program and each phase the command runs (`ctx`, a `pt.CheckContext`), so
+that `platoon train`, `eval`, `rollout` and `config validate` refuse the config (exit 78), naming the entry
+and the phase, before anything runs.  It reads the config only, and must be quick.  `options` is the empty
+mapping: a program declares no options yet (RFC 0016, section 1).
+
+<a id="pt-checkcontext"></a>
+
+### `pt.CheckContext`
+
+```python
+class CheckContext
+```
+
+What an episode program's load-time `check(options, ctx)` sees of the config (RFC 0016, section 3): the
+entry, as one phase runs it, and the entry's rollout config for that phase.  A check reads these and nothing else;
+whether a server answers, or a file exists where the run executes, is for the program to find out when it runs.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `environment` | `EnvironmentConfig` | required | The `environments` entry, as the rollouts of `phase` run it: for `eval`, with its `eval_overrides` merged over its own keys. A copy: a check cannot change the config. |
+| `phase` | `Phase` | required | `train` or `eval`. |
+| `rollout` | `RolloutConfig \| None` | required | The rollout config the entry's rollouts of `phase` run with: the phase's (a training config's `train` or `eval` workflow's, an evaluation config's `inference.workflow`'s) with the entry's own rollout settings laid over it; None for a config of environments alone. A copy, too. |
 
 <a id="pt-episodecontext"></a>
 

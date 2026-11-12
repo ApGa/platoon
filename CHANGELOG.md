@@ -4,6 +4,18 @@ What each release of platoon changes. Platoon's version is below 1.0: a minor re
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
 release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
+## 0.6.0 (unreleased)
+
+### New features
+
+- **A program can refuse an entry when the config loads.** `@pt.program(name, check=fn)` runs `fn(options, ctx)` for
+  each entry that names the program and each phase the command runs, and a `ValueError` it raises is a configuration
+  error that names the entry and the phase (`environments.0.program (train): ...`): `platoon train`, `eval`, `rollout`
+  and `config validate` exit 78 before anything runs, where the program would otherwise fail every rollout once
+  training had started. `pt.CheckContext` holds the entry as the phase runs it, the phase and the entry's rollout
+  config; `options` is the empty mapping until programs declare options (RFC 0016, section 3)
+  ([Episode programs](docs/tutorials/programs.md#reference)).
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

@@ -20,16 +20,24 @@ rollout workers are built per phase (``platoon.train.auto.TaskRouter``), so a wo
 included, per entry and phase. The trainer and the evaluator check them again when they build the routes, and a
 rollout worker parses them once more when it renders a launch, so a schema is the one place that says what an option
 means.
+
+**Checks.**  An episode program may declare a load-time ``check(options, ctx)`` (``@pt.program(check=...)``, RFC 0016,
+section 3), which raises ``ValueError`` when the program cannot run an entry: it runs then too, for each entry that
+names the program and each phase, and sees the entry as that phase runs it (:class:`CheckContext`).
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from platoon.config_defs import RolloutConfig
+    from platoon.programs import RegisteredProgram
     from platoon.train.components import EnvironmentConfig
 
 # Which rollouts options apply to: ``train`` rollouts, or evaluation rollouts (every split but ``train``).
@@ -248,6 +256,83 @@ def check_harness_options(
     return CheckedOptions(values=values)
 
 
+@dataclass(frozen=True)
+class CheckContext:
+    """What an episode program's load-time ``check(options, ctx)`` sees of the config (RFC 0016, section 3): the
+    entry, as one phase runs it, and the entry's rollout config for that phase.  A check reads these and nothing else;
+    whether a server answers, or a file exists where the run executes, is for the program to find out when it runs."""
+
+    # The ``environments`` entry, as the rollouts of ``phase`` run it: for ``eval``, with its ``eval_overrides`` merged
+    # over its own keys.  A copy: a check cannot change the config.
+    environment: EnvironmentConfig
+    # ``train`` or ``eval``.
+    phase: Phase
+    # The rollout config the entry's rollouts of ``phase`` run with: the phase's (a training config's ``train`` or
+    # ``eval`` workflow's, an evaluation config's ``inference.workflow``'s) with the entry's own rollout settings laid
+    # over it; None for a config of environments alone.  A copy, too.
+    rollout: RolloutConfig | None
+
+
+def check_program(
+    program: RegisteredProgram, config: Any, environment: EnvironmentConfig, *, where: str, phases: Sequence[Phase]
+) -> list[str]:
+    """Run ``program``'s ``check`` on an entry for each of ``phases``, and return each refusal as a problem that names
+    the entry (``where``, its dotted path) and the phase.  ``options`` is the empty mapping, as a program declares no
+    options yet.  A check that raises anything but ``ValueError`` refuses too: one that cannot decide lets no config
+    through."""
+
+    if program.check is None:
+        return []
+    problems: list[str] = []
+    for phase in phases:
+        context = CheckContext(
+            environment=_entry_for_phase(environment, phase),
+            phase=phase,
+            rollout=copy.deepcopy(_rollout_config(config, environment, phase)),
+        )
+        try:
+            program.check(MappingProxyType({}), context)
+        except ValueError as exc:
+            problems.append(f"{where}.program ({phase}): {exc}")
+        except Exception as exc:
+            problems.append(f"{where}.program ({phase}): its check raised {type(exc).__name__}: {exc}")
+    return problems
+
+
+def _entry_for_phase(environment: EnvironmentConfig, phase: Phase) -> EnvironmentConfig:
+    """A copy of ``environment`` as its rollouts of ``phase`` run it: for ``eval``, with its ``eval_overrides`` merged
+    over its harness options."""
+
+    copied = copy.deepcopy(environment)
+    if phase == "train":
+        return copied
+    return dataclasses.replace(copied, harness_options=harness_options(environment, phase))
+
+
+def _rollout_config(config: Any, environment: EnvironmentConfig, phase: Phase) -> RolloutConfig | None:
+    """The rollout config of ``environment``'s rollouts of ``phase`` (:attr:`CheckContext.rollout`): the phase's, with
+    the entry's own rollout settings laid over it when it sets any (:mod:`platoon.train.entry_settings`), and the
+    phase's own where those do not build, which loading reports where it checks them."""
+
+    from platoon.train import entry_settings
+
+    if hasattr(config, "inference"):
+        if not entry_settings.sets_anything(environment):
+            return config.inference.workflow.rollout_config
+        # The split named after the phase is one of it: ``train``, or ``eval``, which takes ``eval_overrides`` as
+        # every split but ``train`` does.
+        return entry_settings.evaluation_rollout_configs(config, phase).get(environment.label)
+    section = getattr(config, phase, None)
+    run = getattr(getattr(section, "workflow_config", None), "rollout_config", None)
+    if run is None or not entry_settings.sets_anything(environment):
+        return run
+    settings, _ = entry_settings.build(config)
+    own = settings.get(environment.label)
+    if own is None:
+        return run
+    return getattr(own.train if phase == "train" else own.eval, "rollout_config", run)
+
+
 def config_phases(config: Any, split: str | None = None) -> tuple[Phase, ...]:
     """The phases whose rollouts a command runs with a loaded config: with ``split``, that split's phase only (the
     one task ``platoon rollout`` runs); for an evaluation config (``inference``), the phase of its ``split`` (``eval``
@@ -279,11 +364,13 @@ def lock_record(values: Mapping[Phase, Mapping[str, Any]]) -> dict[str, dict[str
 
 __all__ = [
     "PHASES",
+    "CheckContext",
     "CheckedOptions",
     "OptionSchema",
     "Phase",
     "SchemaOptions",
     "check_harness_options",
+    "check_program",
     "config_phases",
     "harness_options",
     "lock_record",

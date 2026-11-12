@@ -1135,9 +1135,10 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
     spec's ``[options]``) also records the options each entry runs it with, defaults included, per phase
     (``options``: ``{entry: {train: ..., eval: ...}}``, :mod:`platoon.options`): the phases the config runs
     (:func:`platoon.options.config_phases`), or with ``split`` that split's phase only, for a command that runs one
-    split whatever the config says (``platoon rollout``).  A reference that does not resolve, and options its
-    component does not take, raise :class:`~platoon.utils.config.ConfigError` with every problem, which the CLI
-    reports with exit 78 before the run starts.
+    split whatever the config says (``platoon rollout``).  Each program's load-time ``check`` runs for those phases
+    too (:func:`platoon.options.check_program`).  A reference that does not resolve, options its component does not
+    take, and an entry a program's check refuses raise :class:`~platoon.utils.config.ConfigError` with every problem,
+    which the CLI reports with exit 78 before the run starts.
     """
 
     from platoon.options import config_phases
@@ -1194,7 +1195,9 @@ def run_components(config: Any, *, split: str | None = None) -> list[dict[str, A
         if environment.workflow != "group_rollout":
             describe = functools.partial(_describe_registry_component, "workflow")
             add("workflow", environment.workflow, label, "workflow", describe)
-    problems += _check_options(environments, records, phases=config_phases(config, split))
+    phases = config_phases(config, split)
+    problems += _check_options(environments, records, phases=phases)
+    problems += _check_programs(config, environments, records, phases=phases)
     problems += _check_service_options(environments, records)
     samplers: list[dict[str, Any]] = []
     rules: list[dict[str, Any]] = []
@@ -1365,6 +1368,28 @@ def _check_options(
             problems += [problem for problem in checked.problems if problem not in problems]
             if checked.values:
                 record.setdefault("options", {})[environment.label] = lock_record(checked.values)
+    return problems
+
+
+def _check_programs(
+    config: Any,
+    environments: Sequence[Any],
+    records: Mapping[tuple[str, str], dict[str, Any]],
+    *,
+    phases: Sequence[Any],
+) -> list[str]:
+    """Run the load-time ``check`` of each entry's resolved program, for each of ``phases``
+    (:func:`platoon.options.check_program`).  Returns the problems, one line each, naming the entry and the phase."""
+
+    from platoon.options import check_program
+    from platoon.programs import resolve_program
+
+    problems: list[str] = []
+    for index, environment in enumerate(environments):
+        if environment.harness is None or ("program", environment.program) not in records:  # unrun, or unresolved
+            continue
+        program = resolve_program(environment.program)
+        problems += check_program(program, config, environment, where=f"environments.{index}", phases=phases)
     return problems
 
 
