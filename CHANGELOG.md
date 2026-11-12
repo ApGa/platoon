@@ -62,6 +62,8 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 - A spec with `[budget] enforce = "gateway"` whose root completes after the gateway stopped an agent it minted over
   HTTP, at the cap the two share, is graded with reason `budget`, as one whose own call was stopped is. Only the
   root's own stops counted.
+- An evaluation in a run that trains several policies runs its groups. Every one failed, refused for having no credit
+  estimator: a training group needs one to tell each row's policy, but an evaluation trains nothing and never has one.
 
 ## 0.5.0 (2026-10-29)
 
