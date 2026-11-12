@@ -7,6 +7,12 @@ the ``agents`` settings), and :class:`InlineAgentContext` is one agent's view of
 * ``chat`` goes through the same render -> sample -> parse -> record path as HTTP calls
   (``ModelGateway.chat``), so a prompt that overflows the context window raises
   ``ContextWindowExceededError`` and counts in ``AgentSession.context_overflows`` either way.
+* The agents of a harness that has the gateway enforce its step budget
+  (``@pt.harness(budget_enforcement="gateway")``) are held to it on every ``policy`` call, over HTTP as through
+  ``chat``: their ``max_steps`` is their call cap, which the agents they mint share, and their ``ctx.budget`` is the
+  gateway's too (``AgentSession.over_call_cap``).  A run of one that completes after a budget stop of a call its cap
+  bounds, its own or a minted agent's, is a ``limit`` run, graded with reason ``budget``.  Such an agent without a
+  step budget is refused (``HarnessSpecError``), never run unbounded.
 * ``endpoint`` is the embedded server's URL scoped to the agent (``/s/<secret>/v1``), for harnesses with their
   own HTTP client; ``mcp`` is the agent's tool plane endpoint (:mod:`platoon.gateway.mcp`).
 * ``list_tools``/``call_tool`` go through the tool plane (``list_agent_tools``/``call_agent_tool``), filtered
@@ -37,9 +43,10 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from platoon.gateway import mcp as tool_plane
-from platoon.gateway.core import ChatRequest
+from platoon.gateway.core import BUDGET_MISC_KEY, ChatRequest
 from platoon.harness.agent import AgentResult, ChatReply, McpEndpoint, ModelEndpoint
 from platoon.harness.budget import AgentBudget, make_tracker
+from platoon.harness.spec import HarnessSpecError
 from platoon.utils.critical_path import EXECUTION_SPAN_KEY
 
 if TYPE_CHECKING:
@@ -131,6 +138,11 @@ class InlineAgentContext:
     ) -> None:
         from platoon.harness.agents import Subagents
 
+        if harness.budget_enforcement == "gateway" and agent.max_steps is None:
+            raise HarnessSpecError(
+                f"harness {harness.ref} has the gateway enforce its step budget, but the run sets no step budget "
+                "(rollout_config.max_steps or the task's max_steps)"
+            )
         self.runtime = runtime
         self.agent = agent
         self.harness = harness
@@ -148,6 +160,9 @@ class InlineAgentContext:
         agent.task = task
         runtime.tracker.add_agent(agent)
         self.budget = AgentBudget(runtime.tracker, agent.agent_id)
+        if harness.budget_enforcement == "gateway":
+            agent.call_cap, agent.budget = agent.max_steps, self.budget
+            agent.misc[BUDGET_MISC_KEY] = {"enforce": "gateway", "max_steps": agent.max_steps, "stops": 0}
         self.mcp = runtime.bind_tools(agent, session)
         self.agents = Subagents(self)
         self.keeps_children = False  # set by agents.keep_children(): cancelling a spawn call keeps its child
@@ -172,7 +187,10 @@ class InlineAgentContext:
         if tools:
             params["tools"] = [dict(tool) for tool in tools]
         request = ChatRequest.from_params([dict(message) for message in messages], params)
-        response = await self.runtime.gateway.chat(self.agent, request, kind=kind)
+        if kind == "policy" and self.agent.over_call_cap():
+            response = self.runtime.gateway.budget_stop(self.agent)
+        else:
+            response = await self.runtime.gateway.chat(self.agent, request, kind=kind)
         return ChatReply(call_id=response.call_id, message=response.message(), finish_reason=response.finish_reason)
 
     # ------------------------------------------------------------------ tools
@@ -268,6 +286,7 @@ def failure_outcome(
     harness_ref: str,
     on_harness_exit: HarnessExitPolicy | None = None,
     gateway_errors: int = 0,
+    budget_exhausted: bool = False,
 ) -> tuple[Outcome | None, str | None]:
     """The failure taxonomy of a finished run: ``(outcome instead of grading, reason to add to a grade)``.
 
@@ -277,7 +296,8 @@ def failure_outcome(
     :func:`with_reason`), or excluded from training when the environment sets ``on_context_overflow: exclude``.
     Any other harness error follows ``on_harness_exit.crash``: an infrastructure failure (``harness_crash``,
     the default), graded (``reason="harness_crash"``), or graded unless the gateway failed one of the agent's
-    calls (``gateway_errors``; then ``harness_crash_gateway``).  ``completed`` and ``limit`` runs are graded.
+    calls (``gateway_errors``; then ``harness_crash_gateway``).  ``completed`` and ``limit`` runs are graded, a
+    ``limit`` run that the gateway stopped at its step budget (``budget_exhausted``) with ``reason="budget"``.
     """
 
     from platoon.envs.service import Outcome
@@ -297,7 +317,7 @@ def failure_outcome(
                 return Outcome.infra("context_overflow", reason=reason), None
             return None, "context_overflow"
         return crash_outcome(policy, reason=reason, gateway_errors=gateway_errors)
-    return None, None
+    return None, "budget" if result.status == "limit" and budget_exhausted else None
 
 
 def agent_timeout(config: Any, session: EnvSession) -> float | None:
@@ -399,6 +419,10 @@ async def run_agent(ctx: InlineAgentContext, *, timeout: float | None = None) ->
                 result = AgentResult(
                     "error", error=f"Harness {ctx.harness.ref} returned {type(result).__name__}, not an AgentResult"
                 )
+            elif (
+                result.status == "completed" and ctx.harness.budget_enforcement == "gateway" and agent.budget_exhausted
+            ):
+                result = dataclasses.replace(result, status="limit")  # the gateway ended it at its step budget
         if result.status != "timeout":  # the agent's deadline, or a timeout its harness reports, ends its children
             try:
                 await ctx.wait_children(deadline)

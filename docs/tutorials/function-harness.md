@@ -266,6 +266,13 @@ is `inf`. Platoon does not stop a harness that ignores its budget: check it befo
 the only backstop. `platoon.harness.agent.out_of_steps(ctx, steps_taken)` checks both the budget and
 `ctx.max_steps`.
 
+A harness that cannot check its budget, such as one that runs another agent program against `ctx.endpoint`, can have the
+gateway do it: `@pt.harness(name, budget_enforcement="gateway")`. Once `out_of_steps` holds for one of its agents,
+counting the `policy` calls of the agents it minted over HTTP with its own, the gateway answers each `policy` call of
+that agent with a final message that makes no tool calls, samples and records nothing, and gives the reply an id that
+starts with `platoon-budget-`; a run that then completes is a `limit` run, graded with reason `budget`. Such a harness
+needs a step budget: a rollout that sets none is refused with a `harness_config` error.
+
 Subagents started with `ctx.agents.spawn` get budgets of their own; with `agents.budget: linear` (the default) a
 parent's `ctx.budget` also counts its subagents' steps and reserves theirs while they run. [The architecture
 guide](../architecture.md) covers subagents.
@@ -277,7 +284,7 @@ The status says how the harness ended, not whether it solved the task: the envir
 | Status | Who sets it | What platoon does |
 |---|---|---|
 | `completed` | the harness returns it | grades the session |
-| `limit` | the harness returns it when the budget runs out | grades the session |
+| `limit` | the harness returns it when the budget runs out; or platoon, for a harness with `budget_enforcement="gateway"` that completes after the gateway stopped it | grades the session (with reason `budget` when the gateway stopped it) |
 | `error` | the harness returns it, raises an exception, or returns something other than an `AgentResult` | records an `error` outcome (`harness_crash`), which never trains |
 | `timeout` | platoon, when the rollout's `timeout` passes (or the harness returns it) | records a `timeout` outcome, which never trains |
 | `cancelled` | platoon, when the rollout is cancelled | records a `cancelled` outcome, which never trains |

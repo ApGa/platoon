@@ -14,7 +14,8 @@ so environment configs name it exactly like a TOML ``HarnessSpec`` (``harness: m
 ``platoon.harness.registry.get_harness`` resolves either kind.  ``runtime="inline"`` (the only runtime today)
 runs the function in the rollout worker's event loop, next to the gateway.  ``executes_model_code`` declares
 that the harness runs code the model wrote (CodeAct, OpenHands); it is recorded with every rollout so a site
-policy can refuse such harnesses outside a sandbox later.
+policy can refuse such harnesses outside a sandbox later.  ``budget_enforcement="gateway"`` has the model gateway,
+rather than the function, stop each of its agents at its step budget.
 """
 
 from __future__ import annotations
@@ -24,10 +25,11 @@ import logging
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, get_args
 
 from platoon import extensions
 from platoon.harness.agent import AgentFn
+from platoon.harness.spec import BudgetEnforcement
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,9 @@ class FunctionHarness:
     executes_model_code: bool
     # The decorated function.
     fn: AgentFn = field(repr=False, compare=False)
+    # Who stops each of its agents at its step budget: ``harness``, the function itself (``ctx.budget``,
+    # ``out_of_steps``), or ``gateway``, the model gateway (RFC 0009, option A).
+    budget_enforcement: BudgetEnforcement = "harness"
 
     @property
     def ref(self) -> str:
@@ -71,6 +76,7 @@ def harness(
     version: str = "1",
     runtime: Runtime = "inline",
     executes_model_code: bool = False,
+    budget_enforcement: BudgetEnforcement = "harness",
 ) -> Callable[[AgentFn], AgentFn]:
     """Register the decorated ``async def fn(ctx: AgentContext) -> AgentResult`` as harness ``name@version``.
 
@@ -78,7 +84,13 @@ def harness(
     naming rule (:mod:`platoon.extensions`): lower case, ``<owner>-<name>``, with ``platoon-*`` reserved for core.
     ``runtime="inline"``, the only runtime, runs the function in the rollout worker's event loop.
     ``executes_model_code`` declares that the harness runs code the model wrote; it is recorded with every
-    rollout.  The decorator returns the function unchanged::
+    rollout.  ``budget_enforcement="gateway"`` has the model gateway hold each of the harness's agents to its step
+    budget, for a harness that cannot honour ``ctx.budget`` itself, such as one that runs another agent program over
+    HTTP: once ``out_of_steps`` holds for the agent, counting the ``policy`` calls of the agents it minted over HTTP
+    with its own, a ``policy`` call gets the budget stop, never sampled, and a run that then completes is graded
+    ``limit``, with reason ``budget`` (RFC 0009, option A).  ``aux`` and ``judge`` calls stay outside the budget.  A
+    rollout whose root has no step budget (``rollout_config.max_steps`` or the task's) is refused, with a
+    ``harness_config`` error, rather than run unbounded.  The decorator returns the function unchanged::
 
         @pt.harness("my-agent", version="2")
         async def my_agent(ctx: pt.AgentContext) -> pt.AgentResult:
@@ -90,6 +102,11 @@ def harness(
     version = extensions.check_version(version, what=f"harness {name!r}")
     if runtime not in RUNTIMES:
         raise ValueError(f"Harness {name!r}: runtime must be one of {RUNTIMES}, got {runtime!r}")
+    if budget_enforcement not in get_args(BudgetEnforcement):
+        raise ValueError(
+            f"Harness {name!r}: budget_enforcement must be one of {get_args(BudgetEnforcement)}, "
+            f"got {budget_enforcement!r}"
+        )
 
     def decorate(fn: AgentFn) -> AgentFn:
         if not inspect.iscoroutinefunction(fn):
@@ -97,7 +114,12 @@ def harness(
         extensions.check_registration("harness", name, module=getattr(fn, "__module__", None))
         register_function_harness(
             FunctionHarness(
-                name=name, version=version, runtime=runtime, executes_model_code=bool(executes_model_code), fn=fn
+                name=name,
+                version=version,
+                runtime=runtime,
+                executes_model_code=bool(executes_model_code),
+                fn=fn,
+                budget_enforcement=budget_enforcement,
             )
         )
         setattr(fn, HARNESS_ATTRIBUTE, _function_harnesses[f"{name}@{version}"])

@@ -50,7 +50,7 @@ from tinker_cookbook.completers import TokensWithLogprobs
 from tinker_cookbook.renderers import Message, Renderer, ToolCall
 from tinker_cookbook.tokenizer_utils import Tokenizer
 
-from platoon.harness.agent import CALL_KINDS, ToolAccess
+from platoon.harness.agent import CALL_KINDS, Budget, ToolAccess
 from platoon.utils.judges import JUDGE_ROLE, JUDGES_REFUSED_MISC_KEY
 from platoon.utils.role_tools import Allowlist, allowlists_of
 
@@ -98,6 +98,9 @@ BUDGET_STOP_MESSAGE = (
     "Stop here; the task is graded as it stands."
 )
 MAX_BUDGET_STOPS = 8
+# The prefix of a budget stop's call id, which a harness reports as any reply's: no recorded call has it, so a client
+# that reads the id knows the call was answered with the budget stop and nothing was sampled.
+BUDGET_STOP_PREFIX = "platoon-budget-"
 # ``AgentSession.misc`` key (and so trajectory misc key) of an agent's gateway step budget.
 BUDGET_MISC_KEY = "budget"
 # Agents one rollout may mint over HTTP (``POST /v1/platoon/agents``): model code in a sandbox can read an agent key,
@@ -877,7 +880,8 @@ class CallTimeline(Protocol):
 
 @dataclass(eq=False)
 class CallTally:
-    """The ``policy`` calls charged to one call cap (``AgentSession.call_cap``): those recorded and those sampling.
+    """The ``policy`` calls charged to one call cap (``AgentSession.call_cap``): those recorded, those sampling, and
+    those answered with the budget stop.
 
     An agent shares its tally with every agent minted under it over HTTP (:meth:`ModelGateway.mint_subagent`), so
     its cap bounds the calls of the whole minted tree, however many agents the tree has.
@@ -885,6 +889,7 @@ class CallTally:
 
     recorded: int = 0
     in_flight: int = 0
+    stops: int = 0
 
 
 @dataclass(eq=False)
@@ -940,6 +945,12 @@ class AgentSession:
     # The policy calls charged to ``call_cap``: this agent's and those of every agent minted under it, recorded and in
     # flight.  ``policy_calls`` and ``policy_calls_in_flight`` stay this agent's own.
     call_tally: CallTally = field(default_factory=CallTally, repr=False)
+    # The step budget of an agent whose function harness has the gateway enforce it
+    # (``@pt.harness(budget_enforcement="gateway")``): its ``ctx.budget``, which counts its own policy calls and those
+    # of the children it spawned, and reserves their budgets; once it has no step left for a call, as past
+    # ``call_cap``, policy calls get the budget stop.  None otherwise; agents it mints over HTTP are held to its
+    # ``call_cap`` alone, and their calls count toward that cap, not toward this budget.
+    budget: Budget | None = field(default=None, repr=False)
     budget_stops: int = 0  # policy calls answered with the budget stop instead of a sample
     policy_calls_in_flight: int = field(default=0, repr=False)
     # Whether code the policy runs can read the agent's key: set for a harness in a task sandbox.  Its ``judge`` calls,
@@ -968,14 +979,19 @@ class AgentSession:
 
     @property
     def budget_exhausted(self) -> bool:
-        """Whether the gateway answered a call of this agent with the budget stop."""
-        return self.budget_stops > 0
+        """Whether the gateway answered a call charged to this agent's call cap with the budget stop, by any agent that
+        shares the cap (:attr:`call_tally`): this agent, an agent minted under it, or, for a minted agent, the agent
+        it was minted under and the others minted under that one."""
+        return self.call_tally.stops > 0
 
     def over_call_cap(self) -> bool:
-        """Whether the next ``policy`` call would pass :attr:`call_cap`: the calls charged to it (:attr:`call_tally`,
-        recorded plus in flight, of this agent and the agents minted under it) have reached it."""
+        """Whether the next ``policy`` call would pass the gateway step budget: the calls charged to :attr:`call_cap`
+        (:attr:`call_tally`, recorded plus in flight, of this agent and the agents minted under it) have reached it, or
+        :attr:`budget` has no step left once this agent's calls in flight take theirs."""
         tally = self.call_tally
-        return self.call_cap is not None and tally.recorded + tally.in_flight >= self.call_cap
+        if self.call_cap is not None and tally.recorded + tally.in_flight >= self.call_cap:
+            return True
+        return self.budget is not None and self.budget.remaining() - self.policy_calls_in_flight <= 0
 
     def check_kind(self, kind: str) -> None:
         """Raise :class:`CallKindRefusedError` for a call of ``kind`` this agent may not make.  An agent with
@@ -1453,9 +1469,10 @@ class ModelGateway:
         """The answer to a ``policy`` call past the agent's call cap (``AgentSession.over_call_cap``): an assistant
         message without tool calls (:data:`BUDGET_STOP_MESSAGE`), which ends a harness's loop.
 
-        Nothing is sampled or recorded, so it never trains.  The agent counts it in ``budget_stops`` and its misc
-        records the budget under ``budget``.  After :data:`MAX_BUDGET_STOPS` stops, the agent's next call raises
-        :class:`AgentLimitError` instead: a harness that keeps calling after it was told to stop.
+        Nothing is sampled or recorded, so it never trains.  The agent counts it in ``budget_stops``, its call cap's
+        tally in ``stops``, and its misc records the budget under ``budget``.  After :data:`MAX_BUDGET_STOPS` stops,
+        the agent's next call raises :class:`AgentLimitError` instead: a harness that keeps calling after it was told
+        to stop.
         """
         self._ensure_running()
         self._ensure_open(agent)
@@ -1465,9 +1482,10 @@ class ModelGateway:
                 f"{agent.budget_stops} times; no more calls are answered"
             )
         agent.budget_stops += 1
+        agent.call_tally.stops += 1
         agent.misc[BUDGET_MISC_KEY] = {"enforce": "gateway", "max_steps": agent.call_cap, "stops": agent.budget_stops}
         return ChatResponse(
-            call_id=generate_id("platoon-budget-"),
+            call_id=generate_id(BUDGET_STOP_PREFIX),
             model=self.runtime(agent.policy).model_name,
             prompt=ModelInput(chunks=[]),
             tokens=[],

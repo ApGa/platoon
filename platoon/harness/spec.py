@@ -111,7 +111,7 @@ _PYTHON_VERSION = re.compile(r"^3\.\d+(\.\d+)?$")
 
 
 class HarnessSpecError(ValueError):
-    """A harness spec is malformed, or cannot launch with a run's settings."""
+    """A harness spec is malformed, or a harness cannot run with a run's settings."""
 
 
 class _MissingValue(HarnessSpecError):

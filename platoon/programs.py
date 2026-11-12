@@ -431,6 +431,7 @@ class Episode:
                 harness_ref=self.harness_ref or "harness",
                 on_harness_exit=self.route.on_harness_exit,
                 gateway_errors=self.root.gateway_errors,
+                budget_exhausted=self.root.budget_exhausted,
             )
             if failed is not None:
                 return failed

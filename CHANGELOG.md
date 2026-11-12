@@ -15,6 +15,22 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   training had started. `pt.CheckContext` holds the entry as the phase runs it, the phase and the entry's rollout
   config; `options` is the empty mapping until programs declare options (RFC 0016, section 3)
   ([Episode programs](docs/tutorials/programs.md#reference)).
+- **The gateway can hold a function harness to its step budget.** `@pt.harness(name, budget_enforcement="gateway")` does
+  for a function harness what `[budget] enforce = "gateway"` does for a spec, for one that cannot honour `ctx.budget`
+  itself, such as one that runs another agent program over HTTP: once `out_of_steps` holds for one of its agents (its
+  `max_steps`, which the agents it mints share, or its `ctx.budget`, which its spawned children draw on under
+  `agents.budget: linear`), the gateway answers that agent's `policy` calls with the budget stop, whose call id starts
+  with `platoon-budget-`, unsampled and unrecorded, and a run that completes after the gateway stopped a call its cap
+  bounds, its own or one of an agent it minted, is graded `limit` with reason `budget`. A rollout that sets no step
+  budget is refused with a `harness_config` error, as a spec's is, rather than run unbounded. `aux` and `judge` calls
+  stay outside the budget, a harness that declares nothing is unchanged, and `platoon harness show` says who enforces
+  the budget (RFC 0009, option A) ([Budgets](docs/tutorials/function-harness.md#budgets)).
+
+### Fixes
+
+- A spec with `[budget] enforce = "gateway"` whose root completes after the gateway stopped an agent it minted over
+  HTTP, at the cap the two share, is graded with reason `budget`, as one whose own call was stopped is. Only the
+  root's own stops counted.
 
 ## 0.5.0 (2026-10-29)
 

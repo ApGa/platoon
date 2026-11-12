@@ -474,6 +474,7 @@ async def _grade_child(
         harness_ref=child.harness.ref,
         on_harness_exit=runtime.on_harness_exit,
         gateway_errors=child.agent.gateway_errors,
+        budget_exhausted=child.agent.budget_exhausted,
     )
     if failed is not None:
         return failed

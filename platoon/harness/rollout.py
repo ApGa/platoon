@@ -323,6 +323,9 @@ async def _run_function_rollout(
             outcome = await get_program(route.program)(episode)
             if not isinstance(outcome, Outcome):
                 raise TypeError(f"Program {route.program!r} returned {type(outcome).__name__}, not an Outcome")
+        except HarnessSpecError as exc:  # its harness cannot run with this run's settings: a config error, not a crash
+            logger.error("episode program %s cannot run its harness: %s", route.program, exc)
+            outcome = Outcome.infra("harness_config", reason=str(exc))
         except Exception as exc:
             logger.exception("episode program %s failed", route.program)
             outcome = Outcome.infra(f"unexpected:{type(exc).__name__}", reason=f"program {route.program}: {exc}")
