@@ -53,6 +53,6 @@ that the mesh trains its three peers on `propagate` rows under `credit: keyed`, 
 
 ## Versions
 
-The configs load and validate on CPU (`test_teams_recipes.py`) with the next release of platoon, the TextCraft
+The configs load and validate on CPU (`test_teams_recipes.py`) with platoon 0.6.0, the TextCraft
 extension at the same commit and platoon-harness 0.1.0. Their OpenHands agents run on openhands-sdk 1.59.0, which
 platoon-harness's `openhands` extra pins. No training run of them is published.

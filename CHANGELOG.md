@@ -2,9 +2,9 @@
 
 What each release of platoon changes. Platoon's version is below 1.0: a minor release (0.3.0) may change the Python
 API, the config format or the command line, and a patch release (0.2.1) only fixes bugs. To stay on one minor
-release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
+release, require a range such as `platoon[tinker,ors]>=0.6,<0.7`.
 
-## 0.6.0 (unreleased)
+## 0.6.0 (2026-11-13)
 
 ### New features
 
@@ -80,6 +80,60 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   tool-call parser that types each value by its schema, such as the chat-template renderer's `qwen3_coder`, left these
   as text: `craft` refused every call, and `get_info` answered for each character of its list. The game still takes
   any value and checks it with the same messages.
+
+### Removed
+
+- **Breaking: the forms that platoon 0.5.0 deprecated are gone.** Each fails with a message that names what replaces it
+  and says that platoon 0.6.0 removed it, such as `platoon.train.tinker.rl: platoon 0.6.0 removed it; use
+  platoon.train for PlatoonTinkerRLTrainer and Watchdog, ...`
+  ([Troubleshooting](docs/how-to/troubleshooting.md)). Each form, with what replaces it:
+  - the module paths that platoon 0.5.0 moved out of `platoon.train.tinker`, and the names that it and its old packages
+    `.workers` and `.workflows` exported, whose import raises an `ImportError`, as does a config's `module:attr` that
+    names one: their new modules, which [docs/training-code.md](docs/training-code.md) maps.
+    `platoon.train.tinker`'s names (`PlatoonTinkerRLTrainer`, `Watchdog`, the config classes, the batch
+    transforms): `platoon.train`; `.rl`: `platoon.train`, and the modules of `platoon.train.trainer`, `.policy`,
+    `.step`, `.dispatch`, `.checkpoints` and `.evaluation`; `.config_defs`, `.dataset_order`, `.task_records`:
+    `platoon.train.config_defs`, `.dataset_order`, `.task_records`; `.batch_transforms`, `.staleness`, `.censoring`:
+    `platoon.train.step.batch_transforms`, `.staleness`, `.metrics`; `.dispatcher`, `.permits`:
+    `platoon.train.dispatch.dispatcher` (and `platoon.train.checkpoints.dispatch_state`),
+    `platoon.train.dispatch.permits`; `.kept_groups`, `.checkpoint_pruning`, `.evaluation_record`:
+    `platoon.train.checkpoints.kept_groups`, `.pruning`, `platoon.train.evaluation.record`; `.workflows`,
+    `.workflows.group_rollout_workflow`: `platoon.train.workflow`; `.workflows.base`: `platoon.train.workflow.protocol`;
+    `.start_limit`: `platoon.train.workflow.start_limit`; `.workers` and its modules: `platoon.train.workers` and its
+    modules; `.worker_env`: `platoon.train.workers.env`. `platoon.train.tinker` keeps the policy client (`proxy`), its
+    renderers, `key_refusal` and `rollout_metrics`;
+  - `python -m platoon.train.tinker.train` and `python -m platoon.train.tinker.workers.entrypoint`, which exit 78:
+    `python -m platoon.train.launch` and `python -m platoon.train.workers.entrypoint`;
+  - a `GroupRolloutWorkflow` subclass that defines `_admit_group` or `_admission_semaphore`, which the workflow has not
+    called since 0.5.0, and which is now a `TypeError` when the class is defined, rather than a warning:
+    `_enter_startup_gate` and `_startup_semaphore`.
+
+  No config key was deprecated for removal in 0.6.0.
+
+### Install and upgrade
+
+```bash
+pip install -U 'platoon[tinker,ors]>=0.6,<0.7'
+# with the TextCraft extension, name it too:
+pip install -U 'platoon[tinker,ors]>=0.6,<0.7' 'platoon-textcraft[platoon]'
+# with platoon-harness, for teams of agents:
+pip install -U 'platoon[tinker,ors,platoon-harness]>=0.6,<0.7'
+```
+
+- **To upgrade a project that pins one minor release**, move its range to 0.6, such as `platoon[tinker,ors]>=0.6,<0.7`.
+  Platoon 0.6 refuses the components of an installed extension whose requirement on platoon excludes it, such as
+  `platoon>=0.5,<0.6`, with an error that names both versions, until a release of the extension admits 0.6;
+  meanwhile, `PLATOON_IGNORE_EXTENSION_REQUIREMENTS=1` loads them anyway
+  ([Compatibility and provenance](docs/extending/index.md#compatibility-and-provenance)).
+- **Replace what 0.6.0 removed** (above): import from the new module paths, which platoon 0.5.0 already offered beside
+  the old ones, and rename a workflow's override of `_admit_group` or `_admission_semaphore`. Code that ran on 0.5
+  without a `PlatoonDeprecationWarning` used none of them.
+- **The TextCraft extension's release for platoon 0.6 is `platoon-textcraft` 0.5.0**, whose `platoon` extra requires
+  `platoon[ors]>=0.6,<0.7`. It carries the fix to its tools' parameter types (Fixes, above). The release for platoon
+  0.5 stays 0.4.0: there, keep the extension within 0.4 (`platoon-textcraft>=0.4,<0.5`), since platoon 0.5 refuses the
+  components of 0.5.0, also when it is installed without its extra. An upgrade of platoon alone leaves 0.4.0
+  installed, which pip does not flag and platoon 0.6 refuses: upgrade the two together, as above
+  ([The TextCraft extension](docs/getting-started/install.md#the-textcraft-extension)).
 
 ## 0.5.0 (2026-10-29)
 

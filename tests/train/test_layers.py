@@ -11,7 +11,7 @@ plugins    ``workflow/``, ``credit/``
 
 Every import counts, a function's own, those under ``TYPE_CHECKING`` and relative ones (as the absolute import each
 is) included.  ``launch.py`` (which names the trainers), the package's exports (``platoon/train/__init__.py``) and the
-old paths' shims (``tinker/``) belong to no group.  The workflow's contract (``workflow/protocol.py``) and what the run
+policy client (``tinker/``) belong to no group.  The workflow's contract (``workflow/protocol.py``) and what the run
 calls of the credit estimators (``credit/runtime.py``), through which generic code calls the workflow and the
 estimators, are everyone's.  No import breaks the rule.
 """

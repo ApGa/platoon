@@ -103,9 +103,8 @@ sys.exit(1 if trainer else 0)
 
 
 def test_importing_the_old_tinker_package_loads_no_trainer():
-    """``platoon.train.tinker`` no longer imports the trainer: its old names resolve lazily
-    (``tests/test_moved_modules.py``), so a module of the policy client (``platoon.train.tinker.proxy``) does not pay
-    for the trainer."""
+    """``platoon.train.tinker`` does not import the trainer, so a module of the policy client
+    (``platoon.train.tinker.proxy``) does not pay for it."""
 
     completed = subprocess.run(
         [sys.executable, "-c", _OLD_PACKAGE_CHECK],

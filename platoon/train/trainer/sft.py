@@ -63,8 +63,6 @@ class SupervisedTrainer(TrainerBase):
     _cursor: DatasetCursor
     _untrained: set[str]
     _walked_untrained: set[int] | None
-    # Quoted, and the class read through its module where it is used: tests/test_moved_modules.py imports this module
-    # while it patches the class through its old path (platoon.train.tinker.checkpoint_pruning).
     _pruner: "pruning.RecoveryCheckpointPruner | None" = None
     _learner: Learner
 

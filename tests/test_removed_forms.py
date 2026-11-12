@@ -2,6 +2,14 @@
 override or a command that still uses one fails as a configuration error (exit 78), with a message that names what
 replaces it and says which release removed it.
 
+Platoon 0.6.0 removed the forms that 0.5.0 deprecated:
+
+- the module paths that platoon 0.5.0 moved out of ``platoon.train.tinker``, and the names that it and its old packages
+  exported: their new modules.  Importing one raises ``ImportError`` with the same words, and running one with
+  ``python -m`` exits 78;
+- a ``GroupRolloutWorkflow`` subclass's ``_admit_group`` and ``_admission_semaphore``: ``_enter_startup_gate`` and
+  ``_startup_semaphore`` (``tests/train/workflow/test_group_startup_permit.py``).
+
 Platoon 0.4.0 removed the form that 0.3.0 deprecated:
 
 - ``train.task_order``, now ``train.task_sampler``, which takes its values.
@@ -25,6 +33,7 @@ Platoon 0.3.0 removed the forms that 0.2.0 deprecated:
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import re
 import subprocess
@@ -36,6 +45,7 @@ import pytest
 import yaml
 
 from platoon import cli
+from platoon.train import tinker
 from platoon.train.config_defs import EvalConfig, PlatoonTinkerRLTrainerConfig, TrainConfig
 from platoon.utils.config import ConfigError, resolve_config
 
@@ -396,3 +406,49 @@ def test_importing_the_restart_wrapper_says_what_replaces_it():
         importlib.import_module("platoon.train.tinker.restart_wrapper")
     with pytest.raises(ImportError, match="run_with_restart"):
         from platoon.train.tinker import run_with_restart  # noqa: F401
+
+
+# --- the module paths that platoon 0.5.0 moved ----------------------------------------------------------------------
+
+OLD_MODULES = sorted(set(tinker.REMOVED) - set(tinker._NAMES) - tinker._PACKAGES)
+
+
+def _removed(path: str) -> str:
+    return f"platoon.train.tinker.{path}: platoon 0.6.0 removed it; use {tinker.REMOVED[path]}"
+
+
+@pytest.mark.parametrize("path", OLD_MODULES)
+def test_importing_a_module_path_that_platoon_0_6_0_removed_says_what_replaces_it(path):
+    with pytest.raises(ImportError, match=re.escape(_removed(path))):
+        importlib.import_module(f"platoon.train.tinker.{path}")
+
+
+def test_a_name_that_platoon_train_tinker_or_an_old_package_exported_says_what_replaces_it():
+    with pytest.raises(ImportError, match=re.escape(_removed("PlatoonTinkerRLTrainer"))):
+        from platoon.train.tinker import PlatoonTinkerRLTrainer  # noqa: F401
+    with pytest.raises(ImportError, match=re.escape(_removed("rl"))):
+        from platoon.train.tinker import rl  # noqa: F401
+    with pytest.raises(ImportError, match=re.escape(_removed("workflows.group_rollout_workflow"))):
+        from platoon.train.tinker.workflows import group_rollout_workflow  # noqa: F401
+    old = "platoon.train.tinker.workflows.GroupRolloutWorkflow"
+    with pytest.raises(ImportError, match=re.escape(f"{old}: platoon 0.6.0 removed it; use platoon.train.workflow")):
+        from platoon.train.tinker.workflows import GroupRolloutWorkflow  # noqa: F401
+
+    assert not hasattr(tinker, "no_such_name")  # what it never exported is no attribute, as in any module
+    assert not hasattr(importlib.import_module("platoon.train.tinker.workers"), "__all__")
+
+
+@pytest.mark.parametrize("path", ["train", "workers.entrypoint"])
+def test_running_a_module_path_that_platoon_0_6_0_removed_exits_78_saying_what_replaces_it(path, tmp_path):
+    command = [sys.executable, "-m", f"platoon.train.tinker.{path}"]
+
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=300, cwd=tmp_path)
+
+    assert completed.returncode == 78, completed.stderr
+    assert completed.stderr == f"platoon: python -m {_removed(path)}\n"
+
+
+@pytest.mark.parametrize("path", sorted(tinker.REMOVED))
+def test_what_replaces_each_removed_path_imports(path):
+    replacement = re.match(r"[\w.]+", tinker.REMOVED[path])
+    assert replacement is not None and importlib.util.find_spec(replacement[0]) is not None

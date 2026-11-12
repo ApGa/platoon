@@ -93,7 +93,7 @@ from platoon.sandbox.cleanup import reap_records
 from platoon.train.startup import WorkerPreload
 from platoon.train.workers import fork_servers
 from platoon.train.workers.binding import publish_binding
-from platoon.train.workers.env import _ENTRYPOINT_MODULES, DIAG_PATH_ENV, NO_CUDA_DRIVER, STARTUP_BUDGET_ENV
+from platoon.train.workers.env import DIAG_PATH_ENV, NO_CUDA_DRIVER, STARTUP_BUDGET_ENV
 
 # The two removers are private to platoon.train.workers: the supervisor runs them itself, as an attempt ends.
 from platoon.train.workers.outcomes import WorkerOutcome, _remove_event_temporaries, _remove_worker_files, classify
@@ -145,10 +145,9 @@ WORKER_PRELOAD: tuple[str, ...] = (
     "platoon.sandbox.cleanup",
     "platoon.train.auto",
 )
-#: In an exec'd worker of a module under ``platoon.train.workers`` (or ``platoon.train.tinker``, the entrypoint's
-#: package before platoon 0.5.0) the package init applies the worker invariants and arms the startup alarm
-#: (:mod:`platoon.train.workers.env`); a forked worker, whose server ran that init already, does it before its module
-#: runs.
+#: In an exec'd worker of a module under ``platoon.train.workers`` the package init applies the worker invariants and
+#: arms the startup alarm (:mod:`platoon.train.workers.env`); a forked worker, whose server ran that init already, does
+#: it before its module runs.
 WORKER_PACKAGE_INIT = "platoon.train.workers.env:apply_rollout_worker_env_invariants"
 #: How many fork servers a supervisor starts, the first and those that replace one that died.
 MAX_FORK_SERVER_STARTS = 4
@@ -240,8 +239,7 @@ class RolloutWorkerSupervisor:
         if start_method not in START_METHODS:
             raise ValueError(f"start_method must be one of {START_METHODS}, not {start_method!r}")
         self.python_executable = python_executable or sys.executable
-        # Given the entrypoint's module before platoon 0.5.0 (a shim until 0.6.0), run the entrypoint, as by default.
-        self.module = WORKER_MODULE if module in _ENTRYPOINT_MODULES else module
+        self.module = module
         self.start_method = start_method
         # What the fork server imports and builds beyond the worker's stack, each when it is fork-safe: what the run's
         # environments import and build when a rollout opens them (platoon.train.startup).
