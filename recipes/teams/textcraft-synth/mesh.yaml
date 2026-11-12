@@ -1,0 +1,38 @@
+# Three OpenHands peers on one TextCraft-Synth task, the team in mesh.toml: they share the task's inventory, message
+# each other to split the crafting, and finish together. The team starts three agents, so it runs under the program's
+# zero-call root, which makes no model call and whose reward is the task's, and each peer is minted below it.
+#
+#   platoon train recipes/teams/textcraft-synth/mesh.yaml [key=value ...]
+#
+# Each span of each peer, on OpenHands one of its turns, trains on its propagate row: the task's reward, split back
+# along the record's own edges and what each span took (each event keeping half of what reaches it for the peer that
+# made it and its span, the rest passed to its causes, the work it cites and what its span took), and a span the walk
+# never reaches is unscored and trains nothing. platoon's keyed credit centres each peer on the mean of the group's
+# peers' rows (task, policy and role), so the eight rollouts of a group are the peers' baseline, and trains each scored
+# span on its row less that baseline shared by its peer's scored spans. The peers share the root's 75 steps, the mesh's
+# whole budget.
+
+extends: common.yaml
+
+environments:
+  - env: textcraft-synth@1          # the environment, the val split and platoon-delegation, version 1
+    harness: platoon-harness
+    program: platoon-harness
+    harness_options:
+      team: mesh.toml
+      rewards:
+        peer: {producer: "platoon_harness.credit:propagate", retained: 0.5}
+    credit: keyed                     # each peer centred on the group's peers
+    dataset_kwargs: {split_name: train-medium}
+    eval_dataset_kwargs: {limit: 100}
+
+train:
+  max_concurrent_rollouts: 64  # 8 groups of 8 at once
+  workflow_config:
+    rollout_config:
+      max_steps: 75                 # the mesh's: minted peers share it
+
+stats:
+  trial_name: qwen3-4b-instruct-2507-team-mesh-propagate-lora32
+  wandb:
+    tags: [teams, textcraft-synth, tinker, mesh, openhands, propagate]

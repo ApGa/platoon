@@ -15,7 +15,8 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   `harness_options.team`. A role may train on a producer's rows, such as platoon-harness's `propagate`, each span of an
   agent on its own row (`harness_options.rewards`, with `credit: keyed`), and the program refuses at load what the
   entry and its team decide. Install the new `platoon-harness` extra (`platoon-harness>=0.1,<0.2`); without it, both
-  stay listed, and naming them fails with the install command ([Train a team of agents](docs/how-to/teams.md)).
+  stay listed, and naming them fails with the install command. `recipes/teams` runs the RAO recipe's recursive arm as a
+  team, and a mesh of peers ([Train a team of agents](docs/how-to/teams.md)).
 - **A program can refuse an entry when the config loads.** `@pt.program(name, check=fn)` runs `fn(options, ctx)` for
   each entry that names the program and each phase the command runs, and a `ValueError` it raises is a configuration
   error that names the entry and the phase (`environments.0.program (train): ...`): `platoon train`, `eval`, `rollout`

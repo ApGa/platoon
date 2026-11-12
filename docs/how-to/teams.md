@@ -97,6 +97,7 @@ environments:
 
 `platoon config validate` runs the program's load check, which names each problem it finds in the entry and its team.
 Each crafter that another spawns runs as a platoon subagent, graded on its own targets.
+[`recipes/teams`](../../recipes/teams/README.md) has whole configs.
 
 ## Options
 

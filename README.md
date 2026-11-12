@@ -315,7 +315,7 @@ the problem, and so does an option a harness does not take (`harness_options`, w
 | `platoon/sandbox/` | task sandboxes: `process`, `docker`, `singularity` and `enroot` |
 | `platoon/hooks.py` | named hooks through which extensions plug into core |
 | `extensions/` | first-party extensions, each a distribution of its own in the uv workspace: `extensions/textcraft` (`platoon-textcraft`) |
-| `recipes/` | configs that reproduce published experiments, checked on CPU: `recipes/rao` |
+| `recipes/` | configs that reproduce published experiments, or run platoon's features on their settings, checked on CPU: `recipes/rao`, `recipes/frontiersmith` and `recipes/teams` |
 | `examples/` | runnable examples, each tested in `tests/examples/` |
 
 ## Contributing and development

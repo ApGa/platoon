@@ -768,8 +768,9 @@ extensions/<name>/
 - **Lint.** The extension's `pyproject.toml` has a `[tool.ruff]` of its own, with `src = ["src"]`, so its package
   sorts as first-party.
 
-Configs that reproduce a published experiment are a recipe, not an extension: `recipes/<name>/`, with a README and a
-CPU check that every config resolves ([`recipes/README.md`](recipes/README.md)).
+Configs that carry a published experiment over to platoon, or run one of platoon's features on a published
+experiment's setting, are a recipe, not an extension: `recipes/<name>/`, with a README and a CPU check that every
+config resolves ([`recipes/README.md`](recipes/README.md)).
 
 ## When a change needs an RFC
 
@@ -908,10 +909,10 @@ the changelog.
 
 1. On a branch, set `version` in `pyproject.toml`, run `uv lock` in the repository root (one lock covers core and
    the extensions, and records platoon's version), and date the version's section in [CHANGELOG.md](CHANGELOG.md):
-   its heading, such as `## 0.2.1 (unreleased)`, becomes `## 0.2.1 (2026-10-19)`. Where the docs mark what is new
-   with "the next release" (`grep -rn "the next release" docs`), name this version instead. A minor release, such
-   as 0.3.0, also moves every range that names the previous one: the extensions' and the examples' requirement on
-   platoon, which would otherwise refuse the new release, and the docs and tests that show it
+   its heading, such as `## 0.2.1 (unreleased)`, becomes `## 0.2.1 (2026-10-19)`. Where the docs and the recipes mark
+   what is new with "the next release" (`grep -rn "the next release" docs recipes`), name this version instead. A
+   minor release, such as 0.3.0, also moves every range that names the previous one: the extensions' and the
+   examples' requirement on platoon, which would otherwise refuse the new release, and the docs and tests that show it
    (`grep -rn "0\.2, < 0\.3\|0\.2,<0\.3" --exclude=uv.lock .`). Open a pull request, such as
    `chore: Release 0.2.1`, and merge it once CI and the release workflow's checks pass.
 2. Tag the merge commit and push the tag:
