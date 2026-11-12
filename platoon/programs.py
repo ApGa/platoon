@@ -247,8 +247,9 @@ def registered_programs() -> list[RegisteredProgram]:
         return [_programs[ref] for ref in sorted(_programs)]
 
 
-# Modules whose import registers built-in programs besides ``single``.
-BUILTIN_PROGRAM_MODULES = ("platoon.gym",)
+# Modules whose import registers built-in programs besides ``single``.  Each is imported with no ``try``, so none may
+# import an optional dependency when it is imported.
+BUILTIN_PROGRAM_MODULES = ("platoon.gym", "platoon.harness.builtin.platoon_harness")
 
 
 @functools.cache
@@ -258,7 +259,7 @@ def _import_builtin_programs() -> None:
 
 
 def builtin_programs() -> list[RegisteredProgram]:
-    """Core's programs (``single``, ``gym``)."""
+    """Core's programs (``single``, ``gym``, ``platoon-harness``)."""
 
     _import_builtin_programs()
     return [record for record in registered_programs() if extensions.is_core_module(record.fn.__module__)]
@@ -268,10 +269,10 @@ def resolve_program(ref: str) -> RegisteredProgram:
     """The program ``ref`` names: ``name[@version]``, or ``module:attr`` (imported, which also registers the
     module's decorators).
 
-    A name is core's (``single``, ``gym``), an installed ``platoon.programs`` entry point's (loaded the first time
-    it is named, after its compatibility check), or one a ``package`` module registered.  A bare name must have a
-    single registered version.  Raises :class:`~platoon.extensions.ExtensionError` (a ``ValueError``) when
-    nothing, or more than one program, matches.
+    A name is core's (``single``, ``gym``, ``platoon-harness``), an installed ``platoon.programs`` entry point's
+    (loaded the first time it is named, after its compatibility check), or one a ``package`` module registered.  A bare
+    name must have a single registered version.  Raises :class:`~platoon.extensions.ExtensionError` (a
+    ``ValueError``) when nothing, or more than one program, matches.
     """
 
     if ":" in ref:

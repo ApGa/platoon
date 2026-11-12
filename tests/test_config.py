@@ -895,7 +895,14 @@ def test_a_run_record_holds_the_resolved_config_and_the_lock(tmp_path):
     assert resolve_config(record.config_path, [], Schema).config == resolved.config
 
     lock = json.loads((tmp_path / "out/run-1" / LOCK_NAME).read_text())
-    assert set(lock["versions"]) == {"platoon", "tinker", "tinker_cookbook", "openreward", "hpc_sandbox"}
+    assert set(lock["versions"]) == {
+        "platoon",
+        "tinker",
+        "tinker_cookbook",
+        "openreward",
+        "hpc_sandbox",
+        "platoon_harness",
+    }
     assert lock["versions"]["platoon"]  # from pyproject when platoon is not installed
     assert lock["versions"]["tinker"] == "0.16.1"
     assert set(lock["commits"]) <= set(lock["versions"])

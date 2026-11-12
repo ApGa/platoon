@@ -31,6 +31,7 @@ Pick the extras by what you run ([Extras](#extras) says what each installs):
 | The examples, number search and other ORS environments | `platoon[tinker,ors]` |
 | Harbor datasets, with Docker | `platoon[tinker]` |
 | Harbor datasets on a cluster, with Singularity/Apptainer or enroot | `platoon[tinker,hpc]` |
+| A team of agents that platoon-harness runs | `platoon[tinker,platoon-harness]`, and the `ors` extra for ORS environments |
 
 Platoon's version is below 1.0, so a minor release (0.3.0) may change the Python API, the config format or the
 command line, while a patch release (0.2.1) only fixes bugs. To stay on one minor release, require a range such as
@@ -48,6 +49,7 @@ tutorials' files and the recipes are in the repository: to follow the tutorials,
 | `tinker` | The Tinker SDK (`tinker==0.16.1`) and `tinker-cookbook` 0.3. | `platoon train`, `platoon eval` and `platoon rollout`: anything that samples or trains a model. |
 | `ors` | The OpenReward SDK (`openreward>=0.1.125`). | Environments written as OpenReward (ORS) classes: `python://` and `ors+http://` services, including number search, the TextCraft extension and `pt.gym.as_environment`. |
 | `hpc` | `hpc-sandbox` 0.5, from 0.5.1 ([below](#the-hpc-extra)). | The `singularity` and `enroot` task sandboxes, for Harbor tasks on clusters without Docker. |
+| `platoon-harness` | [platoon-harness](https://github.com/ApGa/platoon-harness)'s SDK 0.1 (`platoon-harness>=0.1,<0.2`), which needs pydantic alone. | The `platoon-harness` harness and program, which run and train a team of agents through platoon-harness ([Train a team of agents](../how-to/teams.md)). Without it, both stay listed, and naming them fails with the install command. |
 
 Install `tinker` and `ors` for everything in these guides: the trainer and the model gateway import the Tinker
 SDK, and the example environments are ORS classes. A project that trains only on Harbor datasets needs no `ors`, and
@@ -217,7 +219,7 @@ platoon-react@1         function  platoon 0.5.0  platoon.harness.builtin.react:r
 To change platoon itself, install the development tools as well:
 
 ```bash
-uv sync --dev --extra tinker --extra ors
+uv sync --dev --extra tinker --extra ors --extra platoon-harness
 uv run pre-commit install                   # lint each commit and check its message
 uv run pytest tests
 uvx pre-commit run --all-files              # ruff and ruff format, as CI runs them

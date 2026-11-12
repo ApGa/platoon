@@ -87,7 +87,14 @@ RESOLVED_CONFIG_NAME = "config.resolved.yaml"
 LOCK_NAME = "lock.json"
 # Distributions whose versions ``lock.json`` records (import names; metadata lookup normalizes them), and their commits
 # when they were installed from git: the commits of hpc-sandbox between two releases share the earlier one's version.
-LOCKED_DISTRIBUTIONS = ("platoon", "tinker", "tinker_cookbook", "openreward", "hpc_sandbox")
+LOCKED_DISTRIBUTIONS = (
+    "platoon",
+    "tinker",
+    "tinker_cookbook",
+    "openreward",
+    "hpc_sandbox",
+    "platoon_harness",
+)
 # Names a file of the JSON lines `python -m hpc_sandbox pull` printed for the job, which lock.json records
 # (:func:`image_pulls`), and the keys hpc-sandbox keeps stable in each line.
 IMAGE_PULLS_ENV = "PLATOON_IMAGE_PULLS"

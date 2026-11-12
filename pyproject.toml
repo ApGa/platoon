@@ -74,6 +74,12 @@ dependencies = [
 hpc = [
     "hpc-sandbox>=0.5.1,<0.6",
 ]
+# Teams of agents that platoon-harness runs, rolled out and trained as one episode by the platoon-harness harness and
+# program (platoon/harness/builtin/platoon_harness), which import it only when they run. Its base install is its SDK,
+# which needs pydantic alone; a minor release of it may change the SDK's API.
+platoon-harness = [
+    "platoon-harness>=0.1,<0.2",
+]
 # ORS-native environments (python:// and ors+http:// services); 0.1.125 and 0.1.163 are both supported. structlog
 # (which openreward requires) quiets the SDK's loggers (platoon/envs/ors/sdk.py), which needs 25.1's
 # get_effective_level: with an older structlog, the SDK's INFO lines reach a CodeAct agent's cell output.

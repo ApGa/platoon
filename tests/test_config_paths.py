@@ -376,6 +376,27 @@ def test_a_harness_file_option_resolves_beside_its_config(tmp_path, monkeypatch)
     assert second["harness_options"] == {"crew": "acme.crews:mesh"}  # a Python object, not a path
 
 
+def test_a_core_harness_file_option_resolves_beside_its_config(tmp_path, monkeypatch):
+    """A core harness names its file options as any other does: ``platoon-harness``'s ``team``, which its registration
+    declares without the extra that runs it."""
+
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    (configs / "crew.toml").write_text("")
+    entry = {
+        "service": "table",
+        "service_kwargs": {"rows": ["hi"]},
+        "harness": "platoon-harness",
+        "harness_options": {"team": "crew.toml"},
+    }
+    config = _write(configs / "env.yaml", {"environments": [entry]})
+    monkeypatch.chdir(tmp_path)
+
+    (loaded,) = resolve_config(config).data["environments"]
+
+    assert loaded["harness_options"] == {"team": str(configs / "crew.toml")}
+
+
 PACKAGED_HARNESS = """\
 import platoon as pt
 

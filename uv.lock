@@ -2232,6 +2232,9 @@ ors = [
     { name = "openreward" },
     { name = "structlog" },
 ]
+platoon-harness = [
+    { name = "platoon-harness" },
+]
 tinker = [
     { name = "tinker" },
     { name = "tinker-cookbook" },
@@ -2266,6 +2269,7 @@ requires-dist = [
     { name = "jinja2", specifier = ">=3.1" },
     { name = "openreward", marker = "extra == 'ors'", specifier = ">=0.1.125" },
     { name = "packaging", specifier = ">=24" },
+    { name = "platoon-harness", marker = "extra == 'platoon-harness'", specifier = ">=0.1,<0.2" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml" },
     { name = "rich", specifier = ">=13.9.4" },
@@ -2279,7 +2283,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'tinker'" },
     { name = "wandb", specifier = ">=0.19.0" },
 ]
-provides-extras = ["hpc", "ors", "tinker"]
+provides-extras = ["hpc", "platoon-harness", "ors", "tinker"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2292,6 +2296,18 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=1.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff", specifier = ">=0.11.9" },
+]
+
+[[package]]
+name = "platoon-harness"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b7/32/cba7a88406ae139aec47240bd6c090e655afb9d267dd88e39c293af76d51/platoon_harness-0.1.0.tar.gz", hash = "sha256:90ff29b23ea9715fda7186fe953b81ed74ea060f903a870b6a9f5b35204e0cf1", size = 613928, upload-time = "2026-11-12T15:03:56.553Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/8c/6dd21af6df5453be1aa054f9fe477c2ed1c5e504b04bb55b40db62e5f676/platoon_harness-0.1.0-py3-none-any.whl", hash = "sha256:aeda4b4a88025c197a2dbb65b8f1a0686801b75a48defd2e21037df4a61b61fa", size = 711824, upload-time = "2026-11-12T15:03:54.886Z" },
 ]
 
 [[package]]

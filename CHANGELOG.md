@@ -8,6 +8,14 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
 
 ### New features
 
+- **Train a team of agents that platoon-harness runs** (experimental). The harness and episode program
+  `platoon-harness` run a team of agents, such as pi and OpenHands agents that message each other and spawn agents of
+  their own, as one platoon episode: each agent calls the policy on a platoon agent of its own, so each agent's calls
+  train on a trajectory of its own. An entry names both, with its team file (or a trusted `module:attr`) in
+  `harness_options.team`. A role may train on a producer's rows, such as platoon-harness's `propagate`, each span of an
+  agent on its own row (`harness_options.rewards`, with `credit: keyed`), and the program refuses at load what the
+  entry and its team decide. Install the new `platoon-harness` extra (`platoon-harness>=0.1,<0.2`); without it, both
+  stay listed, and naming them fails with the install command ([Train a team of agents](docs/how-to/teams.md)).
 - **A program can refuse an entry when the config loads.** `@pt.program(name, check=fn)` runs `fn(options, ctx)` for
   each entry that names the program and each phase the command runs, and a `ValueError` it raises is a configuration
   error that names the entry and the phase (`environments.0.program (train): ...`): `platoon train`, `eval`, `rollout`
@@ -54,7 +62,8 @@ release, require a range such as `platoon[tinker,ors]>=0.5,<0.6`.
   `name`, `tool_call_id`, `outcome`, `output` and `ref`) or `inputs` (what its harness said the agent took in before
   the call, each with its `ref`, `from` and `text`) is labelled, in the default `auto` mode, by its tools with their
   counts, each that ended other than `completed` and how many inputs it holds, and its details show each result
-  beside the arguments of its tool call, and each input. A step with OpenHands events renders as before
+  beside the arguments of its tool call, and each input. A step with OpenHands events renders as before, and the
+  `platoon-harness` harness fills both fields from its sessions' records
   ([Trajectory visualization](platoon/visualization/README.md#tool-use-rendering)).
 
 ### Fixes

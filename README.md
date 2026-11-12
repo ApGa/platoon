@@ -51,6 +51,7 @@ pip install 'platoon[tinker,ors]'     # or uv pip install, or uv add in a uv pro
 | `tinker` | the Tinker SDK and tinker-cookbook | training and evaluation |
 | `ors` | the `openreward` SDK | ORS environments, including the examples |
 | `hpc` | `hpc-sandbox` | Singularity/Apptainer and enroot task sandboxes, for Harbor datasets on clusters |
+| `platoon-harness` | the `platoon-harness` SDK | running and training a team of agents through platoon-harness ([how](docs/how-to/teams.md)) |
 
 The quickstart below, the tutorials and the example environments are in the repository. To run them, clone it
 and install from its lock file with uv:
@@ -324,7 +325,7 @@ without local files), the commit and pull request conventions, and how to add an
 renderer or an example. In short, set up a development environment and run the checks that CI runs:
 
 ```bash
-uv sync --dev --extra tinker --extra ors
+uv sync --dev --extra tinker --extra ors --extra platoon-harness
 uv run pre-commit install         # lint each commit and check its message
 uv run pytest tests
 uvx pre-commit run --all-files    # ruff and ruff format, as CI runs them

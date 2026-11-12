@@ -15,11 +15,14 @@ import platoon.eval.run
 import platoon.train.trainer.rl
 import platoon.train.launch
 import platoon.train.workers.entrypoint
+from platoon.harness.registry import available_harnesses
+from platoon.programs import available_programs
 
+assert "platoon-harness@1" in available_harnesses() and "platoon-harness@1" in available_programs()
 leaked = sorted(
     name
     for name in sys.modules
-    if name.split(".")[0] in {"areal", "openhands"}
+    if name.split(".")[0] in {"areal", "openhands", "platoon_harness"}
     or name.startswith(("platoon.openhands", "platoon.openreward"))
 )
 print(leaked)

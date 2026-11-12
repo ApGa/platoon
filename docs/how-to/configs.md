@@ -304,12 +304,12 @@ Two files go there, replacing any older copies:
   ...
   ```
 
-- `lock.json`: what the code was. `versions` (platoon, tinker, tinker_cookbook, openreward, hpc_sandbox) and
-  `commits`, the git commit of each of those installed from a git URL (the commits of hpc-sandbox between two
-  releases share a version, so only the commit tells them apart); `platoon_git_sha` and `platoon_git_dirty` (when
-  platoon runs from a git checkout), `python`, `hostname`, `started_at` and `argv`; `deprecations`, each deprecated
-  key the config sets (`path`, `replacement` and `removed_in`, the release that removes it); `image_pulls`, when
-  `PLATOON_IMAGE_PULLS` names the file of lines `python -m hpc_sandbox pull` printed in the job, each image's
+- `lock.json`: what the code was. `versions` (platoon, tinker, tinker_cookbook, openreward, hpc_sandbox,
+  platoon_harness) and `commits`, the git commit of each of those installed from a git URL (the commits of hpc-sandbox
+  between two releases share a version, so only the commit tells them apart); `platoon_git_sha` and `platoon_git_dirty`
+  (when platoon runs from a git checkout), `python`, `hostname`, `started_at` and `argv`; `deprecations`, each
+  deprecated key the config sets (`path`, `replacement` and `removed_in`, the release that removes it); `image_pulls`,
+  when `PLATOON_IMAGE_PULLS` names the file of lines `python -m hpc_sandbox pull` printed in the job, each image's
   `reference`, `path`, `sha256` and `manifest_digest`
   ([Choose a container runtime](clusters.md#5-choose-a-container-runtime-for-sandboxes));
   `components`, each component the config names (named environment, harnesses, program, reward processor, service
