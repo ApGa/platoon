@@ -80,9 +80,12 @@ pruner deletes them as it does any older checkpoint.
 ## Where the worker trains
 
 `train.yaml` gives the worker no `tinker_base_url`, so it trains on the run's service, beside `main`, in a Tinker
-session of its own. Hosted Tinker trains both adapters there. `train-worker-service.yaml` gives the worker a service of
-its own, for a backend that serves one model or one adapter per service, such as a self-hosted service started for
-each policy on its own nodes:
+session of its own. Hosted Tinker trains both adapters there. Before you train both on a service, check that it keeps
+two adapters of one base model apart: `platoon.testing.check_shared_service(url, base_model=...)` opens two there,
+trains, samples, saves and reopens them, and ends one's session ([Check a shared Tinker
+service](../../docs/how-to/test-extensions.md#check-a-shared-tinker-service)). `train-worker-service.yaml` gives the
+worker a service of its own, such as a self-hosted service started for each policy on its own nodes, for a backend
+that serves one model or one adapter per service, or one that fails that check:
 
 ```yaml
 policies:

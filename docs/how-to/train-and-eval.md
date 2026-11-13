@@ -1003,6 +1003,13 @@ policy on its own clock](#step-each-policy-on-its-own-clock-experimental)):
   save, fails the step, as it does for one policy, with a note that names the policy and its service (`policy worker,
   on http://<host>:<port>: optim_step failed`), in the step's own updates, a step hook's and a trainer's own
   (`run.learner`) alike; supervision restarts the start, which resumes every policy from the last checkpoint.
+- **Two adapters on one service.** A trained policy without `tinker_base_url` trains on the run's service, beside
+  `main`, in a Tinker session of its own, and two trained policies of one `model_name` on one service are two LoRA
+  adapters of it. The run is only as sound as the service keeps them apart: each with its own Adam state and steps,
+  samplers that serve its own weights, a model that outlives the other's session, and a save that reopens with its
+  optimizer while the other trains (RFC 0021's U1 to U4). Check a service with
+  [`platoon.testing.check_shared_service`](test-extensions.md#check-a-shared-tinker-service) before you train two
+  adapters on it, and give each policy a service of its own (`tinker_base_url`) where it fails.
 
 **Checkpoints.** Each checkpoint saves every trained policy. The policies other than `main` save first, at the same
 time, each on its own service into `<run>/policies/<id>/checkpoints.jsonl`; then `main` saves into the run's
@@ -1476,7 +1483,8 @@ renders prompts, runs rollouts, builds training data and calls the service.
   starts no rollout after it.
 - **What platoon asks for:** a LoRA training client of `train.model_name` with rank `train.lora_rank` (or one
   restored from a checkpoint, below), `forward_backward` with `train.loss_fn`, `optim_step` with the Adam settings,
-  and sampling clients for the current weights.
+  and sampling clients for the current weights. Two trained policies of one base model on one service also need it to
+  keep their adapters apart, which [`check_shared_service`](test-extensions.md#check-a-shared-tinker-service) checks.
 - **SDK version:** the `tinker` extra pins the Tinker SDK; [RFC 0006](../rfcs/0006-backend-profiles-and-sdk-upgrade.md)
   proposes backend profiles and the SDK upgrade.
 

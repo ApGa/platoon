@@ -681,6 +681,7 @@ platoon.testing.TOY_RENDERER_NAME: constant str = "qwen3_instruct"
 platoon.testing.TOY_TOKENIZER_DIR: constant Path
 platoon.testing.check_credit_estimator: def check_credit_estimator(estimator: type | str, *, options: Mapping[str, Any] | None = None) -> None
 platoon.testing.check_group_admission: def check_group_admission(rule: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('run', 'entry'), budget_ms: float | None = 2.0) -> None
+platoon.testing.check_shared_service: def check_shared_service(url: str | None, *, base_model: str, rank: int = 32, learning_rate: float = 0.0001, tolerance: float = 0.02) -> None
 platoon.testing.check_task_sampler: def check_task_sampler(sampler: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('entry', 'run'), budget_ms: float | None = 20.0) -> None
 platoon.testing.check_trainer: def check_trainer(trainer: type[Trainer], *, options: Any = None, options_for_steps: Callable[[int], Any] | None = None) -> None
 platoon.testing.fake_tinker_service: def fake_tinker_service(*, stop_at: int | None = None) -> Generator[FakePolicyService]
