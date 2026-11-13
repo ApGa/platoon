@@ -295,6 +295,11 @@ platoon.experimental.GroupTotals.reported_groups: field int
 platoon.experimental.GroupTotals.reward_sum: field float
 platoon.experimental.GroupTotals.uniform_mixed_groups: field int
 platoon.experimental.MAIN: constant str = "main"
+platoon.experimental.MaterializedTask: @dataclass(frozen=True) class MaterializedTask
+platoon.experimental.MaterializedTask.digest: field str | None
+platoon.experimental.MaterializedTask.ok: property bool
+platoon.experimental.MaterializedTask.problems: field tuple[str, ...] = ()
+platoon.experimental.MaterializedTask.task: field Task | None
 platoon.experimental.MemberResult: @dataclass(frozen=True) class MemberResult
 platoon.experimental.MemberResult.disposition: field str
 platoon.experimental.MemberResult.flag: field bool = False
@@ -382,6 +387,15 @@ platoon.experimental.RolloutOutput.report: property platoon.train.workflow.proto
 platoon.experimental.RolloutOutput.rows: def rows() -> Mapping[str, Sequence['tinker.Datum']]
 platoon.experimental.RolloutWorkflow: class RolloutWorkflow(Protocol)
 platoon.experimental.RolloutWorkflow.arun_episode: async def arun_episode(data: dict) -> RolloutOutput | Sequence[tinker.Datum] | None
+platoon.experimental.RuntimeTasksConfig: @dataclass(frozen=True) class RuntimeTasksConfig
+platoon.experimental.RuntimeTasksConfig.coerce: classmethod def coerce(value: RuntimeTasksConfig | Mapping[str, Any]) -> RuntimeTasksConfig
+platoon.experimental.RuntimeTasksConfig.images: field Mapping[str, str]
+platoon.experimental.RuntimeTasksConfig.max_bytes: field int = 268435456
+platoon.experimental.RuntimeTasksConfig.store: field str | None = None
+platoon.experimental.RuntimeTasksConfig.store_path: def store_path() -> Path
+platoon.experimental.RuntimeTasksConfig.template: field Mapping[str, Any]
+platoon.experimental.RuntimeTasksConfig.verifier_provider_options: field Mapping[str, Any] = <factory dict>
+platoon.experimental.RuntimeTasksConfig.verifier_user: field Literal['refuse', 'ignore', 'honor'] = "honor"
 platoon.experimental.Sampler: class Sampler
 platoon.experimental.Sampler.__init__: def __init__(setup: SamplerSetup, options: Any = None) -> None
 platoon.experimental.Sampler.adaptive: constant bool = False
@@ -681,6 +695,7 @@ platoon.testing.TOY_RENDERER_NAME: constant str = "qwen3_instruct"
 platoon.testing.TOY_TOKENIZER_DIR: constant Path
 platoon.testing.check_credit_estimator: def check_credit_estimator(estimator: type | str, *, options: Mapping[str, Any] | None = None) -> None
 platoon.testing.check_group_admission: def check_group_admission(rule: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('run', 'entry'), budget_ms: float | None = 2.0) -> None
+platoon.testing.check_runtime_tasks: def check_runtime_tasks(service: Any, *, grade: bool = True) -> None
 platoon.testing.check_task_sampler: def check_task_sampler(sampler: type | str, *, options: Mapping[str, Any] | None = None, levels: Sequence[Literal['run', 'entry']] = ('entry', 'run'), budget_ms: float | None = 20.0) -> None
 platoon.testing.check_trainer: def check_trainer(trainer: type[Trainer], *, options: Any = None, options_for_steps: Callable[[int], Any] | None = None) -> None
 platoon.testing.fake_tinker_service: def fake_tinker_service(*, stop_at: int | None = None) -> Generator[FakePolicyService]

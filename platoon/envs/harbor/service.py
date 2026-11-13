@@ -59,6 +59,21 @@ from platoon.envs.harbor.node_services import (
     declared_node_services,
     open_scope,
 )
+from platoon.envs.harbor.runtime import (
+    DEFAULT_REPLAY_ADDRESS_SPACE_BYTES,
+    GRADER_OWNERS,
+    RUNTIME_MISC_KEY,
+    MaterializedTask,
+    RuntimeTasksConfig,
+    config_fingerprint,
+    in_store,
+    launch_settings,
+    launcher_digest,
+    materialize_task,
+    runtime_image,
+    runtime_task,
+    stored,
+)
 from platoon.envs.harbor.session import (
     DEFAULT_CLOSE_TIMEOUT_S,
     LOG_DIRS,
@@ -177,6 +192,17 @@ class HarborEnvironmentService:
     computed when the tasks are listed; the trainer logs the hold-out's report once.  ``holdout`` replaces
     ``splits``.
 
+    With ``runtime_tasks`` (:class:`~platoon.envs.harbor.runtime.RuntimeTasksConfig`), the service also takes in task
+    directories written while the run runs, such as an environment generator's: :meth:`materialize` checks one against
+    ``runtime_tasks`` and refuses it, never rewriting it, or keeps it in their store under its digest with platoon's
+    launcher (:mod:`platoon.envs.harbor.runtime`, :mod:`platoon.envs.harbor.launcher`).  The sessions of such a task
+    run the image ``runtime_tasks.images`` binds its ``docker_image`` to, with its ``environment/`` uploaded into the
+    working directory, and grade it in a separate verifier that starts with ``runtime_tasks.verifier_provider_options``
+    laid over ``verifier_provider_options``; its ``[verifier].user`` gets ``runtime_tasks.verifier_user``, and its
+    grade is the launcher's report.  A runtime task that another store holds, that holds another platoon's launcher
+    (one stored before an upgrade), or that was checked against other ``runtime_tasks``, is refused, with or without
+    ``runtime_tasks``, never served as an ordinary task.  The service's other tasks are served as before.
+
     Grading reads the verifier's reward files under the ``reward`` contract (:mod:`platoon.envs.harbor.grading`;
     default: the ``reward`` key trains), after the opt-in ``verifier_classifiers``.  A task with a separate
     verifier is graded in a sandbox of its own (:mod:`platoon.envs.harbor.session`), from artifacts of at most
@@ -240,6 +266,8 @@ class HarborEnvironmentService:
         "overlays": PathOption(),
         "mounts[].source": PathOption(),
         "node_services.*.binds[].source": PathOption(),
+        "runtime_tasks.template": PathOption(),
+        "runtime_tasks.store": PathOption(written=True),
     }
 
     def __init__(
@@ -282,6 +310,7 @@ class HarborEnvironmentService:
         network_policy: str = "task",
         on_sidecar_down: str = "invalid",
         node_services: Mapping[str, Any] | None = None,
+        runtime_tasks: RuntimeTasksConfig | Mapping[str, Any] | None = None,
     ) -> None:
         concurrent = frozenset([concurrent_tools] if isinstance(concurrent_tools, str) else concurrent_tools)
         if unknown := sorted(concurrent - {spec.name for spec in TOOL_SPECS}):
@@ -367,6 +396,17 @@ class HarborEnvironmentService:
         self._verifier_options = (
             None if verifier_provider_options is None else {**self._provider_options, **verifier_provider_options}
         )
+        # How tasks written while the run runs are taken in and run (platoon.envs.harbor.runtime); None: they are not.
+        self.runtime_tasks = RuntimeTasksConfig.coerce(runtime_tasks) if runtime_tasks is not None else None
+        if (
+            self.runtime_tasks is not None
+            and self.runtime_tasks.verifier_provider_options
+            and not isinstance(provider, str)
+        ):
+            raise ValueError(
+                "runtime_tasks.verifier_provider_options need a provider named by its name (singularity, docker, "
+                "module:Class): a provider object starts every sandbox with its own options"
+            )
         self._locked: LockedTasks | None = None
         self._warned_of_fetch = False
         self._warned_of_copies = False
@@ -431,6 +471,158 @@ class HarborEnvironmentService:
 
         verifier = self._provider_options if self._verifier_options is None else self._verifier_options
         return {"agents": self._provider_options, "verifier": verifier}
+
+    @property
+    def runtime_store(self) -> Path | None:
+        """Where the service keeps its runtime tasks, each in ``<store>/<digest>`` (``runtime_tasks.store`` as an
+        absolute path, :meth:`~platoon.envs.harbor.runtime.RuntimeTasksConfig.store_path`); None without
+        ``runtime_tasks``."""
+
+        return self.runtime_tasks.store_path() if self.runtime_tasks is not None else None
+
+    def is_runtime_task(self, harbor_task: HarborTask) -> bool:
+        """Whether ``harbor_task`` is one of the service's runtime tasks (:meth:`runtime_settings`)."""
+
+        return self.runtime_settings(harbor_task) is not None
+
+    def runtime_settings(self, harbor_task: HarborTask) -> dict[str, Any] | None:
+        """The launcher's settings of ``harbor_task`` when it is one of the service's runtime tasks, a directory that
+        ``materialize`` made (it loads only from the service's store, checked against its ``runtime_tasks``:
+        :meth:`_load`), read from the host's copy of the task: who wrote its grader, the name of its reward.  None for
+        the service's other tasks."""
+
+        return launch_settings(harbor_task.task_dir) if self.runtime_tasks is not None else None
+
+    @cached_property
+    def _runtime_fingerprint(self) -> str | None:
+        """The fingerprint of ``runtime_tasks``, the reward's name and the verifier's time multiplier, which
+        ``materialize`` writes into each runtime task's settings
+        (:func:`~platoon.envs.harbor.runtime.config_fingerprint`); None without ``runtime_tasks``."""
+
+        if self.runtime_tasks is None:
+            return None
+        return config_fingerprint(
+            self.runtime_tasks, reward_key=self.reward.names[0], timeout_multiplier=self.verifier_timeout_multiplier
+        )
+
+    def _runtime_of(self, task_dir: str | Path) -> bool:
+        """Whether ``task_dir`` is one of the service's runtime tasks: a directory of its store whose launcher settings
+        carry the digest of this platoon's launcher (:func:`~platoon.envs.harbor.runtime.launcher_digest`) and the
+        fingerprint of its ``runtime_tasks``.  A ``ValueError`` for a runtime task's directory that is not (another
+        store's, one that holds another platoon's launcher, as one stored before an upgrade does, one checked against
+        other ``runtime_tasks``, or any where the service takes no runtime tasks), which never runs as an ordinary
+        task."""
+
+        settings = launch_settings(task_dir)
+        if settings is None:
+            return False
+        where, store = f"Harbor task directory {task_dir} is a runtime task", self.runtime_store
+        if store is None:
+            raise ValueError(
+                f"{where}, and the Harbor environment {self.name!r} takes none (it sets no service_kwargs."
+                "runtime_tasks): materialize it with the environment that runs it"
+            )
+        if not in_store(task_dir, store):
+            raise ValueError(f"{where} of another store than {store}: materialize it with the environment that runs it")
+        if settings.get("launcher_digest") != launcher_digest():  # it would run the launcher it was given
+            raise ValueError(
+                f"{where} set up with another launcher than this platoon's (another version's, as before an "
+                "upgrade): materialize it again with this platoon, which stores it under a new digest"
+            )
+        if settings.get("fingerprint") != self._runtime_fingerprint:
+            raise ValueError(
+                f"{where} checked against other runtime_tasks than the environment {self.name!r}'s (another entry's, "
+                "or this one's before they changed): materialize it again with the environment that runs it"
+            )
+        return True
+
+    @cached_property
+    def _runtime_phase_options(self) -> dict[str, dict[str, Any]]:
+        """The provider options of runtime tasks' sandboxes: the agents' as the service's, the verifiers' with
+        ``runtime_tasks.verifier_provider_options`` laid over the service's verifiers' (or its agents')."""
+
+        options = self._phase_options
+        extra = self.runtime_tasks.verifier_provider_options if self.runtime_tasks is not None else {}
+        return {"agents": options["agents"], "verifier": {**options["verifier"], **extra}}
+
+    @cached_property
+    def runtime_verifier_provider(self) -> SandboxProvider:
+        """The provider of runtime tasks' verifiers' sandboxes: the agents' provider built with
+        ``runtime_tasks.verifier_provider_options`` laid over the verifiers' options, else :attr:`verifier_provider`
+        where ``runtime_tasks`` names none.  Built on first use."""
+
+        if self.runtime_tasks is None or not self.runtime_tasks.verifier_provider_options:
+            return self.verifier_provider
+        assert isinstance(self._provider, str)  # refused when the service was built
+        return get_provider(self._provider, **self._runtime_phase_options["verifier"])
+
+    def _options_of(self, harbor_task: HarborTask) -> dict[str, dict[str, Any]]:
+        """The provider options of the task's sandboxes, by phase (:attr:`_phase_options`, a runtime task's own)."""
+
+        return self._runtime_phase_options if self.is_runtime_task(harbor_task) else self._phase_options
+
+    def _verifier_provider_of(self, harbor_task: HarborTask) -> SandboxProvider:
+        return self.runtime_verifier_provider if self.is_runtime_task(harbor_task) else self.verifier_provider
+
+    def runtime_refusal(self) -> str | None:
+        """Why the provider, with the service's options, could not run its runtime tasks, which run without a network
+        and grade in a separate verifier, as root where the template names root: it refuses sandboxes without a network,
+        the verifiers' root filesystem layout, or root for them; None when nothing says so, or without
+        ``runtime_tasks``.  :meth:`check_tasks` refuses the service's tasks with it."""
+
+        if self.runtime_tasks is None:
+            return None
+        options = self._runtime_phase_options
+        for phase, sandboxes in (("agents", "agents' sandboxes"), ("verifier", "verifiers' sandboxes")):
+            if refusal := network_none_refusal(self._provider, options[phase]):
+                return f"runtime tasks run without a network, which their {sandboxes} cannot: {refusal}"
+        if refusal := rootfs_layout_refusal(self._provider, options["verifier"]):
+            return f"the {self._provider_name()} provider would start no runtime task's verifier: {refusal}"
+        user = (self.runtime_tasks.template.get("verifier") or {}).get("user")
+        if user is not None and is_root(str(user)) and self.runtime_tasks.verifier_user == "honor":
+            if refusal := root_refusal(self._provider, options["verifier"]):
+                return (
+                    f"runtime tasks' verifiers run as root, and their sandboxes cannot give it: {refusal} (set "
+                    "runtime_tasks.verifier_provider_options)"
+                )
+        return None
+
+    async def materialize(
+        self,
+        source: str | os.PathLike[str],
+        *,
+        grader_owner: str = "generated",
+        replay_address_space_bytes: int | None = DEFAULT_REPLAY_ADDRESS_SPACE_BYTES,
+    ) -> MaterializedTask:
+        """Make the task directory ``source`` one of the service's runtime tasks (:mod:`platoon.envs.harbor.runtime`):
+        checked against ``runtime_tasks``, refused and never rewritten where it breaks them, else given
+        platoon's launcher and kept in the store under its digest, which is its id.  ``grader_owner`` says who wrote
+        its grader, ``generated`` (the producer) or ``trusted`` (trusted code), which names the failure kinds of the
+        grader's non-scores (``verifier_generated_*`` or ``verifier_trusted_*``): the caller's word, never the
+        directory's.  ``replay_address_space_bytes`` caps the address space each of the task's replay processes may
+        reserve (``RLIMIT_AS``; None, the default, sets no per-process cap, the launcher disfavouring the replay for
+        the OOM killer either way).  What is wrong with the directory comes back in
+        :attr:`MaterializedTask.problems`; a ``ValueError`` for a service without ``runtime_tasks``, and an ``OSError``
+        for a store it cannot write.  The copy and the checks run in a thread."""
+
+        config = self.runtime_tasks
+        if config is None:
+            raise ValueError(
+                f"The Harbor environment {self.name!r} takes no runtime tasks: set its service_kwargs.runtime_tasks"
+            )
+        if grader_owner not in GRADER_OWNERS:
+            raise ValueError(f"grader_owner must be one of {GRADER_OWNERS}, got {grader_owner!r}")
+        return await asyncio.to_thread(
+            materialize_task,
+            source,
+            config,
+            store=config.store_path(),
+            load=self._load_runtime,
+            reward_key=self.reward.names[0],
+            timeout_multiplier=self.verifier_timeout_multiplier,
+            grader_owner=grader_owner,
+            replay_address_space_bytes=replay_address_space_bytes,
+        )
 
     @cached_property
     def dataset(self) -> HarborDataset:
@@ -507,6 +699,8 @@ class HarborEnvironmentService:
         whose sidecars run registry images it has not pinned (:meth:`_check_pins`), or whose sandboxes honor users and
         lack their images' file owners (:meth:`_check_owners`)."""
 
+        if (refusal := self.runtime_refusal()) is not None:
+            raise EnvSetupError("env_config", refusal)
         if task_ids and (refusal := rootfs_layout_refusal(self._provider, self._provider_options)):
             raise EnvSetupError("env_config", f"the {self._provider_name()} provider would start no sandbox: {refusal}")
         if task_ids and self._verifier_options is not None:
@@ -851,10 +1045,12 @@ class HarborEnvironmentService:
                 "(exclude_tasks)",
             )
 
-    def _network_refusals(self) -> dict[str, str | None]:
-        """Why the agents' sandboxes, and separate verifiers', would be refused without a network (by phase)."""
+    def _network_refusals(self, harbor_task: HarborTask | None = None) -> dict[str, str | None]:
+        """Why the agents' sandboxes, and separate verifiers', would be refused without a network (by phase): those of
+        ``harbor_task`` when given (a runtime task's verifiers have options of their own)."""
 
-        return {phase: network_none_refusal(self._provider, options) for phase, options in self._phase_options.items()}
+        options = self._phase_options if harbor_task is None else self._options_of(harbor_task)
+        return {phase: network_none_refusal(self._provider, option) for phase, option in options.items()}
 
     def _check_users(self, names: Sequence[str], split: str) -> None:
         """With ``agent_user`` or ``verifier_user`` set to ``honor``, refuse the tasks that could not run as their
@@ -1105,6 +1301,8 @@ class HarborEnvironmentService:
         """The task, read without checking a locked task's cache entry against its digest, which a session's
         opening does (hashing its files): what checks on the trainer read."""
 
+        if (task_dir := self._stored(task_id)) is not None:
+            return self._load(task_dir)
         if self._locked is not None:
             dataset = self._locked.dataset(fetch_allowed=False)
             row = dataset.row(task_id)
@@ -1174,6 +1372,11 @@ class HarborEnvironmentService:
         return {"task_dirs": [str(Path(task_dir).resolve()) for task_dir in self._task_dirs or ()]}
 
     async def get_task(self, task_id: str) -> Task:
+        if (task_dir := self._stored(task_id)) is not None:  # a runtime task, by its digest
+            try:
+                return runtime_task(self._load(task_dir), task_id)
+            except ValueError as exc:
+                raise EnvSetupError("env_config", str(exc)) from exc
         if self._locked is None:
             return self._lookup(task_id).to_task(task_id)
         try:  # a task the lock does not list, refuses, or whose cache entry does not match: a config error
@@ -1248,6 +1451,12 @@ class HarborEnvironmentService:
 
         misc = task.misc.get(HARBOR_MISC_KEY, {})
         if misc.get("task_dir") is not None:
+            if misc.get(RUNTIME_MISC_KEY) and launch_settings(misc["task_dir"]) is None:
+                raise ValueError(
+                    f"Harbor task {misc.get('name')!r} is marked a runtime task, and {misc['task_dir']} holds none: "
+                    "materialize it with the environment that runs it"
+                )
+            # _load refuses a runtime task of another store or runtime_tasks, and loads the service's own as one.
             row = self._locked.row_for(misc["task_dir"]) if self._locked is not None else None
             compose = row.compose if row is not None else _PLANNED_HERE
             return self._load(misc["task_dir"], index=misc.get("index"), compose=compose)
@@ -1265,7 +1474,8 @@ class HarborEnvironmentService:
     async def open(self, task: Task, *, rollout_id: str, needs: SessionNeeds | None = None) -> HarborSession:
         try:
             harbor_task = self.harbor_task(task)
-            cannot = {phase: root_refusal(self._provider, options) for phase, options in self._phase_options.items()}
+            options = self._options_of(harbor_task)
+            cannot = {phase: root_refusal(self._provider, phase_options) for phase, phase_options in options.items()}
             if (refusal := _users_refusal(harbor_task, cannot)) is not None:  # refused now, not after the agent ran
                 raise EnvSetupError("env_config", f"Harbor task {harbor_task.name!r}: {refusal}")
             spec = self._sandbox_spec(harbor_task, rollout_id)
@@ -1273,7 +1483,9 @@ class HarborEnvironmentService:
                 self._sandbox_spec(harbor_task, rollout_id, verifier=True)  # refused now, not after the agent ran
         except (KeyError, ValueError) as exc:  # a bad task directory (HarborTaskError), unknown id or unset variable
             raise EnvSetupError("env_config", str(exc)) from exc
-        if (refusal := _network_refusal(harbor_task, self._network_refusals(), self.network_policy)) is not None:
+        if (
+            refusal := _network_refusal(harbor_task, self._network_refusals(harbor_task), self.network_policy)
+        ) is not None:
             policy = " (the environment's network_policy: none)" if self.network_policy == "none" else ""
             raise EnvSetupError(
                 "env_config", f"Harbor task {harbor_task.name!r} runs without a network{policy}, and {refusal}"
@@ -1513,7 +1725,7 @@ class HarborEnvironmentService:
         stopped again and an ``EnvSetupError`` says why."""
 
         try:
-            sandbox = await (self.verifier_provider if verifier else self.provider).start(
+            sandbox = await (self._verifier_provider_of(harbor_task) if verifier else self.provider).start(
                 self._start_spec(spec, harbor_task, verifier=verifier)
             )
         except Exception as exc:
@@ -1531,8 +1743,12 @@ class HarborEnvironmentService:
         self, task_dir: str | Path, *, index: Mapping[str, Any] | None = None, compose: Any = _PLANNED_HERE
     ) -> HarborTask:
         """A task directory, read with the service's ``agent_user`` and ``verifier_user`` policies; ``compose`` is
-        its stack plan from the lock (a fetched dataset's task), else it is planned from its files."""
+        its stack plan from the lock (a fetched dataset's task), else it is planned from its files.  A runtime task's
+        directory is read as one (:meth:`_load_runtime`) where it is the service's, and refused where it is not
+        (:meth:`_runtime_of`)."""
 
+        if self._runtime_of(task_dir):
+            return self._load_runtime(task_dir)
         return HarborTask.load(
             task_dir,
             agent_user=self.agent_user,
@@ -1544,7 +1760,29 @@ class HarborEnvironmentService:
             on_host_network=self.stacks == "host_network",
         )
 
+    def _load_runtime(self, task_dir: str | Path) -> HarborTask:
+        """A runtime task's directory, read as the service reads its others, but with ``runtime_tasks.verifier_user``
+        for its ``[verifier].user``; the copy ``materialize`` checks, and a task :meth:`_load` found the service's."""
+
+        assert self.runtime_tasks is not None
+        return HarborTask.load(
+            task_dir,
+            agent_user=self.agent_user,
+            verifier_user=self.runtime_tasks.verifier_user,
+            stack_refusal=self.stacks_refusal(),
+            privilege_refusal=privilege_refusal(self._provider),
+            on_host_network=self.stacks == "host_network",
+        )
+
+    def _stored(self, task_id: str) -> Path | None:
+        """The directory of the runtime task whose id (its digest) is ``task_id``, or None."""
+
+        store = self.runtime_store
+        return stored(task_id, store) if store is not None else None
+
     def _lookup(self, task_id: str) -> HarborTask:
+        if (task_dir := self._stored(task_id)) is not None:
+            return self._load(task_dir)
         if self._locked is not None:  # workers read the lock: no fetch, no scan
             return self._load(
                 self._locked.task_dir(task_id), index=self._locked.index(task_id), compose=self._locked.compose(task_id)
@@ -1574,6 +1812,9 @@ class HarborEnvironmentService:
         (``honoring``, by default whether the agents' sandbox does) on a provider that loses the files' owners, a
         ``docker_image`` runs its pulled entry: the image its registry served, pinned, with its ``USER`` and owners."""
 
+        if self.is_runtime_task(harbor_task):  # the image runtime_tasks binds it to, with its environment/ to upload
+            assert self.runtime_tasks is not None
+            return runtime_image(harbor_task, self.runtime_tasks)
         if honoring is None:
             honoring = harbor_task.honors_users_in("agents")
         return self._images.for_task(
@@ -1617,7 +1858,9 @@ class HarborEnvironmentService:
         if verifier and environment is None:
             raise ValueError(f"Harbor task {harbor_task.name!r} has no separate verifier")
         gpus = environment.gpus if environment is not None else harbor_task.gpus
-        if gpus > 0 and "gpu" not in (provider := self.verifier_provider if verifier else self.provider).capabilities:
+        # The provider is built only to ask it, as the GPUs are asked for.
+        provider = (self._verifier_provider_of(harbor_task) if verifier else self.provider) if gpus > 0 else None
+        if provider is not None and "gpu" not in provider.capabilities:
             role = "its verifier needs" if verifier else "it needs"
             raise ValueError(
                 f"Harbor task {harbor_task.name!r} is refused: {role} {gpus} GPU(s), and the {provider.name!r} "
@@ -1691,7 +1934,7 @@ class HarborEnvironmentService:
         if not _needs_record(harbor_task, built, verifier=verifier):
             # Only root runs there, which needs no owners, as root verifiers ran before images had manifests: apply one
             # where the provider can.
-            options = self._phase_options["verifier" if verifier else "agents"]
+            options = self._options_of(harbor_task)["verifier" if verifier else "agents"]
             usable = manifest is not None and file_owners_refusal(self._provider, options) is None
             return manifest if usable and os.path.exists(manifest) and os.path.getsize(manifest) > 0 else None
         where = f"Harbor task {harbor_task.name!r} honors users on the {self._provider_name()} provider, which loses "
@@ -1730,7 +1973,7 @@ class HarborEnvironmentService:
                 return None
         except OSError as exc:
             raise EnvNotPrepared(f"{where}, and its image's owner manifest cannot be read: {exc}") from exc
-        options = self._phase_options["verifier" if verifier else "agents"]
+        options = self._options_of(harbor_task)["verifier" if verifier else "agents"]
         if (refusal := file_owners_refusal(self._provider, options)) is not None:
             raise ValueError(f"{where}, and its image gives files to users other than root: {refusal}")
         return manifest

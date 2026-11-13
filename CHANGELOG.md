@@ -135,6 +135,81 @@ pip install -U 'platoon[tinker,ors,platoon-harness]>=0.6,<0.7'
   installed, which pip does not flag and platoon 0.6 refuses: upgrade the two together, as above
   ([The TextCraft extension](docs/getting-started/install.md#the-textcraft-extension)).
 
+## Unreleased
+
+### New features
+
+- **Runtime Harbor tasks** (experimental, RFC 0022). A Harbor environment takes in task directories written while a
+  run runs, such as an environment generator's, when its `service_kwargs` set `runtime_tasks: {images, template,
+  verifier_user, verifier_provider_options, max_bytes, store}` (`platoon.experimental.RuntimeTasksConfig`).
+  `HarborEnvironmentService.materialize(source, grader_owner=...)` refuses a directory that breaks them, and never
+  rewrites one, saying why in `MaterializedTask.problems`: links and special files, files beyond `max_bytes`, a
+  `task.toml` that differs from the template but for its `[task] name` and `artifacts` (a template gives no network
+  and grades in a separate verifier on one of `images`), an artifact that is no path below the working directory, a
+  Dockerfile or compose file, and anything in `tests/` but `gen/`, the task's grader, which `tests/gen/grader.json`
+  describes. Otherwise it installs platoon's launcher as `tests/test.sh` and keeps the task in the store under its
+  digest, which is its id; an environment runs a runtime task only from its own store, only if it holds this platoon's
+  launcher and only if the task was checked against its own `runtime_tasks`, and refuses any other, never running one
+  as an ordinary task. A runtime task's
+  sessions run the image `images` binds its `docker_image` to with its `environment/` uploaded, and its verifier starts
+  with `runtime_tasks.verifier_provider_options` laid over the entry's; there the launcher seals `/tests`,
+  `/logs/verifier` and what the agents published, and fails closed when a seal does not take; checks the artifacts
+  against an output contract; makes the working directory root's with the group and other write bits stripped so
+  nothing there is the replay's user's to write (files and directories, at any depth); replays the submission as a
+  user of its own, never root, with a thin environment (its `PATH` cut to absolute entries alone, so nothing in the
+  replay's directory stands in for a program) and limits on its files, processes, open files and, where
+  `materialize(..., replay_address_space_bytes=N)` gives one, address space, the replay disfavoured for the OOM killer
+  so memory it runs the sandbox out of ends the replay; and kills what the replay left (one of the replay user's
+  processes it cannot signal is a survivor, the solver's 0, never excluded as foreign), removes what that user left
+  where every user may write (`/tmp`, `/var/tmp`, `/dev/shm`, `/run/lock` and `/dev/mqueue`), and puts the working
+  directory back as it was, with the replayed outputs, before the grader runs. It then runs the grader, kills what
+  it left and writes the only reward file, with a report that is the task's whole grade (the entry's classifiers and
+  reward check apply to its curated tasks only). A broken contract, a replay that leaves more than the launcher removes
+  in its time, and disk, inode or memory exhaustion a replay causes score 0, the solver's fault (reason
+  `solver_output_contract` or `solver_nonreproducible`), never a launcher fault that would censor the measurement; and
+  from the moment the launcher starts, every non-score of a generated grader is a `verifier_generated_*` kind (`_exit`,
+  `_timeout`, `_protocol` for a verdict beyond `{passed, checks}`, `invalid` included, `_isolation`, and `_unfinished`
+  for a launcher that did not finish), but `verifier_trusted_launcher`, which the launcher writes only before the grader
+  runs; a trusted grader (`grader_owner="trusted"`) gets `verifier_trusted_*`. The environment's curated tasks are
+  fetched, listed, opened and graded as before ([Runtime tasks](docs/how-to/sandboxes-and-harbor.md#runtime-tasks)).
+  - JSON nested more than 256 levels deep is refused before it is parsed, as text that is not JSON is, the same way on
+    every Python: an artifact or replayed output that deep breaks the output contract, such a verdict is the grader's
+    `_protocol` fault, and `materialize` refuses such a `tests/gen/grader.json`.
+  - A `task.toml` that nests tables and arrays more than 64 levels deep, its own table included, is refused, before it
+    is parsed where its text shows that, the same way on every Python; so is a template that deep, when the service is
+    built.
+  - A replay runs in place, in the working directory at its own path, so a submission that names its files by their
+    absolute paths (`/app/answer.json`), as a solver that ran there may, reproduces its outputs; before, it ran in a
+    copy of the working directory elsewhere, where such a submission could not write. The launcher first copies the
+    working directory, without the outputs, into a pristine copy only root reads, which keeps its directories, files
+    (with their holes), links and FIFOs, a file of several names as one file, and their modes and modification times;
+    then lends it to the replay's user (its directories and files, that user's to read and write, a file with other
+    names first replaced with a copy of its own, while the directory itself stays root's); and once the replay is over
+    puts it back from that copy, root's again with the group and other write bits stripped, with the replayed outputs
+    in their places: whatever the replay changed, added or removed there, the grader finds the working directory as it
+    was (but for the extended attributes and ACLs of what it holds, which the copy does not keep), and the outputs the
+    replay wrote. The replay's home and temporary directory are a directory of its own, removed after it, and its time
+    leaves twice as long as the copy took for putting the directory back; the System V shared memory, semaphores and
+    message queues it leaves are removed too, and one that cannot be removed is the solver's 0. A working directory
+    below a directory in which the replay's user could replace it, by mode bits or ACL (the parent and each directory
+    above it: none may be that user's, or writable by it without the sticky bit), one that holds the launcher's own
+    directory, and one with anything mounted below it or a socket or a device in it are faults on the trusted side
+    (`verifier_trusted_launcher`), found before anything there changes; a full filesystem as the directory is put back
+    is judged as one as the outputs are put back, and with nothing of the replay's left where every user may write,
+    only once the filesystem has written out what it holds and the launcher has tried once more.
+    `check_runtime_tasks` gains two grading cases: a replay that reads and writes its files by their absolute paths,
+    which must score 1, and one that changes its inputs and its code and leaves files beside its output, after which
+    the grader must find the inputs as they were and the replayed output alone.
+  - A stored task runs only with this platoon's launcher. A task keeps the launcher `materialize` gave it, so one that
+    another platoon stored, as before an upgrade, was graded by that platoon's launcher, unnoticed. Its launcher
+    settings now record the digest of the launcher installed (`launcher_digest`), and an environment refuses a task
+    that records another, or none, when it opens (`env_config`): materialize it again with this platoon, which stores
+    it under a new digest.
+- **`platoon.testing.check_runtime_tasks`** takes a red-team suite of sabotaged tasks through an environment's runtime
+  tasks: what `materialize` must refuse, on CPU, and, on the environment's sandboxes, the grade each sabotaged grader,
+  replay or submission must get ([Check an environment's runtime
+  tasks](docs/how-to/test-extensions.md#check-an-environments-runtime-tasks)).
+
 ## 0.5.0 (2026-10-29)
 
 ### New features

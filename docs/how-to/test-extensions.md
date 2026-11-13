@@ -385,6 +385,54 @@ three groups, and a new one that took up its state as JSON, credit the next grou
 `state()` as it was). Call it outside a running event loop. `check_credit_estimator` checks the
 experimental credit API (`platoon.experimental`), and changes with it.
 
+## Check an environment's runtime tasks
+
+A Harbor environment that takes runtime tasks ([Runtime tasks](sandboxes-and-harbor.md#runtime-tasks)) is checked
+against a red-team suite by `check_runtime_tasks`, the generic half of one: tasks with known sabotages, written from
+the environment's own template, which `materialize` must refuse, or whose grades must come out as each case says:
+
+```python
+from platoon.testing import check_runtime_tasks
+
+
+def test_runtime_tasks_refuse_every_sabotage(tmp_path):
+    check_runtime_tasks(
+        {
+            "dataset_dir": "tasks",
+            "provider": "docker",
+            "runtime_tasks": {
+                "images": {"science": "my-org/science:1.0"},
+                "template": "runtime-task.toml",
+                "store": str(tmp_path / "store"),  # what the cases take in stays there
+            },
+        },
+        grade=False,
+    )
+```
+
+It takes a `HarborEnvironmentService` or the `service_kwargs` to build one, and raises one `AssertionError` that names
+every case that failed, with what it saw. The refusal cases need no sandbox: a `task.toml` that differs from the
+template in its network, its GPUs, its image or its verifier's mode, an artifact outside the working directory, an
+`environment/Dockerfile`, a compose file, a `tests/test.sh` of the task's own, a symbolic link, files beyond
+`max_bytes`, and a grader manifest that is missing or no argv are refused; the honest task is taken in, twice into one
+digest. With `grade=True`, the default, each grading case is taken in, opened, solved by its reference solution and
+graded, on the environment's own sandboxes, which must start its template's image (with `python3` and `sh`) and give its
+verifiers root, as a run's would: a right answer scores 1 and a wrong one 0; a missing artifact and a replay that fails
+score 0, the solver's fault; a replay can read neither the grader's files nor the copy of the answer the agents
+published, and cannot write a reward; a replay that names its files by their absolute paths in the working directory
+reproduces its output, and the grader finds the task's inputs and the submission as they were before the replay, with
+the replayed output, however the replay changed them or what it left beside its output; a module of the submission's
+never shadows one the grader imports; a grader that declares its measurement invalid, crashes after a verdict of 0, or
+kills the launcher is a non-score of the generated grader's; and one that writes a reward file of its own, leaves a
+process that keeps writing one, or writes what a verifier classifier would match into the verifier's log gets the
+launcher's score, as a trusted grader that crashes gets its own kind. Run it there before a run that generates tasks,
+and on CPU with `grade=False` in your package's tests. It is the generic half of a red-team suite: a task producer's own
+toolkit holds the domain's half, in the checks it runs on a task before the task is taken in (leaks, planted secrets, a
+module the task's own grader directory shadows), and a program that runs runtime tasks catches graders that score by
+anything but the answer with its controls. The tasks it takes in stay in the environment's store (outside a run, the
+Harbor cache's unless `runtime_tasks` names a `store`). Call it outside a running event loop. `check_runtime_tasks`
+checks the experimental runtime-task API (`platoon.experimental`), and changes with it.
+
 ## Reference
 
 | Name | Signature and behavior |
@@ -409,7 +457,9 @@ experimental credit API (`platoon.experimental`), and changes with it.
 | `fake_tinker_service` | `fake_tinker_service(*, stop_at=None)`: a context manager that yields a `FakePolicyService` in place of the Tinker service, puts back the signal handlers a run installs, and with `stop_at` asks the run to stop in that optimizer step |
 | `FakePolicyService` | The fake service: `calls` (what it was asked, in order), `datums` (each datum sent to forward_backward), `deleted` (the checkpoint paths deleted), `optimizer_steps` |
 | `check_credit_estimator` | `check_credit_estimator(estimator, *, options=None)`: raises `AssertionError` naming each check a credit estimator fails ([Check a credit estimator](#check-a-credit-estimator)) |
+| `check_runtime_tasks` | `check_runtime_tasks(service, *, grade=True)`: raises `AssertionError` naming each red-team case a Harbor environment's runtime tasks fail ([Check an environment's runtime tasks](#check-an-environments-runtime-tasks)) |
 
 The names `platoon.testing` exports are a stable API, but for `check_task_sampler`, `check_group_admission`,
-`check_trainer`, `fake_tinker_service`, `FakePolicyService` and `check_credit_estimator`, which serve the
-experimental sampler, admission, trainer and credit APIs and change with them; its submodules are not.
+`check_trainer`, `fake_tinker_service`, `FakePolicyService`, `check_credit_estimator` and `check_runtime_tasks`, which
+serve the experimental sampler, admission, trainer, credit and runtime-task APIs and change with them; its submodules
+are not.

@@ -45,15 +45,17 @@ import sys
 
 import platoon.experimental
 
-heavy = sorted(name for name in ("tinker", "datasets", "torch") if name in sys.modules)
-print(heavy)
-sys.exit(1 if heavy else 0)
+heavy = ("tinker", "datasets", "torch", "platoon.envs.harbor.service", "platoon.envs.harbor.runtime")
+loaded = sorted(name for name in heavy if name in sys.modules)
+print(loaded)
+sys.exit(1 if loaded else 0)
 """
 
 
 def test_importing_the_experimental_api_stays_cheap():
     """``platoon.experimental`` (the task sampler API and the statistics' types) loads neither tinker nor datasets: a
-    package that registers a sampler imports it in every process that imports the package."""
+    package that registers a sampler imports it in every process that imports the package.  Nor does it load the
+    Harbor service, which its runtime-task names import on first use."""
 
     completed = subprocess.run(
         [sys.executable, "-c", _EXPERIMENTAL_CHECK],

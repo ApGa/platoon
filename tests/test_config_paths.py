@@ -497,6 +497,23 @@ def test_a_run_record_holds_absolute_paths_and_reloads_from_anywhere(tmp_path, m
     assert _kwargs(reloaded)["dataset_dir"] == str(configs / "tasks")
 
 
+def test_a_runtime_task_template_file_resolves_against_its_config_and_an_inline_one_stays(tmp_path, monkeypatch):
+    configs = tmp_path / "configs"
+    _dirs(configs / "tasks")
+    (configs / "runtime-task.toml").write_text("[environment]\n")
+    runtime_tasks = {"images": {}, "template": "runtime-task.toml", "store": "store"}
+    entry = {"service": "harbor", "service_kwargs": {"dataset_dir": "tasks", "runtime_tasks": runtime_tasks}}
+    inline = {"service": "harbor", "service_kwargs": {"dataset_dir": "tasks", "runtime_tasks": {"template": {"a": 1}}}}
+    config = _write(configs / "env.yaml", {"environments": [entry, inline]})
+    monkeypatch.chdir(tmp_path)
+
+    data = load_yaml_config(config)
+
+    assert _kwargs(data)["runtime_tasks"]["template"] == str(configs / "runtime-task.toml")
+    assert _kwargs(data)["runtime_tasks"]["store"] == str(configs / "store")  # need not exist yet
+    assert _kwargs(data, 1)["runtime_tasks"]["template"] == {"a": 1}
+
+
 def test_services_declare_their_path_options():
     harbor = service_path_options("harbor")
     assert set(harbor) == {
@@ -511,9 +528,12 @@ def test_services_declare_their_path_options():
         "overlays",
         "mounts[].source",
         "node_services.*.binds[].source",
+        "runtime_tasks.template",
+        "runtime_tasks.store",
     }
     assert harbor["splits"] == PathOption(relative_to="dataset_dir")
     assert harbor["lock"] == PathOption(written=True)
+    assert harbor["runtime_tasks.store"] == PathOption(written=True)  # a run may make it
     assert service_path_options("table") == {"path": PathOption()}
     assert service_path_options("ors+http:///Env") == {}
     assert service_path_options("python://platoon.envs.number_search.env:NumberSearchEnvironment") == {}

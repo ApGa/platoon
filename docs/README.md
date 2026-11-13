@@ -42,7 +42,8 @@ example under [`examples/`](../examples/), and every example has a CPU test in
 - [Models and tool calling](how-to/models-and-tool-calling.md): which tool-call formats `chat_template` reads, how
   its parser is chosen, and what happens to a call that does not parse.
 - [Sandboxes and Harbor tasks](how-to/sandboxes-and-harbor.md): `process`, Docker, Singularity/Apptainer and
-  enroot sandboxes, and Harbor datasets: fetched by name, held out, prepared once per site.
+  enroot sandboxes, and Harbor datasets: fetched by name, held out, prepared once per site; and, experimental, tasks
+  written while a run runs.
 - [How Harbor tasks are graded](how-to/harbor-grading.md): the steps of a grade, what keeps an agent from forging its
   reward, and which reported reward trains.
 - [Run on a cluster](how-to/clusters.md): PBS and Slurm job patterns.

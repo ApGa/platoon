@@ -61,8 +61,15 @@ And independent stepping (RFC 0021): when a run's trained policies step each on 
 policy, its rows of the group, which a trainer's steps of that policy take from the run's `ShareLedger`
 (`source.ledger`: `take`, judged stale or not at `judge_version`, then `consumed` under its `lock` once the
 step trained them), each step ending with `run.end_step(policy=...)` on the policy's own clock (`run.clocks`).
+And runtime Harbor tasks (RFC 0022): task directories written while a run runs, such as an environment generator's,
+which a Harbor environment entry takes in under its `service_kwargs.runtime_tasks` (`RuntimeTasksConfig`):
+`HarborEnvironmentService.materialize(source)` checks one against them and refuses it, never rewriting it, or keeps
+it in their store under its digest with platoon's launcher, which replays the submission before the task's grader
+grades it (`MaterializedTask`); `platoon.testing.check_runtime_tasks` checks an environment's runtime tasks
+against a suite of sabotaged tasks.  `docs/how-to/sandboxes-and-harbor.md` is the guide.
 
-This module imports neither `tinker` nor `datasets`.
+This module imports neither `tinker` nor `datasets`, and the Harbor service only when a runtime task's name is
+first used.
 
 ```python
 import platoon.experimental
@@ -137,6 +144,8 @@ This page is generated from the docstrings of the names `platoon.experimental` e
 | [`ScoringFailed`](#platoon-experimental-scoringfailed) | A policy's scoring of rows that failed (`PolicyView.score`): its service raised or did not answer within the policy's `sample_timeout_seconds`, or gave a response of the wrong length or no logprob of a target token. An estimator lets it propagate: the group it was crediting then fails (verdict `failed`, counted under `credit/failures`) and trains nothing, and the run goes on. |
 | [`credit_estimator`](#platoon-experimental-credit-estimator) | Register a credit estimator class under `name`, from a module that an environment entry's `package` names, so that configs can name it (`credit: <name>`); `options` sets its `options_schema` and `check` its load-time check. Core's names (`group`, `keyed`, `reverse_kl`, and `gae`, which platoon adds) are reserved, whatever their case and their `-` or `_`; a name registered twice is an error. |
 | [`ShareLedger`](#platoon-experimental-shareledger) | The shares of a run's groups, as a trainer of its own whose policies step independently takes them (`run.rollouts().ledger`; `TrainerNeeds.stepping`): each step of policy `p` takes `p`'s shares (`take`), trains them (a trainer that drops stale ones judges each at `judge_version`), records them consumed under the commit lock (`async with ledger.lock:` `consumed`), then ends with `await run.end_step(policy=p)` on `p`'s own clock (`run.clocks[p]`). The run keeps the rest: which shares a checkpoint holds, which a resume puts back, and when a group retires. |
+| [`MaterializedTask`](#platoon-experimental-materializedtask) | What `materialize` made of a directory: a runtime task, or why there is none. |
+| [`RuntimeTasksConfig`](#platoon-experimental-runtimetasksconfig) | How an environment entry's runtime tasks run: `service_kwargs.runtime_tasks` of a Harbor environment. |
 
 ## Task samplers
 
@@ -2359,6 +2368,73 @@ def done(policy: PolicyId) -> bool
 Whether `policy`'s loop may end: no group runs that may still give it a share, it has none left to take,
 and none will start: the plan is drawn, or a stop request ended another policy's loop, whose full horizon holds
 back every group for good.
+
+## Runtime Harbor tasks
+
+How a Harbor environment entry takes in task directories written while a run runs, and what `materialize` makes of one ([Runtime tasks](../how-to/sandboxes-and-harbor.md#runtime-tasks)).
+
+<a id="platoon-experimental-materializedtask"></a>
+
+### `platoon.experimental.MaterializedTask`
+
+```python
+class MaterializedTask
+```
+
+What `materialize` made of a directory: a runtime task, or why there is none.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `task` | `Task \| None` | required | The runtime task: its goal is its instruction, its id its digest, and misc["harbor"]["task_dir"] its directory in the store, <store>/<digest>. None when the directory was refused. |
+| `digest` | `str \| None` | required | The task's digest, a SHA-256 of all its files: its id and its name in the store. None when it was refused. |
+| `problems` | `tuple[str, ...]` | `()` | Why the directory was refused, each one sentence, for the producer to learn from; empty when it was not. |
+| `ok` | `bool` | | Whether the directory became a runtime task. Read-only. |
+
+<a id="platoon-experimental-runtimetasksconfig"></a>
+
+### `platoon.experimental.RuntimeTasksConfig`
+
+```python
+class RuntimeTasksConfig
+```
+
+How an environment entry's runtime tasks run: `service_kwargs.runtime_tasks` of a Harbor environment.
+
+Built from a mapping of its fields (`coerce`), where `template` may name a TOML file.  The template nests
+tables and arrays at most 64 levels deep (`MAX_TOML_DEPTH`), as a runtime task's `task.toml` must; it must
+give the agents and the verifier no network (`[environment] network_mode = "no-network"`), grade in a separate
+verifier (`[verifier] environment_mode = "separate"`) that runs the task's own image (no
+`[verifier.environment] docker_image`, whose image would bring its own `/tests`), and name one of `images` as
+its `[environment] docker_image`; and it gives neither `[task] name` nor `artifacts`, which are each task's
+own.  The launcher runs as root, so the template's `[verifier] user` is root, with `verifier_user: honor`, on
+verifiers' sandboxes that give root.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `images` | `Mapping[str, str]` | required | The docker_image names a runtime task may give, each with the image its sandboxes run, written as a task's own docker_image is: a .sif or .sqsh file or an absolute path as written, a registry reference without a scheme with docker://. |
+| `template` | `Mapping[str, Any]` | required | The task.toml every runtime task has, but for its [task] name and its artifacts: a mapping, or a TOML file. |
+| `verifier_user` | `Literal['refuse', 'ignore', 'honor']` | `"honor"` | What a runtime task's [verifier].user gets (refuse, ignore or honor), in place of service_kwargs.verifier_user. |
+| `verifier_provider_options` | `Mapping[str, Any]` | `{}` | The provider options of runtime tasks' verifiers' sandboxes, laid over the entry's verifier_provider_options (or provider_options), such as {rootfs_layout: copy, fakeroot: true} for verifiers that run as root on Singularity; the entry's other tasks keep theirs. |
+| `max_bytes` | `int` | `268435456` | The most a runtime task's files may hold, in bytes. |
+| `store` | `str \| None` | `None` | The directory that keeps the runtime tasks, each in <store>/<digest>. None: runtime-tasks in the run's directory (platoon train's, platoon eval's), or outside a run, in the Harbor cache. |
+
+#### `RuntimeTasksConfig.coerce`
+
+```python
+@classmethod
+def coerce(value: RuntimeTasksConfig | Mapping[str, Any]) -> RuntimeTasksConfig
+```
+
+The config `value` gives: itself, or a mapping of its fields whose `template` may name a TOML file.
+
+#### `RuntimeTasksConfig.store_path`
+
+```python
+def store_path() -> Path
+```
+
+The store, as an absolute path: `store`, else `runtime-tasks` in the run's directory (which every process
+of a `platoon train` or `platoon eval` run labels its sandboxes with), else in the Harbor cache.
 
 ## The types these take and return
 

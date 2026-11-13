@@ -115,6 +115,24 @@ def test_separate_verifiers_are_reaped_with_their_own_options_too(monkeypatch):
     ]
 
 
+def test_runtime_tasks_verifiers_are_reaped_with_their_own_options_too(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hpc_sandbox", _hpc_sandbox(fakeroot=True))
+    entry = _harbor("singularity", scratch_root="/scratch", rootfs_layout="fuse-overlay")
+    entry["service_kwargs"]["verifier_provider_options"] = {"scratch_root": "/verifiers"}
+    entry["service_kwargs"]["runtime_tasks"] = {
+        "verifier_provider_options": {"rootfs_layout": "copy", "fakeroot": True}
+    }
+    none = _harbor("enroot")
+    none["service_kwargs"]["runtime_tasks"] = {"images": {}}
+
+    assert reaping.sandbox_providers([entry, none]) == [
+        ("singularity", {"scratch_root": "/scratch", "rootfs_layout": "fuse-overlay"}),
+        ("singularity", {"scratch_root": "/verifiers", "rootfs_layout": "fuse-overlay"}),
+        ("singularity", {"scratch_root": "/verifiers", "rootfs_layout": "copy", "fakeroot": True}),
+        ("enroot", {}),
+    ]
+
+
 def test_verifier_options_that_would_start_no_sandbox_are_not_reaped_with(monkeypatch):
     """With an hpc-sandbox that takes no fakeroot option, no verifier's sandbox can have started with it (a run refuses
     such options when it lists its tasks), and building that provider to reap would fail: the agents' provider reaps

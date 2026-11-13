@@ -1151,10 +1151,16 @@ def render_experimental() -> str:
             "The shares of a run's groups when its trained policies step each on its own clock: what a trainer's "
             "steps take each policy's shares from.",
         ),
+        (
+            "Runtime Harbor tasks",
+            "How a Harbor environment entry takes in task directories written while a run runs, and what "
+            "`materialize` makes of one ([Runtime tasks](../how-to/sandboxes-and-harbor.md#runtime-tasks)).",
+        ),
     )
     names = experimental.__all__
     statistics, admission, leases = names.index("EntryInfo"), names.index("Admission"), names.index("RolloutLease")
     trainers, credit, shares = names.index("Trainer"), names.index("CreditEstimator"), names.index("ShareLedger")
+    runtime = names.index("MaterializedTask")
     groups = (
         names[:statistics],
         names[statistics:admission],
@@ -1162,7 +1168,8 @@ def render_experimental() -> str:
         names[leases:trainers],
         names[trainers:credit],
         names[credit:shares],
-        names[shares:],
+        names[shares:runtime],
+        names[runtime:],
     )
     lines = [
         GENERATED,

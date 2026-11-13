@@ -78,7 +78,8 @@ _HARBOR_SERVICE = "platoon.envs.harbor:HarborEnvironmentService"
 def sandbox_providers(environments: Iterable[Any] | None) -> list[tuple[str, dict[str, Any]]]:
     """The sandbox providers a run's environments start sandboxes with, each once, as ``(provider, options)``: the
     ``provider`` and ``provider_options`` of every Harbor entry's ``service_kwargs``, and with its
-    ``verifier_provider_options`` laid over those, the provider of its separate verifiers' sandboxes, unless those
+    ``verifier_provider_options`` laid over those, the provider of its separate verifiers' sandboxes, and with its
+    ``runtime_tasks.verifier_provider_options`` laid over those in turn, its runtime tasks' verifiers', unless those
     options would start no sandbox here (:func:`platoon.sandbox.rootfs_layout_refusal`, such as ``fakeroot`` on an
     hpc-sandbox that does not take it), so that no verifier's sandbox can have started with them.  An entry that
     names no provider (a record written before platoon recorded the site profile's) has the site profile's, with its
@@ -111,6 +112,12 @@ def sandbox_providers(environments: Iterable[Any] | None) -> list[tuple[str, dic
         if isinstance(verifier, Mapping):  # separate verifiers' sandboxes, with these laid over the entry's options
             laid = {**options, **verifier}
             if rootfs_layout_refusal(provider, laid) is None:  # else a run refuses them, and none started
+                found.append((provider, laid))
+        runtime = kwargs.get("runtime_tasks")
+        extra = runtime.get("verifier_provider_options") if isinstance(runtime, Mapping) else None
+        if isinstance(extra, Mapping) and extra:  # runtime tasks' verifiers, with these laid over the verifiers'
+            laid = {**options, **(verifier if isinstance(verifier, Mapping) else {}), **extra}
+            if rootfs_layout_refusal(provider, laid) is None:
                 found.append((provider, laid))
         for each in found:
             if each not in providers:
